@@ -6,6 +6,7 @@ const s3 = vi.hoisted(() => ({
   getS3ObjectRange: vi.fn(),
   deleteFromS3: vi.fn(),
   copyS3Object: vi.fn(),
+  setS3ObjectContentType: vi.fn(),
 }));
 vi.mock('../../utils/s3', () => s3);
 
@@ -94,6 +95,7 @@ beforeEach(() => {
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   prismaMock.messageAttachment.findFirst.mockResolvedValue(null);
   s3.deleteFromS3.mockResolvedValue(undefined);
+  s3.setS3ObjectContentType.mockResolvedValue(undefined);
 });
 
 describe('verifyAttachmentUploads', () => {
@@ -363,5 +365,65 @@ describe('adoptImageAssetUpload', () => {
 
     await expect(adopt()).resolves.toMatch(ADOPTED);
     expect(console.warn).toHaveBeenCalled();
+  });
+
+  describe('the type the adopted copy is stored with', () => {
+    it('a PNG the upload declared as image/webp is labelled image/png, on the copy, after every check', async () => {
+      const order: string[] = [];
+      serveObject(pngHeader(256, 256)); // stored as image/webp: the type the upload was signed for
+      s3.headS3Object.mockImplementation(async () => { order.push('head'); return { size: 20_000, contentType: 'image/webp' }; });
+      s3.setS3ObjectContentType.mockImplementation(async () => { order.push('type'); });
+
+      const adopted = await adopt();
+      expect(s3.setS3ObjectContentType).toHaveBeenCalledTimes(1);
+      expect(s3.setS3ObjectContentType).toHaveBeenCalledWith(adopted, 'image/png');
+      expect(order).toEqual(['head', 'type']);
+      // The upload is never relabelled: it is gone
+      expect(s3.setS3ObjectContentType).not.toHaveBeenCalledWith(KEY, expect.anything());
+    });
+
+    it.each([
+      ['a lossy WebP', webpLossyHeader(256, 256)],
+      ['a lossless WebP', webpLosslessHeader(256, 256)],
+      ['an extended WebP', webpHeader(256, 256)],
+    ])('%s already stored as image/webp is not copied again', async (_label, header) => {
+      serveObject(header);
+
+      await expect(adopt()).resolves.toMatch(ADOPTED);
+      expect(s3.setS3ObjectContentType).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['no type at all', null, webpHeader(256, 256), 'image/webp'],
+      ['another type', 'application/octet-stream', webpHeader(256, 256), 'image/webp'],
+      ['image/png over WebP bytes', 'image/png', webpHeader(256, 256), 'image/webp'],
+      ['image/png over PNG bytes', 'image/png', pngHeader(256, 256), null],
+    ])('a copy stored with %s is labelled with the type of its bytes', async (_label, stored, header, expected) => {
+      s3.headS3Object.mockResolvedValue({ size: 20_000, contentType: stored });
+      s3.getS3ObjectRange.mockResolvedValue(header);
+
+      const adopted = await adopt();
+      if (expected) expect(s3.setS3ObjectContentType).toHaveBeenCalledWith(adopted, expected);
+      else expect(s3.setS3ObjectContentType).not.toHaveBeenCalled();
+    });
+
+    it('a refused copy is never labelled', async () => {
+      s3.headS3Object.mockResolvedValue({ size: 1000, contentType: 'image/webp' });
+      s3.getS3ObjectRange.mockResolvedValue(jpegHeader());
+
+      await expect(adopt()).rejects.toThrow('Invalid avatar key');
+      expect(s3.setS3ObjectContentType).not.toHaveBeenCalled();
+    });
+
+    it('a label the store does not set is logged, and the copy is still adopted', async () => {
+      serveObject(pngHeader(256, 256));
+      s3.setS3ObjectContentType.mockRejectedValueOnce(new Error('AccessDenied'));
+
+      await expect(adopt()).resolves.toMatch(ADOPTED);
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Could not set the type of the adopted'), 'AccessDenied');
+      // Only the upload is deleted: the checked copy stays
+      expect(s3.deleteFromS3).toHaveBeenCalledTimes(1);
+      expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);
+    });
   });
 });

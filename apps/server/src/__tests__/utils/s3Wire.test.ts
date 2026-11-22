@@ -313,4 +313,23 @@ describe('utils/s3 on the wire — the calls the server makes', () => {
     expect(captured.map((r) => r.method)).toEqual(['HEAD', 'PUT', 'GET', 'DELETE']);
     for (const req of captured) expect(checksumHeaders(req)).toEqual([]);
   });
+
+  it('the in-place type change is one copy onto the same key, replacing the metadata with the type alone', async () => {
+    process.env.S3_SSE = 'AES256'; // bucket-default: never a header on an object write
+    const { setS3ObjectContentType } = await import('../../utils/s3');
+
+    await setS3ObjectContentType('avatars/u1-2-abc.webp', 'image/png');
+
+    expect(captured).toHaveLength(1);
+    const [req] = captured;
+    const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k.toLowerCase(), v]));
+    expect(req.method).toBe('PUT');
+    expect(req.path).toBe('/test-bucket/avatars/u1-2-abc.webp');
+    expect(headers['x-amz-copy-source']).toBe('test-bucket/avatars/u1-2-abc.webp');
+    expect(headers['x-amz-metadata-directive']).toBe('REPLACE');
+    expect(headers['content-type']).toBe('image/png');
+    expect(headerNames(req).filter((h) => h.startsWith('x-amz-meta-') || h.startsWith('x-amz-server-side-encryption'))).toEqual([]);
+    expect(headerNames(req)).not.toContain('cache-control');
+    expect(checksumHeaders(req)).toEqual([]);
+  });
 });
