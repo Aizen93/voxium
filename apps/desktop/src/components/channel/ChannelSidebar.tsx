@@ -6,7 +6,6 @@ import { useConnectionStatus } from '../../hooks/useConnectionStatus';
 import { headerOnlineCount } from '../../utils/peopleGroups';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
-import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
 import { Volume2, Plus, ChevronRight, MicOff, HeadphoneOff, UserPlus, Trash2, FolderPlus, GripVertical, Monitor, Shield, Settings, AudioLines, Lock, Users, LogOut, Copy } from 'lucide-react';
 import { InviteModal } from '../server/InviteModal';
@@ -440,7 +439,6 @@ export function ChannelSidebar() {
   const { t } = useTranslation();
   const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, people, unreadCounts, reorderCategories, reorderChannels, leaveSecureChannel } = useServerStore();
   const { joinChannel, activeChannelId: voiceChannelId, channelUsers } = useVoiceStore();
-  const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showServerSettings, setShowServerSettings] = useState(false);
@@ -588,9 +586,8 @@ export function ChannelSidebar() {
   // ─── Handlers ───────────────────────────────────────────────────────────
 
   const handleSelectTextChannel = (channelId: string) => {
+    // The chat view's channel effect clears and fetches: one owner per transition
     setActiveChannel(channelId);
-    clearMessages();
-    fetchMessages(channelId);
   };
 
   const handleJoinVoice = (channelId: string) => {

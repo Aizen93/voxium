@@ -19,7 +19,7 @@ vi.mock('react-i18next', async (importOriginal) => {
   return { ...actual, useTranslation: () => ({ t: (k: string) => k }) };
 });
 
-const S = vi.hoisted(() => ({ fetchEffectivePermissions: vi.fn() }));
+const S = vi.hoisted(() => ({ fetchEffectivePermissions: vi.fn(), setActiveChannel: vi.fn(), clearMessages: vi.fn(), fetchMessages: vi.fn() }));
 // Every useSortable call, to read the `disabled` flag each row and category is given
 const sortables = vi.hoisted(() => ({ calls: [] as { id: string; disabled?: boolean }[] }));
 vi.mock('@dnd-kit/sortable', async (importOriginal) => {
@@ -49,7 +49,7 @@ vi.mock('../../stores/serverStore', () => {
     channels,
     categories,
     activeChannelId: null,
-    setActiveChannel: noop,
+    setActiveChannel: S.setActiveChannel,
     activeServerId: 'srv1',
     servers: [{ id: 'srv1', name: 'Testers', ownerId }],
     createChannel: noop,
@@ -78,7 +78,7 @@ vi.mock('../../stores/voiceStore', () => {
   return { useVoiceStore };
 });
 vi.mock('../../stores/chatStore', () => {
-  const state = () => ({ clearMessages: noop, fetchMessages: noop });
+  const state = () => ({ clearMessages: S.clearMessages, fetchMessages: S.fetchMessages });
   const useChatStore = <T,>(sel?: (s: ReturnType<typeof state>) => T) => (sel ? sel(state()) : state());
   useChatStore.getState = state;
   return { useChatStore };
@@ -297,5 +297,17 @@ describe('ChannelSidebar — drag and drop, the occupied voice card and the secu
     await render();
     expect(button()).toBeNull();
     expect(document.body.querySelector('[data-testid="secure-channels-section"]')).toBeNull();
+  });
+});
+
+describe('ChannelSidebar — selecting a text channel', () => {
+  it('only selects it: the chat view owns the clear and the fetch', async () => {
+    viewer(Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES);
+    await render();
+    const name = Array.from(document.body.querySelectorAll('button')).find((b) => b.textContent?.includes('general'))!;
+    await act(async () => { name.click(); });
+    expect(S.setActiveChannel).toHaveBeenCalledWith('c-text');
+    expect(S.clearMessages).not.toHaveBeenCalled();
+    expect(S.fetchMessages).not.toHaveBeenCalled();
   });
 });
