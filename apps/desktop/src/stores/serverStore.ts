@@ -183,6 +183,55 @@ const MEMBER_LOOKUP_MAX_FAILURES = 3;
  *  dropped, and when the directory's server is left (switch, removal, logout). */
 let directoryGeneration = 0;
 
+/**
+ * What an unread answer may still change. `unreadRefreshEpoch` is advanced at
+ * logout: an answer asked for before it applies nothing. Every write of a
+ * channel's count (a new message, a read, a space leaving) takes the next number
+ * of ONE counter and records it for that channel; `unreadInitSeq` is the number
+ * of the last whole-map replacement. A request takes its own number when it is
+ * sent, and its answer applies to a channel only when nothing wrote that
+ * channel since: a newer writer always knew better, and an older answer must
+ * never put its count back. An applied answer records its request's number, so
+ * a newer request still applies over an older one's write and an older answer
+ * landing after a newer one is skipped: the newest request wins. One counter
+ * (rather than a version per channel) is enough because requests only ask
+ * "did anything write this channel after I was sent", which the counter's
+ * order answers for every interleaving, overlapping requests included.
+ */
+let unreadRefreshEpoch = 0;
+let unreadSeq = 0;
+let unreadInitSeq = 0;
+const unreadWrittenAt = new Map<string, number>();
+export function resetUnreadRefresh(): void {
+  unreadRefreshEpoch++;
+  unreadSeq = 0;
+  unreadInitSeq = 0;
+  unreadWrittenAt.clear();
+}
+function noteUnreadWrite(channelId: string): void {
+  unreadWrittenAt.set(channelId, ++unreadSeq);
+}
+
+/** A space leaves the strip (kicked, left, deleted): its channels' counts, their space map entries and its total go. */
+function withoutSpaceUnread(
+  state: Pick<ServerState, 'unreadCounts' | 'serverUnreadCounts' | 'unreadChannelServers' | 'channels'>,
+  serverId: string,
+): Pick<ServerState, 'unreadCounts' | 'serverUnreadCounts' | 'unreadChannelServers'> {
+  const unreadCounts = { ...state.unreadCounts };
+  const unreadChannelServers = { ...state.unreadChannelServers };
+  const ids = new Set<string>();
+  for (const [channelId, sid] of Object.entries(state.unreadChannelServers)) if (sid === serverId) ids.add(channelId);
+  for (const ch of state.channels) if (ch.serverId === serverId) ids.add(ch.id);
+  for (const id of ids) {
+    delete unreadCounts[id];
+    delete unreadChannelServers[id];
+    noteUnreadWrite(id);
+  }
+  const serverUnreadCounts = { ...state.serverUnreadCounts };
+  delete serverUnreadCounts[serverId];
+  return { unreadCounts, serverUnreadCounts, unreadChannelServers };
+}
+
 /** Forget the lookup queue and the misses: on a server switch, and at logout.
  *  NOT on a slice refetch — ids queued while the slice was in flight must
  *  still go out, and nothing re-asks for them (useMember only asks once). */
@@ -314,6 +363,8 @@ interface ServerState {
   isLoading: boolean;
   unreadCounts: Record<string, number>;
   serverUnreadCounts: Record<string, number>;
+  /** The space each channel with an unread count belongs to (the channels list holds the active space only). */
+  unreadChannelServers: Record<string, string>;
 
   fetchServers: () => Promise<void>;
   togglePinServer: (serverId: string) => void;
@@ -349,6 +400,14 @@ interface ServerState {
   incrementUnread: (channelId: string, serverId: string) => void;
   clearUnread: (channelId: string) => void;
   initUnreadCounts: (unreads: UnreadCount[]) => void;
+  /**
+   * Asks the server for the unread counts of the spaces holding `channelIds`
+   * (one request per space) and corrects those channels: for a channel that
+   * still shows a count when the answer lands, its count and its space's total
+   * follow the answer (0 when the answer omits it). Channels with no count are
+   * not touched. A failure is logged by message and changes nothing.
+   */
+  refreshChannelUnread: (channelIds: string[]) => Promise<void>;
   markChannelRead: (channelId: string, hintServerId?: string) => void;
   uploadServerIcon: (serverId: string, file: File) => Promise<void>;
   updateServer: (serverId: string, fields: { name?: string }) => Promise<void>;
@@ -474,6 +533,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   isLoading: false,
   unreadCounts: {},
   serverUnreadCounts: {},
+  unreadChannelServers: {},
 
   fetchServers: async () => {
     try {
@@ -585,6 +645,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     set((state) => ({
       servers: state.servers.filter((s) => s.id !== serverId),
       activeServerId: state.activeServerId === serverId ? null : state.activeServerId,
+      ...withoutSpaceUnread(state, serverId),
     }));
   },
 
@@ -865,6 +926,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   incrementUnread: (channelId: string, serverId: string) => {
+    noteUnreadWrite(channelId);
     set((state) => ({
       unreadCounts: {
         ...state.unreadCounts,
@@ -874,35 +936,104 @@ export const useServerStore = create<ServerState>((set, get) => ({
         ...state.serverUnreadCounts,
         [serverId]: (state.serverUnreadCounts[serverId] || 0) + 1,
       },
+      unreadChannelServers: { ...state.unreadChannelServers, [channelId]: serverId },
     }));
   },
 
   clearUnread: (channelId: string) => {
     const count = get().unreadCounts[channelId];
     if (!count) return;
+    noteUnreadWrite(channelId);
     // Find which server this channel belongs to
     const channel = get().channels.find((c) => c.id === channelId);
     set((state) => {
       const restUnread = { ...state.unreadCounts };
       delete restUnread[channelId];
       const newServerUnread = { ...state.serverUnreadCounts };
-      const sid = channel?.serverId || state.activeServerId;
+      const sid = channel?.serverId || state.unreadChannelServers[channelId] || state.activeServerId;
       if (sid && newServerUnread[sid]) {
         newServerUnread[sid] = Math.max(0, newServerUnread[sid] - count);
         if (newServerUnread[sid] === 0) delete newServerUnread[sid];
       }
-      return { unreadCounts: restUnread, serverUnreadCounts: newServerUnread };
+      const restServers = { ...state.unreadChannelServers };
+      delete restServers[channelId];
+      return { unreadCounts: restUnread, serverUnreadCounts: newServerUnread, unreadChannelServers: restServers };
     });
   },
 
   initUnreadCounts: (unreads: UnreadCount[]) => {
     const unreadCounts: Record<string, number> = {};
     const serverUnreadCounts: Record<string, number> = {};
+    const unreadChannelServers: Record<string, string> = {};
     for (const u of unreads) {
       unreadCounts[u.channelId] = u.count;
       serverUnreadCounts[u.serverId] = (serverUnreadCounts[u.serverId] || 0) + u.count;
+      unreadChannelServers[u.channelId] = u.serverId;
     }
-    set({ unreadCounts, serverUnreadCounts });
+    // a whole-map replacement: it is newer than every request sent before it
+    unreadInitSeq = ++unreadSeq;
+    unreadWrittenAt.clear();
+    set({ unreadCounts, serverUnreadCounts, unreadChannelServers });
+  },
+
+  refreshChannelUnread: async (channelIds: string[]) => {
+    const epoch = unreadRefreshEpoch;
+    // the requests below are sent now: only writes after this point can make
+    // their answers older than what the store holds
+    const sentAt = ++unreadSeq;
+    // only a channel that shows a count can be wrong in a way worth a request
+    const bySpace = new Map<string, Set<string>>();
+    for (const id of channelIds) {
+      if (!get().unreadCounts[id]) continue;
+      const sid = get().unreadChannelServers[id] ?? get().channels.find((c) => c.id === id)?.serverId;
+      if (!sid || !OPAQUE_ID_RE.test(sid)) continue;
+      const set_ = bySpace.get(sid) ?? new Set<string>();
+      set_.add(id);
+      bySpace.set(sid, set_);
+    }
+    await Promise.all(Array.from(bySpace, async ([serverId, ids]) => {
+      let answer: UnreadCount[];
+      try {
+        const { data } = await api.get(`/servers/${serverId}/channels/unread`);
+        answer = Array.isArray(data?.data) ? data.data : [];
+      } catch (err) {
+        console.warn('[Server] Unread refresh failed:', err instanceof Error ? err.message : err);
+        return;
+      }
+      // another account's, or the same account's after a sign-out and in
+      if (epoch !== unreadRefreshEpoch) return;
+      const counts = new Map<string, number>();
+      for (const u of answer) {
+        if (u && typeof u.channelId === 'string' && Number.isInteger(u.count) && u.count > 0) counts.set(u.channelId, u.count);
+      }
+      // the connect-time list landed after this request was sent: it is newer
+      if (unreadInitSeq > sentAt) return;
+      set((state) => {
+        const unreadCounts = { ...state.unreadCounts };
+        const serverUnreadCounts = { ...state.serverUnreadCounts };
+        const unreadChannelServers = { ...state.unreadChannelServers };
+        for (const id of ids) {
+          const held = unreadCounts[id];
+          if (!held) continue;
+          // written since the request was sent (a message, a read, another
+          // answer): that writer knew better, the channel is left as it is
+          if ((unreadWrittenAt.get(id) ?? 0) > sentAt) continue;
+          // the newest request wins: an answer applies it at the number it was sent at
+          unreadWrittenAt.set(id, sentAt);
+          const next = counts.get(id) ?? 0;
+          if (next === held) continue;
+          serverUnreadCounts[serverId] = Math.max(0, (serverUnreadCounts[serverId] ?? 0) + next - held);
+          if (serverUnreadCounts[serverId] === 0) delete serverUnreadCounts[serverId];
+          if (next === 0) {
+            delete unreadCounts[id];
+            delete unreadChannelServers[id];
+          } else {
+            unreadCounts[id] = next;
+          }
+        }
+        return { unreadCounts, serverUnreadCounts, unreadChannelServers };
+      });
+    }));
   },
 
   markChannelRead: (channelId: string, hintServerId?: string) => {
@@ -1041,25 +1172,13 @@ export const useServerStore = create<ServerState>((set, get) => ({
       people: state.activeServerId === serverId ? EMPTY_PEOPLE : state.people,
       directory: state.directory.serverId === serverId ? EMPTY_DIRECTORY : state.directory,
       activeChannelId: state.activeServerId === serverId ? null : state.activeChannelId,
+      ...withoutSpaceUnread(state, serverId),
     }));
   },
 
   handleServerDeleted: (serverId: string) => {
     set((state) => {
       const isActive = state.activeServerId === serverId;
-
-      // Clean up server-level unread count
-      const restServerUnread = { ...state.serverUnreadCounts };
-      delete restServerUnread[serverId];
-
-      // Clean up channel-level unread counts if this was the active server
-      let newUnreadCounts = state.unreadCounts;
-      if (isActive && state.channels.length > 0) {
-        newUnreadCounts = { ...state.unreadCounts };
-        for (const ch of state.channels) {
-          delete newUnreadCounts[ch.id];
-        }
-      }
 
       if (isActive) resetMemberLookupState();
       if (state.directory.serverId === serverId) retireDirectory();
@@ -1073,8 +1192,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
         directory: state.directory.serverId === serverId ? EMPTY_DIRECTORY : state.directory,
         roles: isActive ? [] : state.roles,
         activeChannelId: isActive ? null : state.activeChannelId,
-        unreadCounts: newUnreadCounts,
-        serverUnreadCounts: restServerUnread,
+        // the space's channel counts, their map entries and its total, active or not
+        ...withoutSpaceUnread(state, serverId),
       };
     });
   },

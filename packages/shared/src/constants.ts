@@ -636,6 +636,9 @@ export const WS_EVENTS = {
   // a webhook's messages were purged from one channel in one statement.
   WEBHOOK_CHANGED: 'webhook:changed',
   MESSAGE_BULK_DELETED: 'message:bulk_deleted',
+  // A webhook was deleted WITHOUT purge: its rows in one channel now read as a
+  // deleted webhook's (sent to that channel's room, never the space room).
+  WEBHOOK_MESSAGES_DETACHED: 'webhook:messages_detached',
 } as const;
 
 export const THEME_COLOR_KEYS = [

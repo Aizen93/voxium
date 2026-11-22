@@ -1606,7 +1606,7 @@ describe('DELETE /servers/:serverId/webhooks/:webhookId', () => {
     expect(prismaMock.webhook.findUnique).toHaveBeenCalledWith({ where: { id: 'wh-1' }, select: OWN_SELECT });
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     expect(txMock.webhook.delete).toHaveBeenCalledWith({ where: { id: 'wh-1' } });
-    expect(txMock.message.groupBy).not.toHaveBeenCalled();
+    expect(txMock.message.groupBy).not.toHaveBeenCalledWith(expect.objectContaining({ _count: expect.anything() })); // the purge's count
     expect(txMock.message.deleteMany).not.toHaveBeenCalled();
     expect(eventsNamed('message:bulk_deleted')).toHaveLength(0);
     expectChangedOnce();
@@ -1647,7 +1647,7 @@ describe('DELETE /servers/:serverId/webhooks/:webhookId', () => {
     const res = await del('?purge=1');
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ success: false, error: 'Webhook not found' });
-    expect(txMock.message.groupBy).not.toHaveBeenCalled();
+    expect(txMock.message.groupBy).not.toHaveBeenCalledWith(expect.objectContaining({ _count: expect.anything() })); // the purge's count
     expect(txMock.message.deleteMany).not.toHaveBeenCalled();
     expect(txMock.webhook.delete).not.toHaveBeenCalled();
     expect(h.emitted).toHaveLength(0);
@@ -1734,7 +1734,7 @@ describe('DELETE /servers/:serverId/webhooks/:webhookId', () => {
 
   it.each(['?purge=0', '?purge=yes', '?purge=', '?purge=TRUE'])('%s does not purge', async (query) => {
     await del(query);
-    expect(txMock.message.groupBy).not.toHaveBeenCalled();
+    expect(txMock.message.groupBy).not.toHaveBeenCalledWith(expect.objectContaining({ _count: expect.anything() })); // the purge's count
     expect(txMock.message.deleteMany).not.toHaveBeenCalled();
     expect(txMock.webhook.delete).toHaveBeenCalledWith({ where: { id: 'wh-1' } });
     expect(eventsNamed('message:bulk_deleted')).toHaveLength(0);

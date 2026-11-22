@@ -456,7 +456,7 @@ describe('DELETE /admin/webhooks/:webhookId', () => {
     expect(txMock.$queryRaw).toHaveBeenCalledTimes(1);
     expect(txMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(txMock.webhook.delete.mock.invocationCallOrder[0]);
     expect(txMock.webhook.delete).toHaveBeenCalledWith({ where: { id: 'wh-1' } });
-    expect(txMock.message.groupBy).not.toHaveBeenCalled();
+    expect(txMock.message.groupBy).not.toHaveBeenCalledWith(expect.objectContaining({ _count: expect.anything() })); // the purge's count
     expect(txMock.message.deleteMany).not.toHaveBeenCalled();
     expect(eventsNamed('message:bulk_deleted')).toHaveLength(0);
     expectChangedOnce();
@@ -534,7 +534,7 @@ describe('DELETE /admin/webhooks/:webhookId', () => {
 
   it.each(['?purge=0', '?purge=yes', '?purge=', '?purge=TRUE'])('%s does not purge', async (query) => {
     await del(query);
-    expect(txMock.message.groupBy).not.toHaveBeenCalled();
+    expect(txMock.message.groupBy).not.toHaveBeenCalledWith(expect.objectContaining({ _count: expect.anything() })); // the purge's count
     expect(txMock.message.deleteMany).not.toHaveBeenCalled();
     expect(txMock.webhook.delete).toHaveBeenCalledWith({ where: { id: 'wh-1' } });
     expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
@@ -548,7 +548,7 @@ describe('DELETE /admin/webhooks/:webhookId', () => {
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ success: false, error: 'Webhook not found' });
     expect(txMock.webhook.findUnique).not.toHaveBeenCalled();
-    expect(txMock.message.groupBy).not.toHaveBeenCalled();
+    expect(txMock.message.groupBy).not.toHaveBeenCalledWith(expect.objectContaining({ _count: expect.anything() })); // the purge's count
     expect(txMock.message.deleteMany).not.toHaveBeenCalled();
     expect(txMock.webhook.delete).not.toHaveBeenCalled();
     expect(mockLogAuditEvent).not.toHaveBeenCalled();

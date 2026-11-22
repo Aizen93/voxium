@@ -1,4 +1,4 @@
-import { useServerStore, resetMemberLookupState, retireDirectory } from './serverStore';
+import { useServerStore, resetMemberLookupState, retireDirectory, resetUnreadRefresh } from './serverStore';
 import { useChatStore, resetChatViewState } from './chatStore';
 import { useDMStore } from './dmStore';
 import { useFriendStore } from './friendStore';
@@ -16,6 +16,7 @@ import { resetClearedHistory } from '../services/dmClearedHistory';
 import { stopE2EDeviceListWatch } from './e2eStore';
 import { resetServerPermissionsCache } from '../hooks/useServerPermissions';
 import { resetMediaCache } from '../services/mediaBlobCache';
+import { resetWebhookSocketState } from '../services/webhookSocketHandlers';
 
 /**
  * Account-scoped stores that MUST be wiped on logout. Without this, the next
@@ -99,6 +100,10 @@ export function resetAccountStores(): void {
   // its page in flight (aborted): no page, and no row a handler gated for its
   // view, lands after this
   resetChatViewState();
+  // An unread answer still on its way, the channels waiting for one, and the
+  // webhooks it remembers as purged
+  resetUnreadRefresh();
+  resetWebhookSocketState();
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).
