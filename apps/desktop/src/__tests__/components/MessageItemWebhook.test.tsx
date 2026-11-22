@@ -337,3 +337,28 @@ describe('MessageItem — a webhook claim on a row no webhook can post', () => {
     expect(q('[data-testid="webhook-author-name"]')).toBeNull();
   });
 });
+
+describe('MessageItem — a member author\'s name colour', () => {
+  const coloured = (id: string, position: number, color: string) =>
+    ({ id, serverId: 's1', name: id, color, position, permissions: '0', isDefault: false, createdAt: '2026-01-01T00:00:00.000Z' });
+  const HELD = [coloured('r-low', 1, 'rgb(0, 128, 0)'), coloured('r-a', 4, 'rgb(255, 0, 0)'), coloured('r-b', 4, 'rgb(0, 0, 255)')];
+  const nameColour = () => ([...container.querySelectorAll('span.font-semibold')]
+    .find((el) => el.textContent === 'Alice') as HTMLElement).style.color;
+
+  it('the highest of their roles; two at the top position: the higher id, whatever order the member row holds them in', () => {
+    try {
+      for (const held of [HELD, [...HELD].reverse()]) {
+        const member = { userId: 'u-alice', serverId: 's1', role: 'member', nickname: null, roles: held };
+        useMemberMock.mockImplementation(((userId: string | undefined) => (userId === 'u-alice' ? member : undefined)) as never);
+        render(webhookMessage({ author: human, webhookId: null }));
+        expect(nameColour()).toBe('rgb(0, 0, 255)');
+        act(() => root.unmount());
+        container.remove();
+      }
+    } finally {
+      useMemberMock.mockImplementation(() => undefined);
+    }
+    // afterEach unmounts once more
+    render(webhookMessage());
+  });
+});

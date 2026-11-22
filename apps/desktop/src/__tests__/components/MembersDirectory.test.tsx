@@ -290,3 +290,27 @@ describe('MembersDirectory — actions follow the real permissions, not the lega
   });
 });
 
+
+describe('MembersDirectory — the order of roles', () => {
+  const roleOf = (id: string, position: number): Role =>
+    ({ id, serverId: 'srv-1', name: id, color: null, position, permissions: '0', isDefault: false, createdAt: '2026-01-01T00:00:00.000Z' });
+  const ROLES = [roleOf('r-low', 1), roleOf('r-a', 3), roleOf('r-b', 3)];
+
+  it('the role filter: highest first; two roles that share a position by id, whatever order the store holds them in', async () => {
+    for (const held of [ROLES, [...ROLES].reverse()]) {
+      roles = held;
+      await render();
+      const select = q('[data-testid="members-role-filter"]') as HTMLSelectElement;
+      expect(Array.from(select.options).map((o) => o.value)).toEqual(['', 'owner', 'admin', 'r-b', 'r-a', 'r-low', 'none']);
+    }
+  });
+
+  it('a member\'s role pills: highest first; two roles that share a position by id, whatever order the row holds them in', async () => {
+    for (const held of [ROLES, [...ROLES].reverse()]) {
+      directory = listed([{ ...row('bob'), roles: held }]);
+      await render();
+      const pills = Array.from(qa('[data-testid="member-row"]')[0].querySelectorAll('span.rounded-full')).map((el) => el.textContent);
+      expect(pills).toEqual(['r-b', 'r-a', 'r-low']);
+    }
+  });
+});

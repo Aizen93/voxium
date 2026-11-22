@@ -19,6 +19,7 @@ import {
   mayEditRole,
   mayCreateRole,
 } from '../../hooks/useViewerPermissions';
+import { compareRoles } from '../../utils/roleOrder';
 
 interface RoleEditorProps {
   serverId: string;
@@ -35,11 +36,12 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
-  // Sort roles: highest position first, @everyone always at bottom
+  // Sort roles: highest first (roles sharing a position in one fixed order,
+  // compareRoles), @everyone always at bottom
   const sortedRoles = useMemo(() => {
     const nonDefault = roles
       .filter((r) => !r.isDefault)
-      .sort((a, b) => b.position - a.position);
+      .sort((a, b) => compareRoles(b, a));
     const defaultRole = roles.find((r) => r.isDefault);
     return defaultRole ? [...nonDefault, defaultRole] : nonDefault;
   }, [roles]);

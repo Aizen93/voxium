@@ -11,6 +11,7 @@ import {
 } from '@voxium/shared';
 import type { ChannelPermissionOverride, PermissionInfo } from '@voxium/shared';
 import { getTranslatedError } from '../../utils/serverErrors';
+import { compareRoles } from '../../utils/roleOrder';
 import {
   useViewerPermissions,
   useViewerRolePosition,
@@ -130,7 +131,7 @@ export function ChannelPermissionsEditor({
     new Set(relevantCategories.map((c) => c.key)),
   );
 
-  const sortedRoles = [...roles].sort((a, b) => a.position - b.position);
+  const sortedRoles = [...roles].sort(compareRoles);
 
   // Initialize selected role to the first role (usually @everyone)
   useEffect(() => {

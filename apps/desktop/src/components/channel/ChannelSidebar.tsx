@@ -42,6 +42,7 @@ import { Permissions } from '@voxium/shared';
 import { canOpenServerSettings } from '../../utils/serverSettingsAccess';
 import { useServerPermissions } from '../../hooks/useServerPermissions';
 import { hasEffective } from '../../utils/memberActions';
+import { topRole } from '../../utils/roleOrder';
 import type { Channel, Category } from '@voxium/shared';
 import { isSecureVoiceSupported } from '../../services/e2e/voiceFrameTransform';
 import { loadCollapsed, saveCollapsed } from '../../utils/collapsedCategories';
@@ -252,9 +253,7 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
       {voiceUsers.map((vu) => {
         const member = members.find((m) => m.userId === vu.id);
         const name = member?.nickname || vu.displayName;
-        const roleColor = member?.roles?.length
-          ? [...member.roles].sort((a, b) => b.position - a.position)[0]?.color
-          : null;
+        const roleColor = member?.roles?.length ? topRole(member.roles)?.color : null;
 
         return (
           <UserHoverTarget key={vu.id} userId={vu.id}>

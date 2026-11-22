@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ReactNode } from 'react';
-import type { Channel, ServerMember, VoiceUser } from '@voxium/shared';
+import type { Channel, Role, ServerMember, VoiceUser } from '@voxium/shared';
 import type { PeopleState } from '../../stores/serverStore';
 
 /**
@@ -22,11 +22,12 @@ vi.mock('react-i18next', async (importOriginal) => {
 
 const S = vi.hoisted(() => ({ ensureMembers: vi.fn() }));
 let members: ServerMember[] = [];
+let roles: Role[] = [];
 let channels: Channel[] = [];
 let people: PeopleState = { full: true, truncated: false, onlineCount: 0, memberCount: 0, loaded: true };
 let channelUsers = new Map<string, VoiceUser[]>();
 vi.mock('../../stores/serverStore', () => {
-  const state = () => ({ members, roles: [], channels, people, activeServerId: 'srv-1', ...S });
+  const state = () => ({ members, roles, channels, people, activeServerId: 'srv-1', ...S });
   const useServerStore = <T,>(sel?: (s: ReturnType<typeof state>) => T) => (sel ? sel(state()) : state());
   useServerStore.getState = state;
   return { useServerStore };
@@ -79,6 +80,7 @@ beforeEach(() => {
   connection = 'connected';
   members = [row('me', 'online', 'owner'), row('bob', 'online'), row('carol', 'idle'), row('dave', 'offline')];
   channels = [];
+  roles = [];
   channelUsers = new Map();
   people = { full: true, truncated: false, onlineCount: 3, memberCount: 4, loaded: true };
   container = document.createElement('div');
@@ -88,6 +90,23 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+});
+
+describe('MemberSidebar — the colour of a name', () => {
+  const role = (id: string, position: number, color: string): Role =>
+    ({ id, serverId: 'srv-1', name: id, color, position, permissions: '0', isDefault: false, createdAt: '2026-01-01T00:00:00.000Z' });
+  const colourOf = (name: string) => (Array.from(container.querySelectorAll('button span.truncate'))
+    .find((el) => el.textContent === name) as HTMLElement).style.color;
+
+  it('the highest of the roles a member holds; two at the top position: the higher id, whatever the order of the member row', async () => {
+    roles = [role('r-low', 1, 'rgb(0, 128, 0)'), role('r-a', 4, 'rgb(255, 0, 0)'), role('r-b', 4, 'rgb(0, 0, 255)')];
+    const held = [roles[0], roles[1], roles[2]];
+    for (const order of [held, [...held].reverse()]) {
+      members = [row('me', 'online', 'owner'), { ...row('bob', 'online'), roles: order }];
+      await render();
+      expect(colourOf('BOB')).toBe('rgb(0, 0, 255)');
+    }
+  });
 });
 
 describe('MemberSidebar — a small server (everyone loaded)', () => {

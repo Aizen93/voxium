@@ -77,6 +77,21 @@ function categoryPanel(label: string): HTMLElement {
 const rowLabels = (panel: HTMLElement) =>
   [...panel.querySelectorAll('label span')].map((s) => s.textContent);
 
+describe('RoleEditor — the order of the list', () => {
+  it('highest first, @everyone last, roles that share a position in one order whatever the order of the space\'s list', () => {
+    const at = (id: string, position: number): Role => ({ ...roles[0], id, name: id, position });
+    const list = [at('tie-a', 3), at('top', 8), roles[1], at('tie-b', 3), at('low', 1)];
+    for (const given of [list, [...list].reverse()]) {
+      render(given);
+      expect([...container.querySelectorAll('button span.truncate')].map((s) => s.textContent))
+        .toEqual(['top', 'tie-b', 'tie-a', 'low', '@everyone']);
+      act(() => root.unmount());
+      container.remove();
+    }
+    render();
+  });
+});
+
 describe('RoleEditor — MANAGE_WEBHOOKS', () => {
   it('renders a row for MANAGE_WEBHOOKS under the general category, exactly once', () => {
     render();

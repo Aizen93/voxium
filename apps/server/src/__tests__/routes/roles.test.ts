@@ -170,6 +170,14 @@ describe('Role Routes', () => {
       expect(res.body.data[1].name).toBe('Moderator');
     });
 
+    it('orders the roles by position, then id: roles that share a position come in one order', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user1', serverId: 'srv1' });
+      prismaMock.role.findMany.mockResolvedValue([]);
+
+      expect((await request(app).get('/api/v1/servers/srv1/roles')).status).toBe(200);
+      expect(prismaMock.role.findMany).toHaveBeenCalledWith({ where: { serverId: 'srv1' }, orderBy: [{ position: 'asc' }, { id: 'asc' }] });
+    });
+
     it('returns 404 for non-member', async () => {
       prismaMock.serverMember.findUnique.mockResolvedValue(null);
 
@@ -861,6 +869,12 @@ describe('Role Routes', () => {
         WS_EVENTS.ROLE_REORDERED,
         expect.objectContaining({ serverId: 'srv1' }),
       );
+      // the positions announced are read back by position, then id
+      expect(prismaMock.role.findMany).toHaveBeenLastCalledWith({
+        where: { serverId: 'srv1' },
+        orderBy: [{ position: 'asc' }, { id: 'asc' }],
+        select: { id: true, position: true },
+      });
     });
 
     it('returns 400 when order is not an array', async () => {

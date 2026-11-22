@@ -126,9 +126,10 @@ roleRouter.get('/', async (req: Request<{ serverId: string }>, res: Response, ne
     });
     if (!membership) throw new NotFoundError('Server');
 
+    // id breaks position ties: roles that share a position come in one order
     const roles = await prisma.role.findMany({
       where: { serverId },
-      orderBy: { position: 'asc' },
+      orderBy: [{ position: 'asc' }, { id: 'asc' }],
     });
 
     res.json({ success: true, data: roles });
@@ -216,7 +217,7 @@ roleRouter.put('/reorder', rateLimitRoleManage, async (req: Request<{ serverId: 
 
     const updated = await prisma.role.findMany({
       where: { serverId },
-      orderBy: { position: 'asc' },
+      orderBy: [{ position: 'asc' }, { id: 'asc' }],
       select: { id: true, position: true },
     });
 

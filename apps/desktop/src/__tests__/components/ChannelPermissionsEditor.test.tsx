@@ -99,6 +99,26 @@ describe('ChannelPermissionsEditor — what a channel override may carry', () =>
   });
 });
 
+describe('ChannelPermissionsEditor — the role list', () => {
+  const role = (id: string, position: number) => ({
+    id, serverId: 's1', name: id, color: null, position, permissions: '0', isDefault: false, createdAt: '2026-01-01T00:00:00.000Z',
+  });
+  const listed = () => [...container.querySelectorAll('button span.truncate')].map((el) => el.textContent);
+
+  it('lowest first; two roles that share a position by id, whatever order the store holds them in', async () => {
+    const roles = [role('r-top', 4), role('r-b', 3), role('r-a', 3)];
+    for (const held of [roles, [...roles].reverse()]) {
+      serverState.roles = [...ONLY_EVERYONE, ...held];
+      await render('text');
+      expect(listed()).toEqual(['@everyone', 'r-a', 'r-b', 'r-top']);
+      act(() => root.unmount());
+      container.remove();
+    }
+    // afterEach unmounts once more
+    await render('text');
+  });
+});
+
 /**
  * A save never carries a bit this build does not know, and never removes one
  * (#75): the editor holds the bits it knows, and a save is always the PUT

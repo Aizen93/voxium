@@ -23,6 +23,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useMember } from '../../hooks/useMember';
 import { getTranslatedActionError } from '../../utils/serverErrors';
+import { topRole } from '../../utils/roleOrder';
 import { isDeletedParticipantId } from '@voxium/shared';
 import { isDeletedMessageRow, isDeletedQuote } from '../../services/e2e/displayGate';
 import { DeletedMessageRow, DeletedUserAvatar } from '../dm/DeletedParticipant';
@@ -199,7 +200,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
   const authorDisplayName = authorMember?.nickname || message.author.displayName;
   const authorRoleColor = useMemo(
     () => authorMember?.roles?.length
-      ? [...authorMember.roles].sort((a, b) => b.position - a.position)[0]?.color ?? null
+      ? topRole(authorMember.roles)?.color ?? null
       : null,
     [authorMember],
   );
