@@ -1,14 +1,47 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Shield, ShieldCheck, ArrowLeft } from 'lucide-react';
+import { SESSION_ENDED_REASON, SIGNED_OUT_ELSEWHERE_REASON } from '@voxium/shared';
 import { useAuthStore } from '../stores/authStore';
 
+// The reasons the server sends with force:logout, compared exactly. Each
+// selects a sentence written here; the address's own text is never rendered.
+const SIGN_OUT_REASONS: ReadonlyMap<string, string> = new Map([
+  [SESSION_ENDED_REASON, 'Your session has ended. Please sign in again.'],
+  [SIGNED_OUT_ELSEWHERE_REASON, 'You were signed out from another device. Please sign in again.'],
+  ['Your account has been banned', 'Your account has been banned.'],
+  ['Your account has been deleted', 'Your account has been deleted.'],
+]);
+
+function readSignOutReason(): string | null {
+  try {
+    const reason = new URLSearchParams(window.location.search).get('reason');
+    return reason === null ? null : SIGN_OUT_REASONS.get(reason) ?? null;
+  } catch (err) {
+    console.warn('[Auth] Could not read the sign-out reason:', err instanceof Error ? err.message : 'unknown error');
+    return null;
+  }
+}
+
 export function AdminLoginPage() {
-  const { login, verifyTOTP, cancelTOTP, totpRequired, isSubmitting, error, clearError } = useAuthStore();
+  const {
+    login, verifyTOTP, cancelTOTP, totpRequired, isSubmitting, error, clearError,
+    restoreUnavailable, isRestoring, checkAuth,
+  } = useAuthStore();
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
+  const [reasonLine] = useState(readSignOutReason);
+
+  // Read once: a reload must not show it again
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has('reason')) return;
+    params.delete('reason');
+    const query = params.toString();
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`);
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -92,7 +125,28 @@ export function AdminLoginPage() {
               <p className="text-sm text-vox-text-muted">Admin access only</p>
             </div>
 
+            {restoreUnavailable && (
+              // The stored session was kept: signing in again is not needed
+              // once the server answers, and the form stays usable meanwhile
+              <div role="status" className="mb-4 rounded-md bg-vox-bg-tertiary border border-vox-border px-3 py-2 text-sm text-vox-text-secondary">
+                <p>Your session could not be restored because the server did not answer as expected. It is still kept on this device.</p>
+                <button
+                  type="button"
+                  onClick={() => { void checkAuth(); }}
+                  disabled={isRestoring}
+                  className="btn-secondary mt-2 w-full"
+                >
+                  {isRestoring ? 'Trying again...' : 'Try again'}
+                </button>
+              </div>
+            )}
+
             <form onSubmit={handleSubmit} className="space-y-4">
+              {reasonLine && (
+                <div role="status" className="rounded-md bg-vox-bg-tertiary border border-vox-border px-3 py-2 text-sm text-vox-text-secondary">
+                  {reasonLine}
+                </div>
+              )}
               {error && (
                 <div className="rounded-md bg-vox-accent-danger/10 border border-vox-accent-danger/30 px-3 py-2 text-sm text-vox-accent-danger">
                   {error}

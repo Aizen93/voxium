@@ -28,6 +28,35 @@ export function getRefreshToken(): string | null {
 }
 
 /**
+ * The stored refresh token and where it was read: a renewal stores its answer
+ * in the same place, decided when it READS the pair, never from what the
+ * storage holds when the answer lands (another tab may have emptied it).
+ */
+export function getStoredRefreshToken(): { token: string; remembered: boolean } | null {
+  const local = localStorage.getItem(REFRESH_KEY);
+  if (local !== null) return { token: local, remembered: true };
+  const session = sessionStorage.getItem(REFRESH_KEY);
+  return session === null ? null : { token: session, remembered: false };
+}
+
+/**
+ * Call `listener` when another tab of this origin changes the stored session.
+ * The browser fires `storage` in every OTHER tab, never in the one that wrote;
+ * a pair arrives as two events (one per key), and a `clear()` names no key, so
+ * the listener reads the storage again rather than the event's values.
+ * Returns the function that removes the listener.
+ */
+export function onStoredSessionChange(listener: () => void): () => void {
+  const handler = (event: StorageEvent) => {
+    if (event.storageArea !== localStorage) return;
+    if (event.key !== null && event.key !== ACCESS_KEY && event.key !== REFRESH_KEY) return;
+    listener();
+  };
+  window.addEventListener('storage', handler);
+  return () => window.removeEventListener('storage', handler);
+}
+
+/**
  * Store tokens in the appropriate storage.
  * - rememberMe=true  → localStorage (survives app restart)
  * - rememberMe=false → sessionStorage (cleared when window closes)

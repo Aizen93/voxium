@@ -1,82 +1,91 @@
-import axios from 'axios';
-import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './tokenStorage';
+import axios, { type InternalAxiosRequestConfig } from 'axios';
+import { getAccessToken } from './tokenStorage';
+import {
+  API_BASE, AccountChangedError, SessionLostError, bearerOf, currentSessionEpoch, isTabSignedIn, mayCarry,
+  refreshAccessToken, reloadOntoStoredSession,
+} from './session';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    /**
+     * A request that must neither carry the stored bearer nor ever renew or
+     * retry on a 401 (sign-in and the two-factor step: a 401 there is the
+     * route's own answer).
+     */
+    skipAuth?: boolean;
+    /**
+     * The session restore's own request: it renews on a 401 although the tab
+     * is not signed in yet (the restore compares the answer with the stored
+     * session before it uses it).
+     */
+    sessionRestore?: boolean;
+    /** @internal the session epoch the request was first sent in */
+    _sessionEpoch?: number;
+    /** @internal the request is the one retry after a 401 */
+    _retry?: boolean;
+  }
+}
 
 export const api = axios.create({
   baseURL: API_BASE,
   withCredentials: true,
 });
 
-// Attach auth token to every request
+// Attach the stored access token, or the token the 401 path chose for the one
+// retry. A tab that is not signed in sends only the restore's own request
+// (its session ended: a view still mounted until the page goes must not send
+// whatever another tab stored since). A token of another account than the one
+// this tab is signed in as (another tab signed in as someone else, this tab
+// not reloaded yet) is never sent: the request is rejected unsent and the page
+// reloads onto the stored session. A request keeps the session epoch it was
+// first sent in, so its 401 is never retried in a later session of this tab
+// (below).
 api.interceptors.request.use((config) => {
-  const token = getAccessToken();
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+  if (config.skipAuth) return config;
+  if (!isTabSignedIn() && !config.sessionRestore) throw new SessionLostError('This tab is not signed in');
+  config._sessionEpoch ??= currentSessionEpoch();
+  const token = config._retry ? bearerOf(config.headers.Authorization) : getAccessToken();
+  if (token === null) return config;
+  if (!mayCarry(token)) {
+    reloadOntoStoredSession();
+    throw new AccountChangedError();
   }
+  config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
 
-// Handle token refresh on 401
-let isRefreshing = false;
-let refreshSubscribers: Array<{ resolve: (token: string) => void; reject: (err: unknown) => void }> = [];
-
-function onTokenRefreshed(token: string) {
-  refreshSubscribers.forEach((sub) => sub.resolve(token));
-  refreshSubscribers = [];
-}
-
-function onRefreshFailed(err: unknown) {
-  refreshSubscribers.forEach((sub) => sub.reject(err));
-  refreshSubscribers = [];
-}
-
+// A 401 renews the access token (one shared request, services/session.ts)
+// and retries that request ONCE, only while the session the request was sent
+// in is still this tab's and the tab is signed in (or the request is the
+// restore's own). A request that carried no bearer goes the same way: with
+// nothing stored (another tab signed out under a page that still shows the
+// dashboard) the renewal finds no refresh token and ends the session here,
+// instead of every later request answering 401. Only a refused refresh ends
+// the session; a transport failure of the refresh fails this request and
+// keeps the tokens.
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
-    const originalRequest = error.config;
+    const originalRequest: InternalAxiosRequestConfig | undefined = error?.config;
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      originalRequest._retry = true;
-
-      // If already refreshing, queue this request until the new token arrives
-      if (isRefreshing) {
-        return new Promise((resolve, reject) => {
-          refreshSubscribers.push({
-            resolve: (newToken: string) => {
-              originalRequest.headers.Authorization = `Bearer ${newToken}`;
-              resolve(api(originalRequest));
-            },
-            reject,
-          });
-        });
-      }
-
-      const refreshToken = getRefreshToken();
-      if (refreshToken) {
-        isRefreshing = true;
-        try {
-          const { data } = await axios.post(`${API_BASE}/auth/refresh`, { refreshToken });
-          const { accessToken, refreshToken: newRefreshToken } = data.data;
-
-          setTokens(accessToken, newRefreshToken);
-
-          // Resolve all queued requests with the new token
-          onTokenRefreshed(accessToken);
-
-          originalRequest.headers.Authorization = `Bearer ${accessToken}`;
-          return api(originalRequest);
-        } catch (refreshErr) {
-          onRefreshFailed(refreshErr);
-          clearTokens();
-          window.location.href = '/login';
-          return Promise.reject(refreshErr);
-        } finally {
-          isRefreshing = false;
-        }
-      }
+    if (error?.response?.status !== 401 || !originalRequest || originalRequest._retry || originalRequest.skipAuth) {
+      return Promise.reject(error);
     }
+    // Sent in a session that has ended since (a sign-out, a sign-in, a
+    // refusal), or answered while the tab is signed out (a request still out
+    // from a view that unmounted): its 401 is its caller's. Nothing renews,
+    // retries, navigates or changes the storage for it.
+    if (originalRequest._sessionEpoch !== currentSessionEpoch()) return Promise.reject(error);
+    if (!isTabSignedIn() && !originalRequest.sessionRestore) return Promise.reject(error);
+    originalRequest._retry = true;
 
-    return Promise.reject(error);
+    // Another request (or another tab) stored a token since this one was sent:
+    // use it. The request interceptor checks its account before the retry.
+    const sentToken = bearerOf(originalRequest.headers?.Authorization);
+    const current = getAccessToken();
+    const token = current !== null && current !== sentToken ? current : await refreshAccessToken();
+
+    originalRequest.headers.Authorization = `Bearer ${token}`;
+    return api(originalRequest);
   }
 );
