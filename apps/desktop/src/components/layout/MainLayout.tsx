@@ -559,18 +559,10 @@ export function MainLayout() {
         if (voiceState.dmCallPeerDevice && from !== voiceState.dmCallPeerDevice.userId) return;
         voiceState.handleDMSignal(from, signal);
       },
-      dmVoiceEnded: ({ conversationId }: { conversationId: string }) => {
-        const voiceState = useVoiceStore.getState();
-        if (voiceState.dmCallConversationId === conversationId) {
-          // Full teardown without emitting dm:voice:leave back (the call was
-          // already ended server-side). Must go through the store action: an
-          // inline cleanup here once left the E2E device pin, signal chains,
-          // and callCrypto session state stale for the next call.
-          voiceState.handleDMCallEnded();
-        }
-        if (voiceState.incomingCall?.conversationId === conversationId) {
-          voiceState.setIncomingCall(null);
-        }
+      // The store decides: an answer to a re-join (`rejoin`) is acted on only
+      // by the re-join that asked, which only the store can tell
+      dmVoiceEnded: (data: { conversationId: string; rejoin?: boolean }) => {
+        useVoiceStore.getState().handleDMVoiceEnded(data);
       },
       // A removal of this account's, on any of its devices: the floor it
       // carries (`clearedUntil`) purges this device's cache too

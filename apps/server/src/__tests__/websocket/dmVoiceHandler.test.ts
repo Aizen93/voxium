@@ -760,6 +760,173 @@ describe('dmVoiceHandler — reconnect ownership (CRIT-1)', () => {
   });
 });
 
+// ─── A re-join after a socket reconnect (`rejoin: true`) ─────────────────────
+// It resumes the caller's own place in the call and never starts one: a
+// caller with no place left is told the call ended, to that socket alone.
+
+describe('dmVoiceHandler — dm:voice:join with rejoin', () => {
+  let socket: ReturnType<typeof createMockSocket>['socket'];
+  let handlers: ReturnType<typeof createMockSocket>['handlers'];
+  let io: ReturnType<typeof createMockIO>;
+  const REJOIN = { selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111', rejoin: true };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+    const created = createMockSocket('user-1', 'socket-NEW');
+    socket = created.socket;
+    handlers = created.handlers;
+    io = createMockIO();
+    handleDMVoiceEvents(io as any, socket as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(mockConversation as any);
+  });
+
+  afterEach(() => {
+    vi.mocked(prisma.conversation.findUnique).mockReset();
+  });
+
+  /** Nothing was started, rung, written, left or joined. */
+  function expectNothingStarted() {
+    expect(socket.join).not.toHaveBeenCalled();
+    expect(mockRedis.multi).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalled();
+    expect(mockWriteConversationMessage).not.toHaveBeenCalled();
+    expect(leaveCurrentVoiceChannel).not.toHaveBeenCalled();
+    expect(mockRedis.eval).not.toHaveBeenCalled();
+  }
+
+  /** Neither force-leave ran: the space voice one, nor the DM call one
+   *  (leaveCurrentDMVoiceChannel), which would read the caller's call a
+   *  second time, then that call's users, then remove the caller. */
+  function expectNoForceLeave() {
+    expect(leaveCurrentVoiceChannel).not.toHaveBeenCalled();
+    expect(mockRedis.get).toHaveBeenCalledTimes(1);
+    expect(mockRedis.hGetAll).not.toHaveBeenCalled();
+  }
+
+  /** The answer to a re-join with no place left: marked, to this socket alone. */
+  const REJOIN_ENDED = ['dm:voice:ended', { conversationId: 'conv-1', rejoin: true }];
+
+  it('the call ended while the socket was away (no call of the caller\'s): answered ended to this socket, no new call rings', async () => {
+    vi.useFakeTimers();
+    try {
+      mockRedis.get.mockResolvedValueOnce(null); // getUserDMCall: no call
+
+      await handlers.get('dm:voice:join')!('conv-1', REJOIN);
+
+      expect(socket.emit.mock.calls).toEqual([REJOIN_ENDED]);
+      expectNothingStarted();
+      expectNoForceLeave();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('the caller is in a call of ANOTHER conversation: that call is left alone, this re-join is answered ended', async () => {
+    mockRedis.get.mockResolvedValueOnce('conv-2');
+
+    await handlers.get('dm:voice:join')!('conv-1', REJOIN);
+
+    expect(socket.emit.mock.calls).toEqual([REJOIN_ENDED]);
+    expectNothingStarted();
+    // leaveCurrentDMVoiceChannel never ran: it would read that call's users
+    expectNoForceLeave();
+  });
+
+  it('the call is still there: the socket is rebound in place, as a join into the same call is', async () => {
+    mockRedis.get.mockResolvedValueOnce('conv-1');
+    mockRedis.eval.mockResolvedValueOnce(1); // rebound
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-NEW', selfMute: false, selfDeaf: false, deviceId: 'device-aaaa1111' }),
+      'user-2': JSON.stringify({ socketId: 'socket-2', selfMute: false, selfDeaf: false }),
+    });
+    vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser, mockUser2] as any);
+
+    await handlers.get('dm:voice:join')!('conv-1', REJOIN);
+
+    // Space voice is left once the rebind took effect, not before
+    expect(leaveCurrentVoiceChannel).toHaveBeenCalledTimes(1);
+    expect(leaveCurrentVoiceChannel).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'user-1', { force: true });
+    expect(vi.mocked(leaveCurrentVoiceChannel).mock.invocationCallOrder[0]).toBeGreaterThan(mockRedis.eval.mock.invocationCallOrder[0]);
+    expect(socket.join).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(socket.emit).toHaveBeenCalledWith('dm:voice:joined', expect.objectContaining({ conversationId: 'conv-1' }));
+    expect(socket.emit).not.toHaveBeenCalledWith('dm:voice:ended', expect.anything());
+    expect(io._emit).not.toHaveBeenCalled();
+    // The caller's own call was read once
+    expect(mockRedis.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('the call ends between the look and the rebind: answered ended, no fresh join falls through', async () => {
+    mockRedis.get.mockResolvedValueOnce('conv-1');
+    mockRedis.eval.mockResolvedValueOnce(0); // the rebind finds the caller gone
+
+    await handlers.get('dm:voice:join')!('conv-1', REJOIN);
+
+    expect(socket.emit.mock.calls).toEqual([REJOIN_ENDED]);
+    // A stale re-join pushes no device of the account out of a voice channel:
+    // nothing was left before the rebind, and nothing after it failed
+    expectNoForceLeave();
+    expect(mockRedis.eval).toHaveBeenCalledTimes(1); // the rebind alone
+    expect(socket.join).not.toHaveBeenCalled();
+    expect(mockRedis.multi).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalled();
+    expect(mockWriteConversationMessage).not.toHaveBeenCalled();
+  });
+
+  it('a failed read of the caller\'s call is not an end: answered the service error, nothing ended or started', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockRedis.get.mockRejectedValueOnce(new Error('connection lost'));
+
+    await handlers.get('dm:voice:join')!('conv-1', REJOIN);
+
+    expect(socket.emit.mock.calls).toEqual([['voice:error', { message: 'Voice service temporarily unavailable.' }]]);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('[DMVoice]'), 'connection lost');
+    expectNothingStarted();
+    error.mockRestore();
+  });
+
+  it('a read-only conversation is refused first, as for any join', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ user1Id: 'user-1', user2Id: null } as any);
+
+    await handlers.get('dm:voice:join')!('conv-1', REJOIN);
+
+    expect(socket.emit.mock.calls).toEqual([['voice:error', { message: 'This conversation is read-only' }]]);
+    expect(mockRedis.get).not.toHaveBeenCalled();
+  });
+
+  it('no flag (an older client), or a flag that is not the boolean true: the join is a fresh one as it always was', async () => {
+    vi.useFakeTimers(); // the fresh join arms its ring timer
+    try {
+      for (const state of [
+        { selfMute: false, selfDeaf: false },
+        { selfMute: false, selfDeaf: false, rejoin: 'true' },
+        { selfMute: false, selfDeaf: false, rejoin: 1 },
+      ]) {
+        vi.clearAllMocks();
+        resetRedis();
+        vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+        vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+        mockRedis.get.mockResolvedValueOnce(null); // no call of the caller's
+        mockRedis.hGetAll.mockResolvedValueOnce({});
+        mockRedis.hGetAll.mockResolvedValueOnce({
+          'user-1': JSON.stringify({ socketId: 'socket-NEW', selfMute: false, selfDeaf: false }),
+        });
+
+        await handlers.get('dm:voice:join')!('conv-1', state);
+
+        expect(socket.emit).not.toHaveBeenCalledWith('dm:voice:ended', expect.anything());
+        expect(io._emit).toHaveBeenCalledWith('dm:voice:offer', expect.objectContaining({ conversationId: 'conv-1' }));
+        expect(socket.join).toHaveBeenCalledWith('dm:voice:conv-1');
+      }
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+});
+
 // ─── clearDMVoiceState boot cleanup ──────────────────────────────────────────
 
 describe('dmVoiceHandler — clearDMVoiceState (boot cleanup)', () => {

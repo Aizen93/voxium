@@ -765,7 +765,12 @@ export interface ServerToClientEvents {
   'dm:voice:state_update': (data: { conversationId: string; userId: string; selfMute: boolean; selfDeaf: boolean }) => void;
   'dm:voice:speaking': (data: { conversationId: string; userId: string; speaking: boolean }) => void;
   'dm:voice:signal': (data: { from: string; signal: unknown }) => void;
-  'dm:voice:ended': (data: { conversationId: string }) => void;
+  // rejoin: true only on the answer to a re-join (dm:voice:join with rejoin)
+  // whose caller no longer has a place in the call, sent to that socket
+  // alone: the client acts on it only while the call that sent the re-join
+  // is still its current one. Absent on every other end (an older client
+  // ignores the field)
+  'dm:voice:ended': (data: { conversationId: string; rejoin?: boolean }) => void;
   // clearedUntil: the floor the remover's own history was cleared to
   // (ISO time), sent only to the remover's user room
   'dm:conversation:deleted': (data: { conversationId: string; clearedUntil?: string }) => void;
@@ -847,7 +852,13 @@ export interface ClientToServerEvents {
   'dm:join': (conversationId: string) => void;
   'dm:typing:start': (conversationId: string) => void;
   'dm:typing:stop': (conversationId: string) => void;
-  'dm:voice:join': (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => void;
+  // rejoin: true only from a client re-joining its call after a socket
+  // reconnect: the server then rebinds the caller's place in that call, and
+  // answers dm:voice:ended with rejoin: true (to this socket alone) when the
+  // caller no longer has one, instead of starting a new call that rings the
+  // other person.
+  // Absent (an older client), the join behaves as it always did
+  'dm:voice:join': (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string; rejoin?: boolean }) => void;
   'dm:voice:leave': (conversationId: string) => void;
   'dm:voice:mute': (muted: boolean) => void;
   'dm:voice:deaf': (deafened: boolean) => void;

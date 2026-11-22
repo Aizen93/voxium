@@ -332,6 +332,10 @@ interface VoiceState {
   /** Full local teardown WITHOUT notifying the server — for server-initiated
    *  ends (dm:voice:ended), where echoing dm:voice:leave would be wrong. */
   handleDMCallEnded: () => void;
+  /** The server's `dm:voice:ended`: ends the call and drops the ring of that
+   *  conversation. An answer marked `rejoin` (to this device's re-join after
+   *  a reconnect) is acted on only by the re-join that asked. */
+  handleDMVoiceEnded: (data: { conversationId: string; rejoin?: boolean }) => void;
   /** Leave the call because of an E2E security condition, telling the user why. */
   abortDMCall: (reason: DMCallAbortReason) => void;
   acceptCall: () => Promise<void>;
@@ -380,6 +384,13 @@ export function teardownSecureVoice(): void {
 // mic acquisition inside joins: a join superseded mid-getUserMedia must stop the
 // stream it acquired instead of leaking it (OS mic indicator stuck on forever).
 let voiceSessionGeneration = 0;
+
+/** The voice session generation under which the last DM call re-join went
+ *  out (null: none yet). The server's answer to it carries no more than the
+ *  conversation, so it is acted on only while this is still the generation:
+ *  a call hung up and placed again with the same person meanwhile is another
+ *  session, which that answer must not end. */
+let dmRejoinSentUnder: number | null = null;
 
 // Track ICE restart timers per DM peer
 const iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -2978,6 +2989,32 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
   },
 
+  handleDMVoiceEnded: ({ conversationId, rejoin }) => {
+    const voiceState = get();
+    if (rejoin === true) {
+      // The answer to this device's re-join names only the conversation, and
+      // is about the call that sent it: acted on while that call is still the
+      // current session, never once it was hung up (and perhaps placed again
+      // with the same person). A ring is another call's, left alone
+      if (dmRejoinSentUnder === voiceSessionGeneration && voiceState.dmCallConversationId === conversationId) {
+        voiceState.handleDMCallEnded();
+      } else {
+        debugLog('[DMVoice] Ignoring the answer to a re-join of a call that has since ended', conversationId);
+      }
+      return;
+    }
+    if (voiceState.dmCallConversationId === conversationId) {
+      // Full teardown without emitting dm:voice:leave back (the call was
+      // already ended server-side). Must go through the store action: an
+      // inline cleanup here once left the E2E device pin, signal chains,
+      // and callCrypto session state stale for the next call.
+      voiceState.handleDMCallEnded();
+    }
+    if (voiceState.incomingCall?.conversationId === conversationId) {
+      voiceState.setIncomingCall(null);
+    }
+  },
+
   abortDMCall: (reason: DMCallAbortReason) => {
     const conversationId = get().dmCallConversationId;
     if (!conversationId) return;
@@ -3489,13 +3526,25 @@ onSocketReconnect(async () => {
     debugLog('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
     // deviceId must survive the rebind or the peer loses its sealing target
     const deviceId = await resolveOwnCallDeviceId();
+    // The call ended (the peer hung up, a leave, another call) while the
+    // device id was resolved, which can wait for the E2E start: nothing to
+    // re-join, and a join now would start a new call ringing the other person
+    if (session !== voiceSessionGeneration) return;
     // the conversation turned read-only meanwhile (the other side's account
     // was deleted): no re-join of a call it can no longer have
     const { useDMStore } = await import('./dmStore');
+    if (session !== voiceSessionGeneration) return;
     if (isHeldReadOnly(useDMStore.getState(), dmCallConversationId)) {
       console.warn('[DMVoice] Not re-joining a call in a read-only conversation');
     } else {
-      socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf, deviceId });
+      // `rejoin`: the server rebinds this account's place in that call, and
+      // answers dm:voice:ended marked `rejoin` when the call ended while the
+      // socket was away (a server older than the flag ignores it and starts a
+      // new call then). That answer is acted on only under this generation
+      const { dmCallUsers, localUserId } = useVoiceStore.getState();
+      const placeConfirmed = !!localUserId && dmCallUsers.some((u) => u.id === localUserId);
+      if (placeConfirmed) dmRejoinSentUnder = session;
+      socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf, deviceId, ...(placeConfirmed && { rejoin: true }) });
     }
   }
 
