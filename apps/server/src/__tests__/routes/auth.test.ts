@@ -219,7 +219,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   refundRateLimit: vi.fn().mockResolvedValue(undefined),
   getSubnetRegistrationPressure: vi.fn().mockResolvedValue(0),
   getDomainRegistrationCount: vi.fn().mockResolvedValue(0),
-  countDomainRegistration: vi.fn().mockResolvedValue(undefined),
+  chargeDomainRegistration: vi.fn().mockResolvedValue({ allowed: true, charged: true, msBeforeNext: 0 }),
   domainRegistrationCap: vi.fn().mockReturnValue(10),
   rateLimitLogin: passthroughMiddleware,
   rateLimitLoginAccount: passthroughMiddleware,

@@ -12,6 +12,7 @@ import {
   ForbiddenError,
   NotFoundError,
   ConflictError,
+  TooManyRequestsError,
 } from '../../utils/errors';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -148,6 +149,23 @@ describe('errorHandler middleware', () => {
       success: false,
       error: 'Username or email already in use',
     });
+  });
+
+  it('TooManyRequestsError answers what a limiter answers: 429, Retry-After in seconds, the one sentence', async () => {
+    const res = await request(buildApp(new TooManyRequestsError(3600))).get('/test');
+
+    expect(res.status).toBe(429);
+    expect(res.headers['retry-after']).toBe('3600');
+    // Byte-identical to answerTooManyRequests (middleware/rateLimiter.ts)
+    expect(res.text).toBe('{"success":false,"error":"Too many requests. Please try again later."}');
+  });
+
+  it('TooManyRequestsError without a wait sets no Retry-After', async () => {
+    const res = await request(buildApp(new TooManyRequestsError())).get('/test');
+
+    expect(res.status).toBe(429);
+    expect(res.headers['retry-after']).toBeUndefined();
+    expect(res.body).toEqual({ success: false, error: 'Too many requests. Please try again later.' });
   });
 
   it('Unknown Error returns 500 with generic message', async () => {

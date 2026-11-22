@@ -10,11 +10,14 @@ import type { Request, Response } from 'express';
 // refund DIRECTLY rather than infer it — the only honest way to check that
 // a rejection on one bucket gave back the points already taken on another.
 const limiterCalls = vi.hoisted(() => [] as Array<{ op: 'consume' | 'reward'; prefix: string; key: string }>);
+// Keys whose consume fails the way an unreachable store does
+const failingKeys = vi.hoisted(() => new Set<string>());
 vi.mock('rate-limiter-flexible', async (importOriginal) => {
   const actual = await importOriginal<typeof import('rate-limiter-flexible')>();
   class RecordingMemory extends actual.RateLimiterMemory {
     consume(key: string | number, points?: number, options?: object) {
       limiterCalls.push({ op: 'consume', prefix: this.keyPrefix, key: String(key) });
+      if (failingKeys.has(String(key))) return Promise.reject(new Error('store unreachable'));
       return super.consume(key, points, options);
     }
     reward(key: string | number, points?: number, options?: object) {
@@ -37,6 +40,9 @@ import {
   getSubnetRegistrationPressure,
   consumeMailCap,
   getAllRateLimits,
+  chargeDomainRegistration,
+  getDomainRegistrationCount,
+  refundRateLimit,
 } from '../../middleware/rateLimiter';
 
 const DAILY_CAP = getAllRateLimits().find((l) => l.name === 'registerDaily')!.points;
@@ -276,6 +282,65 @@ describe('never-refunded registration attempt buckets', () => {
       expect(def, `${name} must be registered in DEFAULTS`).toBeDefined();
       expect(def!.keyPrefix).toMatch(/^rl:/);
     }
+  });
+});
+
+// The novel-domain budget is charged by a sign-up's completion right before
+// the account is created (signupService) and given back when none is; the
+// start only reads it for its early answer. A read is not a reservation.
+describe('novel-domain registration budget', () => {
+  const DOMAIN_CAP = getAllRateLimits().find((l) => l.name === 'registerDomain')!.points;
+
+  it('charges atomically: a CONCURRENT burst on one domain is allowed exactly the cap', async () => {
+    const results = await Promise.all(
+      Array.from({ length: DOMAIN_CAP * 10 }, () => chargeDomainRegistration('burst.example')),
+    );
+    const allowed = results.filter((r) => r.allowed);
+    expect(allowed).toHaveLength(DOMAIN_CAP);
+    expect(allowed.every((r) => r.charged)).toBe(true);
+    // Every refused charge gave its point back at once: the bucket holds the cap, no more
+    expect(await getDomainRegistrationCount('burst.example')).toBe(DOMAIN_CAP);
+  });
+
+  it('a refused charge holds nothing and says when the budget has room again', async () => {
+    for (let i = 0; i < DOMAIN_CAP; i++) expect((await chargeDomainRegistration('full.example')).allowed).toBe(true);
+
+    const refused = await chargeDomainRegistration('full.example');
+    expect(refused).toMatchObject({ allowed: false, charged: false });
+    expect(refused.msBeforeNext).toBeGreaterThan(0);
+    expect(limiterCalls.filter((c) => c.prefix === 'rl:regdom' && c.op === 'reward')).toHaveLength(1);
+    expect(await getDomainRegistrationCount('full.example')).toBe(DOMAIN_CAP);
+  });
+
+  it('a point given back (no account came of it) lets the next completion through', async () => {
+    for (let i = 0; i < DOMAIN_CAP; i++) await chargeDomainRegistration('refund.example');
+    expect((await chargeDomainRegistration('refund.example')).allowed).toBe(false);
+
+    await refundRateLimit('registerDomain', 'refund.example');
+    expect(await getDomainRegistrationCount('refund.example')).toBe(DOMAIN_CAP - 1);
+    expect((await chargeDomainRegistration('refund.example')).allowed).toBe(true);
+  });
+
+  it('keys each domain apart', async () => {
+    for (let i = 0; i < DOMAIN_CAP; i++) await chargeDomainRegistration('one.example');
+    expect((await chargeDomainRegistration('one.example')).allowed).toBe(false);
+    expect((await chargeDomainRegistration('two.example')).allowed).toBe(true);
+  });
+
+  it('an error that reaches the helper allows and holds nothing, with a warning', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    failingKeys.add('down.example');
+    try {
+      expect(await chargeDomainRegistration('down.example')).toEqual({ allowed: true, charged: false, msBeforeNext: 0 });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Domain budget charge failed'), 'store unreachable');
+    } finally {
+      failingKeys.delete('down.example');
+      warn.mockRestore();
+    }
+  });
+
+  it('lives under rl:, like every other abuse counter', () => {
+    expect(getAllRateLimits().find((l) => l.name === 'registerDomain')!.keyPrefix).toMatch(/^rl:/);
   });
 });
 

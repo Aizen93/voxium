@@ -92,7 +92,7 @@ export class UnsupportedMediaTypeError extends AppError {
 }
 
 export class TooManyRequestsError extends AppError {
-  constructor(message = 'Too many requests. Please try again later.') {
+  constructor(public readonly retryAfterSeconds: number | null = null, message = 'Too many requests. Please try again later.') {
     super(message, 429);
   }
 }
