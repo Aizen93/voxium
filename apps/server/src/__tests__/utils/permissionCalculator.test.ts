@@ -208,6 +208,33 @@ describe('permissionCalculator', () => {
       expect(client.channelPermissionOverride.findMany).toHaveBeenCalledTimes(1);
       expect(prismaMock.channelPermissionOverride.findMany).not.toHaveBeenCalled();
     });
+
+    // What the override routes ask inside their transaction: the owner and an
+    // ADMINISTRATOR view a plaintext channel whatever its overrides deny; a
+    // secure channel is decided by membership before either
+    it('on that client, the owner and an ADMINISTRATOR view a plaintext channel an override hides', async () => {
+      const deniedToEveryone = [{ roleId: 'everyone', allow: '0', deny: permissionsToString(Permissions.VIEW_CHANNEL) }];
+      const owner = sequentialClient().client;
+      owner.channel.findUnique.mockResolvedValueOnce({ secure: false, type: 'text', serverId: 'srv1', server: { ownerId: 'user1' } });
+      owner.channelPermissionOverride.findMany.mockResolvedValue(deniedToEveryone as never);
+      expect(await hasChannelPermission('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, owner as never)).toBe(true);
+
+      const admin = sequentialClient().client;
+      admin.memberRole.findMany.mockResolvedValue([{ roleId: 'r-admin', role: { permissions: permissionsToString(Permissions.ADMINISTRATOR) } }] as never);
+      admin.channelPermissionOverride.findMany.mockResolvedValue(deniedToEveryone as never);
+      expect(await hasChannelPermission('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, admin as never)).toBe(true);
+
+      const member = sequentialClient().client;
+      member.channelPermissionOverride.findMany.mockResolvedValue(deniedToEveryone as never);
+      expect(await hasChannelPermission('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, member as never)).toBe(false);
+    });
+
+    it('on that client, the owner does not view a secure channel they are not a member of', async () => {
+      const { client } = sequentialClient();
+      client.channel.findUnique.mockResolvedValueOnce({ secure: true, type: 'text', serverId: 'srv1', server: { ownerId: 'user1' } });
+
+      expect(await hasChannelPermission('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, client as never)).toBe(false);
+    });
   });
 
   describe('computeUserChannelPermissions', () => {

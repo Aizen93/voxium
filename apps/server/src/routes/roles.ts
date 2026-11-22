@@ -25,6 +25,7 @@ import {
   getHighestRolePosition,
   getEffectivePermissions,
   type PermissionReadClient,
+  type ChannelPermissionReadClient,
 } from '../utils/permissionCalculator';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { planOverrideWrite, readKnownPermissions, readPermissionValue, storedPermissionBits } from '../utils/permissionWrites';
@@ -551,6 +552,30 @@ roleRouter.patch(
   }
 );
 
+/**
+ * The channel an override route acts on, read through `db` (the shared
+ * client for the early answer, the transaction's client inside it): one of
+ * this space's, not secure, and one the actor can view. Anything else is the
+ * 404 of a channel that does not exist, so an id the actor cannot see tells
+ * nothing apart from an unknown one: the routes ask it before they read the
+ * role, the body or the override. Secure channels carry no role overrides
+ * (their access is their membership) and are refused on their own line
+ * first: a member of one holds VIEW_CHANNEL there through that membership.
+ * The owner and an ADMINISTRATOR view every other channel.
+ */
+async function assertOverrideChannel(
+  actorId: string,
+  serverId: string,
+  channelId: string,
+  db?: ChannelPermissionReadClient,
+): Promise<void> {
+  const channel = await (db ?? prisma).channel.findFirst({ where: { id: channelId, serverId }, select: { secure: true } });
+  if (!channel || channel.secure) throw new NotFoundError('Channel');
+  if (!await hasChannelPermission(actorId, channelId, serverId, Permissions.VIEW_CHANNEL, db)) {
+    throw new NotFoundError('Channel');
+  }
+}
+
 // Get channel permission overrides for a channel
 roleRouter.get(
   '/channels/:channelId/permissions',
@@ -563,16 +588,9 @@ roleRouter.get(
       });
       if (!membership) throw new NotFoundError('Server');
 
-      const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
-      // Secure channels have no role overrides and must not be enumerable —
-      // same NotFound as a channel that does not exist. Regular channels
-      // additionally require VIEW_CHANNEL (a member who cannot see a channel
-      // must not read its override list either).
-      if (!channel || channel.secure) throw new NotFoundError('Channel');
-      const canView = await hasChannelPermission(
-        req.user!.userId, channelId, serverId, Permissions.VIEW_CHANNEL,
-      );
-      if (!canView) throw new NotFoundError('Channel');
+      // A secure channel, or one the member cannot see: the 404 of a channel
+      // that does not exist (assertOverrideChannel)
+      await assertOverrideChannel(req.user!.userId, serverId, channelId);
 
       const overrides = await prisma.channelPermissionOverride.findMany({
         where: { channelId },
@@ -606,18 +624,28 @@ roleRouter.get(
  * update takes it, so an override's key check on it still passes): it is the
  * one row every write of this override takes first, an existing override or
  * not, so two writes of it (or a role save) run one after the other and the
- * value merged over is the value replaced. Then every check of the route made
- * again on the transaction's client, the override read again, and the write.
+ * value merged over is the value replaced. A lock that finds no role row
+ * reads the space first: a space deleted while the write waited answers 404
+ * Server (its roles went with it, and the actor holds nothing in a space that
+ * is gone). Then every check of the route made again on the transaction's
+ * client, in the route's order (manage, the channel as assertOverrideChannel
+ * decides it, the role, the rank: a role found missing by the lock in a space
+ * still there is answered after the channel, so a channel the actor no longer
+ * sees still answers as a missing one), the override read again, and the
+ * write. The checks only read: the role row is the one row locked before the
+ * write. The PUT's answer, the channel's overrides, is read on the same
+ * client before the commit, under the checks that just passed.
  * The long budget: a space, channel or role delete holds these rows through
  * its cascade. Run again whole when PostgreSQL aborts it to break a deadlock:
  * a space delete's cascade reaches the channel before the role, the reverse
  * of this write's order, so the two can meet as a deadlock; both sides run
  * under retryOnTransactionConflict, and whichever is aborted runs again (this
- * write then answers 404 Role, or 200 before the space goes).
+ * write then answers 404 Server, or 200 before the space goes).
  * A write that stores something for a channel deleted while it ran answers
  * 404 Channel; one that leaves nothing to store (a 0/0 write, the DELETE)
  * finds no row to remove and answers as for an override that did not exist.
- * Returns the bits that changed (the room re-sync is decided on them).
+ * Returns the bits that changed (the room re-sync is decided on them) and,
+ * when asked, the channel's overrides after the write.
  */
 async function writeChannelOverride(w: {
   serverId: string;
@@ -629,16 +657,21 @@ async function writeChannelOverride(w: {
   known: bigint;
   /** The route's own answer to a role at or above the actor. */
   rankRefusal: string;
-}): Promise<bigint> {
+  /** Read the channel's overrides back before the commit (the PUT's answer). */
+  readBack: boolean;
+}) {
   const { serverId, channelId, roleId, actorId } = w;
   try {
     return await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const [locked] = await tx.$queryRaw<{ position: number; is_default: boolean }[]>`SELECT position, is_default FROM roles WHERE id = ${roleId} AND server_id = ${serverId} FOR NO KEY UPDATE`;
-      if (!locked) throw new NotFoundError('Role');
+      if (!locked) {
+        const space = await tx.server.findUnique({ where: { id: serverId }, select: { id: true } });
+        if (!space) throw new NotFoundError('Server');
+      }
       const mayManage = await hasServerPermission(actorId, serverId, Permissions.MANAGE_ROLES, tx);
       if (!mayManage) throw new ForbiddenError('You do not have permission to manage permissions');
-      const stillThere = await tx.channel.findFirst({ where: { id: channelId, serverId }, select: { secure: true } });
-      if (!stillThere || stillThere.secure) throw new NotFoundError('Channel');
+      await assertOverrideChannel(actorId, serverId, channelId, tx);
+      if (!locked) throw new NotFoundError('Role');
       const highest = await getHighestRolePosition(actorId, serverId, tx);
       if (highest !== Infinity && !locked.is_default && locked.position >= highest) {
         throw new ForbiddenError(w.rankRefusal);
@@ -665,7 +698,10 @@ async function writeChannelOverride(w: {
           create: { channelId, roleId, ...values },
         });
       }
-      return plan.changed;
+      const overrides = w.readBack
+        ? await tx.channelPermissionOverride.findMany({ where: { channelId }, include: { role: true } })
+        : null;
+      return { changed: plan.changed, overrides };
     }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] The override of role ${roleId} on channel ${channelId}`);
   } catch (err) {
     // A channel deleted while the transaction ran: the new row's key refused
@@ -699,10 +735,10 @@ roleRouter.put(
       const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_ROLES);
       if (!canManage) throw new ForbiddenError('You do not have permission to manage permissions');
 
-      const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
       // Secure channels are membership-governed: role overrides do not apply
-      // and their existence must not leak — indistinguishable from not-found
-      if (!channel || channel.secure) throw new NotFoundError('Channel');
+      // and their existence must not leak; nor may a channel the actor cannot
+      // see. Both are indistinguishable from not-found (assertOverrideChannel)
+      await assertOverrideChannel(req.user!.userId, serverId, channelId);
 
       const role = await prisma.role.findFirst({ where: { id: roleId, serverId } });
       if (!role) throw new NotFoundError('Role');
@@ -737,20 +773,17 @@ roleRouter.put(
         }
       }
 
-      const changed = await writeChannelOverride({
+      // The caller (who holds MANAGE_ROLES and views the channel) gets the
+      // channel's overrides back, read inside the write's transaction
+      const { changed, overrides } = await writeChannelOverride({
         serverId, channelId, roleId, actorId, sentAllow, sentDeny, known,
         rankRefusal: 'Cannot set overrides for roles at or above your own position',
-      });
-
-      // The caller (who holds MANAGE_ROLES) gets the channel's overrides back
-      const allOverrides = await prisma.channelPermissionOverride.findMany({
-        where: { channelId },
-        include: { role: true },
+        readBack: true,
       });
 
       announceOverrideWrite(serverId, channelId, changed);
 
-      res.json({ success: true, data: allOverrides });
+      res.json({ success: true, data: overrides });
     } catch (err) {
       next(err);
     }
@@ -772,9 +805,9 @@ roleRouter.delete(
       const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_ROLES);
       if (!canManage) throw new ForbiddenError('You do not have permission to manage permissions');
 
-      const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
-      // Same opacity rule as the PUT: secure channels read as not-found
-      if (!channel || channel.secure) throw new NotFoundError('Channel');
+      // Same opacity rule as the PUT: a secure channel, or one the actor
+      // cannot see, reads as not-found
+      await assertOverrideChannel(req.user!.userId, serverId, channelId);
 
       const role = await prisma.role.findFirst({ where: { id: roleId, serverId } });
       if (!role) throw new NotFoundError('Role');
@@ -785,10 +818,11 @@ roleRouter.delete(
         throw new ForbiddenError(rankRefusal);
       }
 
-      const changed = await writeChannelOverride({
+      const { changed } = await writeChannelOverride({
         serverId, channelId, roleId, actorId: req.user!.userId,
         sentAllow: 0n, sentDeny: 0n, known: LEGACY_CLIENT_KNOWN_PERMISSIONS,
         rankRefusal,
+        readBack: false,
       });
 
       announceOverrideWrite(serverId, channelId, changed);

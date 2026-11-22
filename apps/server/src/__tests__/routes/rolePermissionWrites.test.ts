@@ -27,9 +27,10 @@ let order: string[] = [];
 /** The transaction's own client: a model of its own per call, so a read on the shared client inside it shows. */
 const tx = {
   $queryRaw: vi.fn(),
+  server: { findUnique: vi.fn() },
   role: { update: vi.fn() },
   channel: { findFirst: vi.fn() },
-  channelPermissionOverride: { findUnique: vi.fn(), upsert: vi.fn(), deleteMany: vi.fn() },
+  channelPermissionOverride: { findUnique: vi.fn(), findMany: vi.fn(), upsert: vi.fn(), deleteMany: vi.fn() },
 };
 
 const prismaMock: Record<string, any> = {
@@ -58,9 +59,16 @@ const mockHasServerPermission = vi.fn();
 const mockGetHighestRolePosition = vi.fn();
 const mockGetEffectivePermissions = vi.fn();
 const mockComputeServerPermissions = vi.fn();
+/** Whether the actor sees the channel, as read on the shared client and on the transaction's (reset to yes before each test). */
+const sees = { shared: true, tx: true };
+const mockHasChannelPermission = vi.fn(async (_u: string, _c: string, _s: string, flag: bigint, db?: unknown) => {
+  expect(flag).toBe(Permissions.VIEW_CHANNEL);
+  order.push(db === tx ? 'tx:view' : 'view');
+  return db === tx ? sees.tx : sees.shared;
+});
 vi.mock('../../utils/permissionCalculator', () => ({
   hasServerPermission: (...args: any[]) => mockHasServerPermission(...args),
-  hasChannelPermission: vi.fn(),
+  hasChannelPermission: (...args: any[]) => (mockHasChannelPermission as any)(...args),
   getHighestRolePosition: (...args: any[]) => mockGetHighestRolePosition(...args),
   getEffectivePermissions: (...args: any[]) => mockGetEffectivePermissions(...args),
   computeServerPermissions: (...args: any[]) => mockComputeServerPermissions(...args),
@@ -172,8 +180,12 @@ function overrideIs(early: { allow: bigint; deny: bigint } | null, inTx: { allow
   });
   tx.channelPermissionOverride.upsert.mockImplementation(async () => { order.push('tx:override.upsert'); return {}; });
   tx.channelPermissionOverride.deleteMany.mockImplementation(async () => { order.push('tx:override.deleteMany'); return { count: 1 }; });
-  prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
+  tx.channelPermissionOverride.findMany.mockImplementation(async () => { order.push('tx:overrides'); return [READ_BACK]; });
+  prismaMock.channelPermissionOverride.findMany.mockImplementation(async () => { order.push('overrides (shared client)'); return []; });
 }
+
+/** What the channel's override list reads inside the transaction (the PUT's answer). */
+const READ_BACK = { id: 'o1', channelId: 'ch1', roleId: 'role1', allow: '2048', deny: '0', role: { id: 'role1', name: 'Mod' } };
 
 const patchRole = (body: Record<string, unknown>) => request(app).patch('/api/v1/servers/srv1/roles/role1').send(body);
 const putOverride = (body: Record<string, unknown>) => request(app).put('/api/v1/servers/srv1/roles/channels/ch1/permissions/role1').send(body);
@@ -192,10 +204,14 @@ function storedOverride(): { allow: bigint; deny: bigint } | 'deleted' {
 beforeEach(() => {
   vi.clearAllMocks();
   order = [];
+  sees.shared = true;
+  sees.tx = true;
   prismaMock.$transaction.mockImplementation(async (fn: (client: typeof tx) => unknown, opts?: unknown) => {
     order.push(`txn ${JSON.stringify(opts)}`);
     return fn(tx);
   });
+  // The space is there unless a test deletes it
+  tx.server.findUnique.mockImplementation(async () => { order.push('tx:space'); return { id: 'srv1' }; });
   app = createApp();
 });
 
@@ -729,11 +745,16 @@ describe('PUT /roles/channels/:channelId/permissions/:roleId — allow and deny 
     actorIs(MODERATOR);
     overrideIs(null);
 
-    expect((await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: '0', knownPermissions: s(ALL_PERMISSIONS) })).status).toBe(200);
+    const res = await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: '0', knownPermissions: s(ALL_PERMISSIONS) });
+    expect(res.status).toBe(200);
+    // the answer is the list read on the transaction's client before the commit
+    expect(res.body.data).toEqual([READ_BACK]);
+    expect(tx.channelPermissionOverride.findMany).toHaveBeenCalledWith({ where: { channelId: 'ch1' }, include: { role: true } });
 
     expect(order).toEqual([
       'may-manage',
       'channel',
+      'view',
       'role',
       'rank',
       'override',
@@ -742,12 +763,24 @@ describe('PUT /roles/channels/:channelId/permissions/:roleId — allow and deny 
       'tx:SELECT position, is_default FROM roles WHERE id = ? AND server_id = ? FOR NO KEY UPDATE [role1,srv1]',
       'tx:may-manage',
       'tx:channel',
+      'tx:view',
       'tx:rank',
       'tx:override',
       'tx:holds',
       'tx:override.upsert',
+      'tx:overrides',
     ]);
     expect(prismaMock.channelPermissionOverride.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.channelPermissionOverride.findMany).not.toHaveBeenCalled();
+  });
+
+  it('a write refused inside the transaction reads no override list, on either client', async () => {
+    actorIs(MODERATOR, { mayManage: false });
+    overrideIs(null);
+
+    expect((await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: '0' })).status).toBe(403);
+    expect(tx.channelPermissionOverride.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.channelPermissionOverride.findMany).not.toHaveBeenCalled();
   });
 
   describe('the room re-sync follows the MERGED override', () => {
@@ -940,6 +973,72 @@ describe('PUT /roles/channels/:channelId/permissions/:roleId — allow and deny 
       expect(tx.channelPermissionOverride.upsert).not.toHaveBeenCalled();
     });
 
+    it('a channel the actor stopped seeing between the early answer and the lock: the answer of an unknown channel, read on the transaction\'s client, nothing written', async () => {
+      actorIs(MODERATOR);
+      overrideIs(null);
+      prismaMock.channel.findFirst.mockImplementationOnce(async () => null);
+      const unknown = await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: '0', knownPermissions: s(ALL_PERMISSIONS) });
+      order = [];
+      sees.tx = false;
+
+      const res = await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: '0', knownPermissions: s(ALL_PERMISSIONS) });
+
+      expect({ status: res.status, body: res.body }).toEqual({ status: unknown.status, body: unknown.body });
+      expect(res.status).toBe(404);
+      expect(order.slice(order.indexOf('tx:may-manage'))).toEqual(['tx:may-manage', 'tx:channel', 'tx:view']);
+      expect(tx.channelPermissionOverride.upsert).not.toHaveBeenCalled();
+      expect(tx.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(mockSync).not.toHaveBeenCalled();
+    });
+
+    it('a role gone by the lock in a channel the actor no longer sees: the channel is answered first (404 Channel)', async () => {
+      actorIs(OWNER);
+      overrideIs(null);
+      tx.$queryRaw.mockImplementation((strings: TemplateStringsArray) => lazyStatement(order, `tx:${strings.join('?')}`, []));
+      sees.tx = false;
+
+      const res = await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: '0' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Channel not found');
+    });
+
+    it('a role gone by the lock because the space was deleted meanwhile: 404 Server, the space read on the transaction\'s client before any other check', async () => {
+      // the calculator answers nothing for a space that is gone
+      actorIs(MODERATOR, { mayManage: false });
+      overrideIs(null);
+      tx.$queryRaw.mockImplementation((strings: TemplateStringsArray) => lazyStatement(order, `tx:${strings.join('?')}`, []));
+      tx.server.findUnique.mockImplementation(async () => { order.push('tx:space'); return null; });
+
+      const res = await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: '0' });
+
+      expect({ status: res.status, error: res.body.error }).toEqual({ status: 404, error: 'Server not found' });
+      expect(order.slice(order.findIndex((o) => o.startsWith('txn')) + 2)).toEqual(['tx:space']);
+      expect(tx.server.findUnique).toHaveBeenCalledWith({ where: { id: 'srv1' }, select: { id: true } });
+      expect(tx.channelPermissionOverride.upsert).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('a role row the lock finds does not read the space', async () => {
+      actorIs(OWNER);
+      overrideIs(null);
+
+      expect((await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: '0' })).status).toBe(200);
+      expect(tx.server.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('a role gone by the lock and Manage Roles lost: the manage refusal comes first, as in the early answer', async () => {
+      actorIs(MODERATOR, { mayManage: false });
+      overrideIs(null);
+      tx.$queryRaw.mockImplementation((strings: TemplateStringsArray) => lazyStatement(order, `tx:${strings.join('?')}`, []));
+
+      const res = await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: '0' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('You do not have permission to manage permissions');
+    });
+
     it('a channel deleted while the transaction ran: the new row\'s key refused, 404 Channel, nothing announced', async () => {
       actorIs(OWNER);
       overrideIs(null);
@@ -1007,18 +1106,37 @@ describe('DELETE /roles/channels/:channelId/permissions/:roleId — a 0/0 write 
     expect(order).toEqual([
       'may-manage',
       'channel',
+      'view',
       'role',
       'rank',
       `txn ${JSON.stringify({ timeout: 60_000, maxWait: 10_000 })}`,
       'tx:SELECT position, is_default FROM roles WHERE id = ? AND server_id = ? FOR NO KEY UPDATE [role1,srv1]',
       'tx:may-manage',
       'tx:channel',
+      'tx:view',
       'tx:rank',
       'tx:override',
       'tx:override.deleteMany',
     ]);
     // the moderator lacks KICK_MEMBERS: clearing it is never refused
     expect(storedOverride()).toBe('deleted');
+    // the DELETE answers no list: none is read
+    expect(tx.channelPermissionOverride.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.channelPermissionOverride.findMany).not.toHaveBeenCalled();
+  });
+
+  it('a role gone by the lock because the space was deleted meanwhile: 404 Server, nothing removed', async () => {
+    actorIs(MODERATOR, { mayManage: false });
+    overrideIs({ allow: Permissions.SEND_MESSAGES, deny: 0n });
+    tx.$queryRaw.mockImplementation((strings: TemplateStringsArray) => lazyStatement(order, `tx:${strings.join('?')}`, []));
+    tx.server.findUnique.mockImplementation(async () => { order.push('tx:space'); return null; });
+
+    const res = await deleteOverride();
+
+    expect({ status: res.status, error: res.body.error }).toEqual({ status: 404, error: 'Server not found' });
+    expect(order).not.toContain('tx:may-manage');
+    expect(tx.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
   });
 
   it('no override stored: nothing changes, no re-sync (the event still goes out)', async () => {
@@ -1075,6 +1193,23 @@ describe('DELETE /roles/channels/:channelId/permissions/:roleId — a 0/0 write 
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('Channel not found');
     expect(tx.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('a channel the actor stopped seeing between the early answer and the lock: the answer of an unknown channel, nothing removed', async () => {
+    actorIs(MODERATOR);
+    overrideIs({ allow: Permissions.SEND_MESSAGES, deny: 0n });
+    prismaMock.channel.findFirst.mockImplementationOnce(async () => null);
+    const unknown = await deleteOverride();
+    sees.tx = false;
+
+    const res = await deleteOverride();
+
+    expect({ status: res.status, body: res.body }).toEqual({ status: unknown.status, body: unknown.body });
+    expect(res.status).toBe(404);
+    expect(order).toContain('tx:view');
+    expect(tx.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+    expect(tx.channelPermissionOverride.upsert).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
   });
 });
 

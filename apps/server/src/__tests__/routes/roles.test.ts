@@ -127,6 +127,10 @@ describe('Role Routes', () => {
     // No role row to lock unless a test names one (lockedRole)
     prismaMock.$queryRaw.mockResolvedValue([]);
     mockComputeServerPermissions.mockReset();
+    // The actor sees the channel unless a test says otherwise (clearAllMocks
+    // keeps the last test's answer)
+    mockHasChannelPermission.mockReset();
+    mockHasChannelPermission.mockResolvedValue(true);
     app = createApp();
   });
 
@@ -1210,7 +1214,7 @@ describe('Role Routes', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data).toHaveLength(1);
       expect(mockHasChannelPermission).toHaveBeenCalledWith(
-        'user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL,
+        'user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, undefined,
       );
     });
 
@@ -1740,6 +1744,126 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(403);
       expect(res.body.error).toContain('above your own position');
+    });
+  });
+
+  // ── Every override route: a channel the actor cannot see ────────────────
+
+  /**
+   * An actor who may manage roles but cannot view a channel gets, on every
+   * override route of it, exactly the answer of a channel id that names
+   * nothing: decided before the role, the body or the override is read, so
+   * nothing (which role ids exist, their rank, what the override holds, the
+   * order of the other refusals) tells the two apart. A secure channel
+   * answers the same for everyone, the owner and a member of it included.
+   */
+  describe('override routes on a channel the actor cannot see', () => {
+    const ROLES: Record<string, { position: number; isDefault: boolean } | null> = {
+      'r-everyone': { position: 0, isDefault: true },
+      r2: { position: 2, isDefault: false },
+      'r-high': { position: 9, isDefault: false },
+      'r-none': null,
+    };
+
+    beforeEach(() => {
+      mockHasServerPermission.mockResolvedValue(true); // MANAGE_ROLES
+      mockGetHighestRolePosition.mockResolvedValue(5);
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user1', serverId: 'srv1' });
+      prismaMock.channel.findFirst.mockImplementation(async ({ where }: any) => {
+        if (where.id === 'ch-hidden' || where.id === 'ch1') return { secure: false };
+        if (where.id === 'ch-sec') return { secure: true };
+        return null;
+      });
+      // ch-hidden: the actor lacks VIEW_CHANNEL there; a secure channel's
+      // member holds it (by membership), and is still refused
+      mockHasChannelPermission.mockImplementation(async (_u: string, channelId: string) => channelId !== 'ch-hidden');
+      prismaMock.role.findFirst.mockImplementation(async ({ where }: any) => {
+        const role = ROLES[where.id];
+        return role ? { id: where.id, serverId: 'srv1', permissions: '0', ...role } : null;
+      });
+      mockGetEffectivePermissions.mockResolvedValue({ permissions: permissionsToString(Permissions.VIEW_CHANNEL | Permissions.MANAGE_ROLES), source: 'computed' });
+      mockComputeServerPermissions.mockResolvedValue(Permissions.VIEW_CHANNEL | Permissions.MANAGE_ROLES);
+      lockedRole({ position: 2 });
+      prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
+      prismaMock.channelPermissionOverride.upsert.mockResolvedValue({});
+      prismaMock.channelPermissionOverride.deleteMany.mockResolvedValue({ count: 0 });
+    });
+
+    const base = '/api/v1/servers/srv1/roles/channels';
+    const send: Record<string, (channelId: string, roleId: string) => request.Test> = {
+      GET: (ch) => request(app).get(`${base}/${ch}/permissions`),
+      PUT: (ch, role) => request(app).put(`${base}/${ch}/permissions/${role}`).send({ allow: permissionsToString(Permissions.VIEW_CHANNEL), deny: '0' }),
+      'PUT turning on a bit the actor lacks': (ch, role) => request(app).put(`${base}/${ch}/permissions/${role}`).send({ allow: permissionsToString(Permissions.KICK_MEMBERS), deny: '0' }),
+      'PUT with a body it refuses': (ch, role) => request(app).put(`${base}/${ch}/permissions/${role}`).send({ allow: 1, deny: 'x' }),
+      DELETE: (ch, role) => request(app).delete(`${base}/${ch}/permissions/${role}`),
+    };
+    const answer = async (req: request.Test) => {
+      const res = await req;
+      return { status: res.status, body: res.body };
+    };
+
+    it.each(Object.keys(send))('%s: the same status and body as an unknown channel id, whatever the role id', async (route) => {
+      const unknown = await answer(send[route]('ch-none', 'r2'));
+      expect(unknown).toEqual({ status: 404, body: { success: false, error: 'Channel not found' } });
+      vi.clearAllMocks();
+
+      for (const roleId of Object.keys(ROLES)) {
+        expect(await answer(send[route]('ch-hidden', roleId))).toEqual(unknown);
+        expect(await answer(send[route]('ch-none', roleId))).toEqual(unknown);
+      }
+      // the visibility was asked of the actor on that channel; nothing after it was read
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch-hidden', 'srv1', Permissions.VIEW_CHANNEL, undefined);
+      expect(prismaMock.role.findFirst).not.toHaveBeenCalled();
+      expect(mockGetHighestRolePosition).not.toHaveBeenCalled();
+      expect(prismaMock.channelPermissionOverride.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.channelPermissionOverride.findMany).not.toHaveBeenCalled();
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(mockSyncVisibilityRooms).not.toHaveBeenCalled();
+    });
+
+    it.each(Object.keys(send))('%s: a secure channel answers as an unknown one, for the owner too and although a member of it views it', async (route) => {
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      const unknown = await answer(send[route]('ch-none', 'r2'));
+      const secure = await answer(send[route]('ch-sec', 'r2'));
+      expect(secure).toEqual(unknown);
+      expect(secure.status).toBe(404);
+      expect(prismaMock.channelPermissionOverride.upsert).not.toHaveBeenCalled();
+      expect(prismaMock.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('a channel the actor sees: the routes answer as before (the rank, then the write)', async () => {
+      expect((await answer(send.PUT('ch1', 'r-high'))).body.error).toBe('Cannot set overrides for roles at or above your own position');
+      expect((await answer(send.DELETE('ch1', 'r-none'))).body.error).toBe('Role not found');
+      const get = await answer(send.GET('ch1', 'r2'));
+      expect(get).toEqual({ status: 200, body: { success: true, data: [] } });
+      const put = await answer(send.PUT('ch1', 'r2'));
+      expect(put.status).toBe(200);
+      expect(prismaMock.channelPermissionOverride.upsert).toHaveBeenCalledTimes(1);
+      // asked on the shared client first, then again on the transaction's
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, undefined);
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, prismaMock);
+    });
+
+    it('the owner, who views every plaintext channel, edits its overrides as before', async () => {
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      lockedRole({ position: 9 });
+
+      const res = await answer(send.PUT('ch1', 'r-high'));
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.channelPermissionOverride.upsert).toHaveBeenCalledTimes(1);
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, undefined);
+    });
+
+    it('an actor without Manage Roles gets the same refusal on a channel they cannot see as on any other', async () => {
+      mockHasServerPermission.mockResolvedValue(false);
+      for (const route of ['PUT', 'DELETE']) {
+        const hidden = await answer(send[route]('ch-hidden', 'r2'));
+        expect(hidden).toEqual(await answer(send[route]('ch-none', 'r2')));
+        expect(hidden).toEqual(await answer(send[route]('ch1', 'r2')));
+        expect(hidden.status).toBe(403);
+      }
     });
   });
 
