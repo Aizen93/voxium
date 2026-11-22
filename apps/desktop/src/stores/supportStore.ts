@@ -65,8 +65,9 @@ export const useSupportStore = create<SupportState>((set, get) => ({
           messages: data.data.messages,
         });
       }
-    } catch {
-      // Non-critical
+    } catch (err) {
+      // Non-critical: the panel opens without the earlier ticket
+      console.warn('[Support] Could not load the open ticket:', err instanceof Error ? err.message : String(err));
     }
   },
 

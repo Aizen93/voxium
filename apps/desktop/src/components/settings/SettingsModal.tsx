@@ -969,7 +969,7 @@ function AudioTab() {
       micStreamRef.current = null;
     }
     if (audioCtxRef.current) {
-      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current.close().catch((err: unknown) => console.warn('[Settings] The microphone preview audio context did not close:', err instanceof Error ? err.message : String(err)));
       audioCtxRef.current = null;
     }
     setMicLevel(0);

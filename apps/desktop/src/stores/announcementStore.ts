@@ -7,7 +7,10 @@ function loadDismissed(): string[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
-  } catch { /* ignore */ }
+  } catch (err) {
+    // Unreadable storage (private mode, a corrupt entry): nothing counts as dismissed
+    console.warn('[Announcements] Could not read the dismissed announcements (the stored text is not logged):', err instanceof Error ? err.name : 'Error');
+  }
   return [];
 }
 
