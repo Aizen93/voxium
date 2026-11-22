@@ -1643,7 +1643,7 @@ describe('sign-in sessions: the list\'s bucket and the step-up\'s, which counts 
    * token that names no session), shaped like one of the two sign-out
    * routes, and a response that can finish.
    */
-  function call(userId: string, sid: string | undefined, route: 'one' | 'others' = 'one') {
+  function call(userId: string, sid: string | undefined, route: 'one' | 'others' | 'change' = 'one') {
     const json = vi.fn();
     const finish: Array<() => void> = [];
     const res: any = {
@@ -1656,7 +1656,9 @@ describe('sign-in sessions: the list\'s bucket and the step-up\'s, which counts 
     };
     const shape = route === 'one'
       ? { method: 'DELETE', params: { sessionId: 'Other00000000000000000' }, body: { password: 'x' } }
-      : { method: 'POST', params: {}, body: { password: 'x' } };
+      : route === 'change'
+        ? { method: 'POST', params: {}, body: { currentPassword: 'x', newPassword: 'y' } }
+        : { method: 'POST', params: {}, body: { password: 'x' } };
     return {
       req: { ...shape, user: { userId, ...(sid !== undefined ? { sid } : {}) }, ip: '203.0.113.7', socket: {} } as any,
       res,
@@ -1666,10 +1668,10 @@ describe('sign-in sessions: the list\'s bucket and the step-up\'s, which counts 
   }
   const flush = () => new Promise((r) => setImmediate(r));
   /** Five wrong passwords from `sid` through the route shape `route`. */
-  async function fiveWrong(userId: string, sid: string | undefined, route: 'one' | 'others') {
+  async function fiveWrong(userId: string, sid: string | undefined, route: 'one' | 'others' | 'change') {
     for (let i = 0; i < 5; i++) {
       const c = call(userId, sid, route);
-      await rl.rateLimitSessionRevoke(c.req, c.res, vi.fn());
+      await rl.rateLimitPasswordStepUp(c.req, c.res, vi.fn());
       c.res.locals[rl.STEP_UP_REFUSED_LOCAL] = true;
       c.finished(400);
     }
@@ -1684,7 +1686,7 @@ describe('sign-in sessions: the list\'s bucket and the step-up\'s, which counts 
   it('registers the two buckets: the list 30 a minute, no block; the step-up 5 per 15 minutes, then 15 minutes blocked; both per session', () => {
     const byName = (name: string) => getAllRateLimits().find((l) => l.name === name);
     expect(byName('sessionsRead')).toMatchObject({ keyPrefix: 'rl:sessread', points: 30, duration: 60, blockDuration: 0, keyType: 'userId', label: 'Sign-in sessions: list (per session)' });
-    expect(byName('sessionRevoke')).toMatchObject({ keyPrefix: 'rl:sessrvk', points: 5, duration: 900, blockDuration: 900, keyType: 'userId', label: 'Sign-in sessions: sign out (wrong passwords, per session)' });
+    expect(byName('sessionRevoke')).toMatchObject({ keyPrefix: 'rl:sessrvk', points: 5, duration: 900, blockDuration: 900, keyType: 'userId', label: 'Wrong account passwords from a session: sign-outs and password change (per session)' });
   });
 
   it('the key is the account AND the caller\'s session; a token that names no session is keyed `nosid`; never the account alone', () => {
@@ -1700,7 +1702,7 @@ describe('sign-in sessions: the list\'s bucket and the step-up\'s, which counts 
     for (const [status, wrong] of [[400, true], [200, false], [404, false], [400, false], [401, false], [500, false]] as const) {
       const c = call('u-1', 's-1');
       const next = vi.fn();
-      await rl.rateLimitSessionRevoke(c.req, c.res, next);
+      await rl.rateLimitPasswordStepUp(c.req, c.res, next);
       expect(next).toHaveBeenCalledWith();
       if (wrong) c.res.locals[rl.STEP_UP_REFUSED_LOCAL] = true;
       c.finished(status);
@@ -1716,13 +1718,13 @@ describe('sign-in sessions: the list\'s bucket and the step-up\'s, which counts 
     await fiveWrong('u-2', 's-2', 'one');
     const c = call('u-2', 's-2');
     const next = vi.fn();
-    await rl.rateLimitSessionRevoke(c.req, c.res, next);
+    await rl.rateLimitPasswordStepUp(c.req, c.res, next);
     expect(next).not.toHaveBeenCalled();
     expect(c.res.status).toHaveBeenCalledWith(429);
     expect(c.res.set).toHaveBeenCalledWith('Retry-After', '900');
     expect(c.json).toHaveBeenCalledWith({ success: false, error: 'Too many requests. Please try again later.' });
     // Another account is not touched
-    expect(await passes(rl.rateLimitSessionRevoke, call('u-3', 's-3'))).toBe(true);
+    expect(await passes(rl.rateLimitPasswordStepUp, call('u-3', 's-3'))).toBe(true);
   });
 
   it.each([
@@ -1731,15 +1733,67 @@ describe('sign-in sessions: the list\'s bucket and the step-up\'s, which counts 
   ] as const)('%s: wrong passwords from one session never charge another session of the same account', async (_route, route) => {
     await fiveWrong('u-5', 'thisOne', route);
     // The session that sent them is refused, on either route
-    expect(await passes(rl.rateLimitSessionRevoke, call('u-5', 'thisOne', 'one'))).toBe(false);
-    expect(await passes(rl.rateLimitSessionRevoke, call('u-5', 'thisOne', 'others'))).toBe(false);
+    expect(await passes(rl.rateLimitPasswordStepUp, call('u-5', 'thisOne', 'one'))).toBe(false);
+    expect(await passes(rl.rateLimitPasswordStepUp, call('u-5', 'thisOne', 'others'))).toBe(false);
     // Another session of the same account signs out on both routes, and
     // so does a token that names none
-    expect(await passes(rl.rateLimitSessionRevoke, call('u-5', 'another', 'one'))).toBe(true);
-    expect(await passes(rl.rateLimitSessionRevoke, call('u-5', 'another', 'others'))).toBe(true);
-    expect(await passes(rl.rateLimitSessionRevoke, call('u-5', undefined, route))).toBe(true);
+    expect(await passes(rl.rateLimitPasswordStepUp, call('u-5', 'another', 'one'))).toBe(true);
+    expect(await passes(rl.rateLimitPasswordStepUp, call('u-5', 'another', 'others'))).toBe(true);
+    expect(await passes(rl.rateLimitPasswordStepUp, call('u-5', undefined, route))).toBe(true);
     expect(store.get('rl:sessrvk u-5|thisOne')).toBeGreaterThan(5);
     expect(store.get('rl:sessrvk u-5')).toBeUndefined();
+  });
+
+  it('the password change is the same bucket: five wrong current passwords from one session refuse that session on all three routes, no other session', async () => {
+    await fiveWrong('u-7', 'thisOne', 'change');
+    for (const route of ['change', 'one', 'others'] as const) {
+      const c = call('u-7', 'thisOne', route);
+      const next = vi.fn();
+      await rl.rateLimitPasswordStepUp(c.req, c.res, next);
+      expect(next).not.toHaveBeenCalled();
+      expect(c.res.status).toHaveBeenCalledWith(429);
+      expect(c.res.set).toHaveBeenCalledWith('Retry-After', '900');
+      expect(c.json).toHaveBeenCalledWith({ success: false, error: 'Too many requests. Please try again later.' });
+    }
+    for (const route of ['change', 'one', 'others'] as const) {
+      expect(await passes(rl.rateLimitPasswordStepUp, call('u-7', 'another', route))).toBe(true);
+      expect(await passes(rl.rateLimitPasswordStepUp, call('u-7', undefined, route))).toBe(true);
+    }
+    expect(store.get('rl:sessrvk u-7')).toBeUndefined();
+  });
+
+  it('wrong passwords on the three routes add up in one budget: two sign-outs and a change are three points of one key', async () => {
+    for (const route of ['one', 'others', 'change'] as const) {
+      const c = call('u-8', 's-8', route);
+      await rl.rateLimitPasswordStepUp(c.req, c.res, vi.fn());
+      c.res.locals[rl.STEP_UP_REFUSED_LOCAL] = true;
+      c.finished(400);
+    }
+    await flush();
+    expect(store.get('rl:sessrvk u-8|s-8')).toBe(3);
+    expect(rewards).toEqual([]);
+    // Two more from the password change alone end the budget for the sign-outs
+    for (let i = 0; i < 2; i++) {
+      const c = call('u-8', 's-8', 'change');
+      await rl.rateLimitPasswordStepUp(c.req, c.res, vi.fn());
+      c.res.locals[rl.STEP_UP_REFUSED_LOCAL] = true;
+      c.finished(400);
+    }
+    expect(await passes(rl.rateLimitPasswordStepUp, call('u-8', 's-8', 'one'))).toBe(false);
+  });
+
+  it('the password change\'s address limiter is its own bucket, per address, counting every request and giving nothing back', async () => {
+    const byName = (name: string) => getAllRateLimits().find((l) => l.name === name);
+    expect(byName('changePassword')).toMatchObject({ keyPrefix: 'rl:chgpwd', points: 5, duration: 60, blockDuration: 300, keyType: 'ip' });
+    for (let i = 0; i < 3; i++) {
+      const c = call('u-9', 's-9', 'change');
+      expect(await passes(rl.rateLimitChangePassword, c)).toBe(true);
+      c.finished(200);
+    }
+    await flush();
+    expect(store.get('rl:chgpwd 203.0.113.7')).toBe(3);
+    expect(rewards).toEqual([]);
+    expect(store.get('rl:sessrvk u-9|s-9')).toBeUndefined();
   });
 
   it('the list charges its own bucket, per session, and gives nothing back; one session\'s reads never charge another\'s', async () => {

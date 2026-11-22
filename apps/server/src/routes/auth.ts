@@ -6,7 +6,7 @@ import { startRegistration, completeRegistration, resendRegistrationCode } from 
 import { refreshSession, endSessionWithRefreshToken, deriveSessionLabel, readClientHint, listSessions, type SessionLabel } from '../services/sessionService';
 import { PasswordStepUpError } from '../utils/errors';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, rateLimitRegisterComplete, rateLimitRegisterResend, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitLogout, rateLimitChangePassword, rateLimitSessionsRead, rateLimitSessionRevoke, STEP_UP_REFUSED_LOCAL, rateLimitTOTP, rateLimitVerifyEmail, rateLimitMailBlock, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, rateLimitRegisterComplete, rateLimitRegisterResend, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitLogout, rateLimitChangePassword, rateLimitSessionsRead, rateLimitPasswordStepUp, STEP_UP_REFUSED_LOCAL, rateLimitTOTP, rateLimitVerifyEmail, rateLimitMailBlock, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
 import { readMailBlockToken, isDigestSuppressed, suppressDigest, unsuppressDigest } from '../utils/mailSuppression';
 import { prisma } from '../utils/prisma';
@@ -247,7 +247,8 @@ function stepUpPassword(req: Request, res: Response): string | null {
 }
 
 /**
- * A refused step-up keeps its charge on the bucket (rateLimitSessionRevoke);
+ * A wrong account password keeps its charge on the bucket
+ * (rateLimitPasswordStepUp, shared by the two sign-outs and the password change);
  * every other outcome is given back.
  */
 function noteStepUp(res: Response, err: unknown): void {
@@ -257,7 +258,7 @@ function noteStepUp(res: Response, err: unknown): void {
 /** A trusted-device token is a JWT of a few hundred characters. */
 const TRUSTED_DEVICE_TOKEN_MAX_CHARS = 4096;
 
-authRouter.post('/sessions/revoke-others', authenticate, rateLimitSessionRevoke, async (req: Request, res: Response, next: NextFunction) => {
+authRouter.post('/sessions/revoke-others', authenticate, rateLimitPasswordStepUp, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const password = stepUpPassword(req, res);
     if (password === null) return;
@@ -287,7 +288,7 @@ authRouter.post('/sessions/revoke-others', authenticate, rateLimitSessionRevoke,
   }
 });
 
-authRouter.delete('/sessions/:sessionId', authenticate, rateLimitSessionRevoke, async (req: Request<{ sessionId: string }>, res: Response, next: NextFunction) => {
+authRouter.delete('/sessions/:sessionId', authenticate, rateLimitPasswordStepUp, async (req: Request<{ sessionId: string }>, res: Response, next: NextFunction) => {
   try {
     const password = stepUpPassword(req, res);
     if (password === null) return;
@@ -414,7 +415,9 @@ authRouter.post('/reset-password', rateLimitResetPassword, async (req: Request, 
   }
 });
 
-authRouter.post('/change-password', authenticate, rateLimitChangePassword, async (req: Request, res: Response, next: NextFunction) => {
+// The address's limiter first, then the session's wrong-password bucket (the
+// one the two sign-outs use): a wrong current password keeps its charge there.
+authRouter.post('/change-password', authenticate, rateLimitChangePassword, rateLimitPasswordStepUp, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { currentPassword, newPassword, rememberMe } = req.body as Unchecked<ChangePasswordRequest>;
     if (!currentPassword || typeof currentPassword !== 'string') {
@@ -437,6 +440,7 @@ authRouter.post('/change-password', authenticate, rateLimitChangePassword, async
     revokeUserSessions(req.user!.userId);
     res.json({ success: true, message: 'Password changed successfully.', data: tokens });
   } catch (err) {
+    noteStepUp(res, err);
     next(err);
   }
 });
