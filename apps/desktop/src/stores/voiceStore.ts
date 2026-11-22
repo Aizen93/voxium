@@ -270,6 +270,10 @@ interface VoiceState {
   // ─── Server Voice Actions (SFU) ────────────────────────────────────
   joinChannel: (channelId: string, serverId?: string, opts?: { secure?: boolean; keepRetryCount?: boolean }) => Promise<void>;
   leaveChannel: () => void;
+  /** The voice channel is gone on the server (its space was deleted): the
+   *  same local teardown as leaveChannel, without voice:leave (the server
+   *  already removed the session and its room). */
+  handleVoiceChannelGone: () => void;
   /** `source: 'connect'` is a snapshot replay (socket connect, server join): ignored for the channel this client is in. */
   setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string, source?: 'connect') => void;
   addUserToChannel: (channelId: string, user: VoiceUser, serverId?: string) => void;
@@ -365,10 +369,11 @@ function activeSecureVoiceSession(channelId: string | null): import('../services
 }
 
 /**
- * End the secure-voice session (if any) — leave/cleanup/reconnect paths.
- * Exported because teardowns that deliberately skip leaveChannel (the server
- * already ejected us, so emitting voice:leave would be wrong) must still kill
- * the crypto worker, zero the media key, and stop the membership poll.
+ * End the secure-voice session (if any): kill the crypto worker, zero the
+ * media key, and stop the membership poll. Part of the one teardown of a
+ * space voice session (endVoiceChannelSession), which a channel gone on the
+ * server goes through too (handleVoiceChannelGone): an end of a call outside
+ * the store goes through those actions, not through this alone.
  */
 export function teardownSecureVoice(): void {
   if (!secureVoiceChannelId) return;
@@ -1309,6 +1314,74 @@ function handleSignalInternal(
   }
 }
 
+/**
+ * The one teardown of a space voice session, for every way it ends on this
+ * client: the session generation moves (an in-flight join or rebuild gives
+ * up), the pipeline ends (speaking detection, noise suppression and their
+ * tracks), then the microphone, the SFU side, the secure-voice session and
+ * the state. `tellServer` false is a channel already gone on the server (its
+ * space was deleted): no voice:leave, the session and the room are gone.
+ */
+function endVoiceChannelSession(
+  stateAccessors: { get: () => VoiceState; set: (partial: Partial<VoiceState>) => void },
+  { tellServer }: { tellServer: boolean },
+) {
+  const { get, set } = stateAccessors;
+  voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
+  const socket = getSocket();
+  const { localStream, activeChannelId, localUserId } = get();
+
+  // A pre-flight in progress dies with the voice session. The modal's own
+  // effect also cancels, but logout REPLACES the store state before React
+  // can run it — the capture tracks would never be stopped and the OS
+  // "sharing your screen" indicator would stay lit until app restart.
+  get().cancelPendingShare();
+
+  // Stop screen sharing before leaving
+  if (get().isScreenSharing) {
+    get().stopScreenShare();
+  }
+
+  get().stopLatencyMeasurement();
+  onSpeakingChange(null);
+  stopSpeakingDetection();
+  stopNoiseSuppression();
+
+  // Immediately remove local user from channelUsers
+  if (activeChannelId && localUserId) {
+    get().removeUserFromChannel(activeChannelId, localUserId);
+  }
+
+  if (localStream) {
+    localStream.getTracks().forEach((track) => track.stop());
+  }
+
+  // Clean up SFU resources
+  get().cleanupSFU();
+
+  // Secure voice: the media keys die with the session (fresh key + epoch on
+  // any rejoin — the IV-reuse firewall, spec §21)
+  teardownSecureVoice();
+
+  if (socket && tellServer) {
+    socket.emit('voice:leave');
+  }
+
+  set({
+    activeChannelId: null,
+    activeVoiceServerId: null,
+    localStream: null,
+    latency: null,
+    pttActive: false,
+    screenStream: null,
+    isScreenSharing: false,
+    screenSharingUserId: null,
+    remoteScreenStream: null,
+    secureVoicePeerIssues: {},
+    secureVoiceActive: false,
+  });
+}
+
 // ─── Store ──────────────────────────────────────────────────────────────────
 
 export const useVoiceStore = create<VoiceState>((set, get) => ({
@@ -1557,59 +1630,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   leaveChannel: () => {
-    voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
-    const socket = getSocket();
-    const { localStream, activeChannelId, localUserId } = get();
+    endVoiceChannelSession({ get, set }, { tellServer: true });
+  },
 
-    // A pre-flight in progress dies with the voice session. The modal's own
-    // effect also cancels, but logout REPLACES the store state before React
-    // can run it — the capture tracks would never be stopped and the OS
-    // "sharing your screen" indicator would stay lit until app restart.
-    get().cancelPendingShare();
-
-    // Stop screen sharing before leaving
-    if (get().isScreenSharing) {
-      get().stopScreenShare();
-    }
-
-    get().stopLatencyMeasurement();
-    onSpeakingChange(null);
-    stopSpeakingDetection();
-    stopNoiseSuppression();
-
-    // Immediately remove local user from channelUsers
-    if (activeChannelId && localUserId) {
-      get().removeUserFromChannel(activeChannelId, localUserId);
-    }
-
-    if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop());
-    }
-
-    // Clean up SFU resources
-    get().cleanupSFU();
-
-    // Secure voice: the media keys die with the session (fresh key + epoch on
-    // any rejoin — the IV-reuse firewall, spec §21)
-    teardownSecureVoice();
-
-    if (socket) {
-      socket.emit('voice:leave');
-    }
-
-    set({
-      activeChannelId: null,
-      activeVoiceServerId: null,
-      localStream: null,
-      latency: null,
-      pttActive: false,
-      screenStream: null,
-      isScreenSharing: false,
-      screenSharingUserId: null,
-      remoteScreenStream: null,
-      secureVoicePeerIssues: {},
-      secureVoiceActive: false,
-    });
+  handleVoiceChannelGone: () => {
+    endVoiceChannelSession({ get, set }, { tellServer: false });
+    // The share state the space-deleted handler used to reset by hand
+    set({ screenShareFrozen: false, screenShareSourceKey: null, shareKind: 'screen' });
   },
 
   // ── mediasoup SFU handlers ─────────────────────────────────────────────

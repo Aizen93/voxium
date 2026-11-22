@@ -14,15 +14,22 @@ import { VOICE_SPEAK_REFUSED_MESSAGE } from '@voxium/shared';
 vi.mock('mediasoup-client', () => ({ Device: vi.fn() }));
 
 const socket = vi.hoisted(() => ({ emit: vi.fn(), on: vi.fn(), off: vi.fn() }));
+
+// The real compositor module, its teardown observed: a share's end must stop it
+vi.mock('../../services/screenComposite', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/screenComposite')>();
+  return { ...actual, teardownComposite: vi.fn(actual.teardownComposite) };
+});
 vi.mock('../../services/socket', () => ({
   getSocket: vi.fn(() => socket),
   onSocketReconnect: vi.fn(),
 }));
 
 // The audio service, with the one rule of it this file relies on (pinned in
-// audioAnalyser.test.ts): the pipeline's stop ends its gated track
+// audioAnalyser.test.ts): the pipeline's stops end its gated and suppressed
+// tracks
 const aa = vi.hoisted(() => {
-  const state = { gated: null as MediaStream | null };
+  const state = { gated: null as MediaStream | null, suppressed: null as MediaStream | null };
   return {
     state,
     startSpeakingDetection: vi.fn(),
@@ -35,8 +42,11 @@ const aa = vi.hoisted(() => {
     setNoiseSuppression: vi.fn(),
     onSpeakingChange: vi.fn(),
     applyNoiseSuppression: vi.fn(async (stream: MediaStream) => stream),
-    getSuppressedStream: vi.fn(() => null),
-    stopNoiseSuppression: vi.fn(),
+    getSuppressedStream: vi.fn(() => state.suppressed),
+    stopNoiseSuppression: vi.fn(() => {
+      state.suppressed?.getTracks().forEach((track) => track.stop());
+      state.suppressed = null;
+    }),
     setSpeakingDetectionPaused: vi.fn(),
     onNoiseSuppressionFailure: vi.fn(),
     getSpeakingDetectionMode: vi.fn(() => null),
@@ -90,6 +100,7 @@ vi.mock('../../stores/settingsStore', async () => {
 });
 
 import { useVoiceStore } from '../../stores/voiceStore';
+import { teardownComposite } from '../../services/screenComposite';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { Device } from 'mediasoup-client';
 import type { Transport, Producer } from 'mediasoup-client/types';
@@ -177,6 +188,7 @@ beforeEach(() => {
     msDevice: null,
   });
   aa.state.gated = null;
+  aa.state.suppressed = null;
   sendTransports = [];
   enabledAtProduce = [];
   vi.mocked(Device).mockImplementation(function realDeviceOverFakeHandler() {
@@ -355,5 +367,75 @@ describe('the microphone producer never stops the pipeline\'s track', () => {
     expect(gated.stop).toHaveBeenCalledTimes(1);
     expect(raw.stop).toHaveBeenCalled();
     expect(aa.stopSpeakingDetection).toHaveBeenCalled();
+  });
+});
+
+describe('a channel gone on the server (its space was deleted while in its voice channel)', () => {
+  it('ends the call through the one teardown of the store: every track of the pipeline stops, and no voice:leave goes out', async () => {
+    const [raw, suppressed, gated] = [fakeTrack('raw'), fakeTrack('suppressed'), fakeTrack('gated')];
+    inChannel(raw, gated);
+    aa.state.suppressed = streamOf(suppressed);
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+    const [producer] = micProducers();
+    // Share state a pending or frozen share left behind, off its defaults
+    useVoiceStore.setState({ pttActive: true, screenShareFrozen: true, screenShareSourceKey: 'window:1280x720', shareKind: 'whiteboard' });
+    socket.emit.mockClear();
+    aa.onSpeakingChange.mockClear();
+
+    useVoiceStore.getState().handleVoiceChannelGone();
+
+    // The pipeline ends where the call does: noise suppression (its audio
+    // context and suppressed track) and the speaking detector (its gated track)
+    expect(aa.stopNoiseSuppression).toHaveBeenCalled();
+    expect(suppressed.stop).toHaveBeenCalled();
+    expect(aa.stopSpeakingDetection).toHaveBeenCalled();
+    expect(gated.stop).toHaveBeenCalled();
+    expect(aa.onSpeakingChange).toHaveBeenCalledWith(null);
+    expect(raw.stop).toHaveBeenCalled();
+    expect(producer.closed).toBe(true);
+    // The server already removed the session and its room
+    expect(socket.emit).not.toHaveBeenCalledWith('voice:leave');
+    const state = useVoiceStore.getState();
+    expect(state.activeChannelId).toBeNull();
+    expect(state.activeVoiceServerId).toBeNull();
+    expect(state.localStream).toBeNull();
+    expect(state.pttActive).toBe(false);
+    expect(state.msSendTransport).toBeNull();
+    expect(state.msProducers.size).toBe(0);
+    expect(state.screenShareFrozen).toBe(false);
+    expect(state.screenShareSourceKey).toBeNull();
+    expect(state.shareKind).toBe('screen');
+  });
+
+  it('a live screen share ends with the call: its capture tracks stop and the mask compositor is torn down', async () => {
+    inChannel(fakeTrack('raw'), fakeTrack('gated'));
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+    const [capture, captureAudio] = [fakeTrack('capture'), fakeTrack('capture-audio')];
+    useVoiceStore.setState({
+      isScreenSharing: true,
+      screenSharingUserId: 'me',
+      screenStream: { getTracks: () => [capture, captureAudio] } as unknown as MediaStream,
+    });
+    vi.mocked(teardownComposite).mockClear();
+
+    useVoiceStore.getState().handleVoiceChannelGone();
+
+    expect(capture.stop).toHaveBeenCalled();
+    expect(captureAudio.stop).toHaveBeenCalled();
+    expect(teardownComposite).toHaveBeenCalled();
+    const state = useVoiceStore.getState();
+    expect(state.screenStream).toBeNull();
+    expect(state.isScreenSharing).toBe(false);
+    expect(state.screenSharingUserId).toBeNull();
+  });
+
+  it('a leave (the same teardown) still says voice:leave', async () => {
+    inChannel(fakeTrack('raw'), fakeTrack('gated'));
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+    socket.emit.mockClear();
+
+    useVoiceStore.getState().leaveChannel();
+
+    expect(socket.emit).toHaveBeenCalledWith('voice:leave');
   });
 });

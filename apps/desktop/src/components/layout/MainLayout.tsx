@@ -4,7 +4,7 @@ import { translateServerError } from '../../utils/serverErrors';
 import i18n from '../../i18n';
 import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
-import { useVoiceStore, teardownSecureVoice } from '../../stores/voiceStore';
+import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore, isConversationReadOnly } from '../../stores/dmStore';
 import { useE2EStore } from '../../stores/e2eStore';
@@ -22,7 +22,6 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { usePushToTalk } from '../../hooks/usePushToTalk';
 import { playJoinSound, playLeaveSound, playMessageSound, playMentionSound } from '../../services/notificationSounds';
 import { toast } from '../../stores/toastStore';
-import { stopSpeakingDetection } from '../../services/audioAnalyser';
 import { handleInboundKey, handleKeyRequest } from '../../services/e2e/secureVoiceKeys';
 import { IncomingCallModal } from '../dm/IncomingCallModal';
 import { FriendsView } from '../friends/FriendsView';
@@ -697,36 +696,11 @@ export function MainLayout() {
         const voiceState = useVoiceStore.getState();
         const serverState = useServerStore.getState();
 
-        // Inline voice cleanup if in a voice channel on this server
-        // (don't call leaveChannel() — it would emit voice:leave back to
-        // the server, but the server already ejected us)
+        // In a voice channel on this server: the store's one teardown of the
+        // call (the pipeline, the microphone, the SFU side, the secure-voice
+        // session), without voice:leave (the server already ejected us)
         if (voiceState.activeChannelId && activeVoiceServerIs(serverId)) {
-          {
-            voiceState.stopLatencyMeasurement();
-            stopSpeakingDetection();
-            if (voiceState.localStream) {
-              voiceState.localStream.getTracks().forEach((track) => track.stop());
-            }
-            voiceState.cleanupSFU();
-            // The E2E session is NOT part of cleanupSFU: without this the
-            // crypto worker, the media key and the membership poll outlive the
-            // deleted server entirely.
-            teardownSecureVoice();
-            useVoiceStore.setState({
-              activeChannelId: null,
-              localStream: null,
-              latency: null,
-              screenStream: null,
-              isScreenSharing: false,
-              screenSharingUserId: null,
-              remoteScreenStream: null,
-              screenShareFrozen: false,
-              screenShareSourceKey: null,
-              shareKind: 'screen',
-              secureVoiceActive: false,
-              secureVoicePeerIssues: {},
-            });
-          }
+          voiceState.handleVoiceChannelGone();
         }
 
         // Clean up orphaned channelUsers entries for the deleted server's voice channels

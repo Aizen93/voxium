@@ -903,6 +903,21 @@ describe('voiceStore', () => {
       expect(useVoiceStore.getState().activeChannelId).toBeNull();
     });
 
+    it('a channel gone on the server mid-mic-acquisition supersedes the join too (the teardown moves the generation)', async () => {
+      const socket = vi.mocked(getSocket)()!;
+      vi.mocked(socket.emit).mockClear();
+
+      const joinPromise = useVoiceStore.getState().joinChannel('ch-race');
+      useVoiceStore.getState().handleVoiceChannelGone();
+      await joinPromise;
+
+      const emitted = vi.mocked(socket.emit).mock.calls.map((c) => c[0]);
+      expect(emitted).not.toContain('voice:join');
+      // The server already removed the session: nothing is said about it
+      expect(emitted).not.toContain('voice:leave');
+      expect(useVoiceStore.getState().activeChannelId).toBeNull();
+    });
+
     it('control: an unimpeded join emits voice:join for the channel', async () => {
       const socket = vi.mocked(getSocket)()!;
       vi.mocked(socket.emit).mockClear();

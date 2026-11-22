@@ -26,4 +26,14 @@ describe('MainLayout hands the end of a call to the voice store', () => {
     expect(body).not.toMatch(/dmCallConversationId/);
     expect(body).not.toMatch(/handleDMCallEnded|setIncomingCall/);
   });
+
+  it('a space deleted while in its voice channel ends the call through the store, with no teardown of its own', () => {
+    const body = handler('serverDeleted', 'announcementInit');
+    expect(body).toMatch(/voiceState\.handleVoiceChannelGone\(\)/);
+    // Not leaveChannel (it would say voice:leave to a server that already
+    // removed the session), and no piece of the teardown done here by hand
+    expect(body).not.toMatch(/leaveChannel\(/);
+    expect(body).not.toMatch(/stopSpeakingDetection|stopNoiseSuppression|cleanupSFU|teardownSecureVoice|getTracks\(\)/);
+    expect(body).not.toMatch(/activeChannelId: null/);
+  });
 });
