@@ -1170,6 +1170,48 @@ describe('E2EService (client crypto core)', () => {
     })).text).toBe('over the cap');
   });
 
+  it('rotates a group session past its maximum age, and one dated ahead of the clock (set back since) at the next send', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const MAX_AGE = E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS;
+    const send = async (text: string) => sidOf((await alice.service.encryptMessage('c1', bob.userId, text)).envelope);
+
+    const t0 = Date.now();
+    // the clock only: IndexedDB and flushQueue keep their own timers
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      const first = await send('first');
+      // forward: kept within the maximum age, rotated at it
+      vi.setSystemTime(t0 + MAX_AGE - 1);
+      expect(await send('within the age')).toBe(first);
+      vi.setSystemTime(t0 + MAX_AGE);
+      const aged = await send('at the age');
+      expect(aged).not.toBe(first);
+
+      // set back a day: the session is dated ahead of the clock and rotates now…
+      vi.setSystemTime(t0 + MAX_AGE - 86_400_000);
+      const setBack = await send('after the step back');
+      expect(setBack).not.toBe(aged);
+      // …once: the new session is dated by the clock now
+      expect(await send('the next one')).toBe(setBack);
+
+      // a session whose time is not a number rotates too
+      const internals = alice.service as unknown as { outbound: Map<string, { record: { createdAt: number } }> };
+      internals.outbound.get('c1')!.record.createdAt = Number.NaN;
+      const unreadable = await send('after an unreadable time');
+      expect(unreadable).not.toBe(setBack);
+      expect(await send('and after that')).toBe(unreadable);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('claims each key share exactly once (imported shares are acknowledged, and so deleted server-side)', async () => {
     uniq++;
     const server = createFakeServer();
@@ -1701,6 +1743,310 @@ describe('E2EService (client crypto core)', () => {
       expect((await bob.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: alice.userId, content: second })).text).toBe('two');
     } finally {
       Date.now = realNow;
+    }
+  });
+
+  it('a share attempt dated ahead of the clock (set back since) holds no backoff: the next send retries it', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const sharesToBob = () => server.shares.filter((s) => s.recipientUserId === bob.userId).length;
+    const send = (text: string) => alice.service.encryptMessage('c1', bob.userId, text);
+
+    const t0 = Date.now();
+    // the clock only: IndexedDB and flushQueue keep their own timers
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      server.setKeyshareUploadFailure(true);
+      const { envelope: first } = await send('one');
+      // past the backoff the retry runs, and fails again: the last attempt is now t0 + 60 s
+      vi.setSystemTime(t0 + 60_000);
+      const { envelope: second } = await send('two');
+      expect(sidOf(second)).toBe(sidOf(first));
+      server.setKeyshareUploadFailure(false);
+
+      // forward, within the backoff of that attempt: no retry, as before
+      vi.setSystemTime(t0 + 70_000);
+      expect(sidOf((await send('three')).envelope)).toBe(sidOf(first));
+      expect(sharesToBob()).toBe(0);
+
+      // set back to t0 + 1 s: the session is not ahead of the clock, the last attempt is
+      vi.setSystemTime(t0 + 1_000);
+      expect(sidOf((await send('four')).envelope)).toBe(sidOf(first)); // the same session, retried
+      expect(sharesToBob()).toBe(1);
+      expect((await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: first })).text).toBe('one');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The usual case: a share that failed when its session was created has its
+  // attempt dated with the session, so both are ahead of the clock together.
+  it.each([
+    ['an hour', 3_600_000],
+    ['3 s', 3_000],
+  ])('a share that failed at its session\'s creation, both set back %s ahead of the clock: the next send delivers it, then rotates', async (_label, step) => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const send = (text: string) => alice.service.encryptMessage('c1', bob.userId, text);
+    const read = async (id: string, content: string) =>
+      (await bob.service.decryptMessage({ id, conversationId: 'c1', authorId: alice.userId, content })).text;
+
+    const t0 = Date.now();
+    // the clock only: IndexedDB and flushQueue keep their own timers
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      server.setKeyshareUploadFailure(true);
+      const { envelope: one } = await send('one');
+      server.setKeyshareUploadFailure(false);
+
+      vi.setSystemTime(t0 + 1_000 - step);
+      const { envelope: two } = await send('two');
+      expect(sidOf(two)).not.toBe(sidOf(one)); // rotated: its age cannot be known
+      expect(await read('m1', one)).toBe('one'); // delivered before the rotation
+      expect(await read('m2', two)).toBe('two');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a session rotated by age first delivers the shares it still owes', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+
+    const t0 = Date.now();
+    // the clock only: IndexedDB and flushQueue keep their own timers
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      server.setKeyshareUploadFailure(true);
+      const { envelope: one } = await alice.service.encryptMessage('c1', bob.userId, 'one');
+      server.setKeyshareUploadFailure(false);
+
+      // nothing sent for a week: the next send rotates by age
+      vi.setSystemTime(t0 + E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS);
+      const { envelope: two } = await alice.service.encryptMessage('c1', bob.userId, 'a week later');
+      expect(sidOf(two)).not.toBe(sidOf(one));
+      expect((await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: one })).text).toBe('one');
+      expect((await bob.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: alice.userId, content: two })).text).toBe('a week later');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a session rotated by message count delivers the shares it still owes first, within the retry backoff too', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+
+    // the clock only, and held still: every send below is within the backoff of the failed attempt
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now());
+      server.setKeyshareUploadFailure(true);
+      const { envelope: first } = await alice.service.encryptMessage('c1', bob.userId, 'm0');
+      server.setKeyshareUploadFailure(false);
+      for (let i = 1; i < E2E_LIMITS.GROUP_SESSION_MAX_MESSAGES; i++) {
+        expect(sidOf((await alice.service.encryptMessage('c1', bob.userId, `m${i}`)).envelope)).toBe(sidOf(first));
+      }
+      expect(server.shares.filter((s) => s.sessionId === sidOf(first))).toHaveLength(0); // held by the backoff
+
+      const { envelope: rotated } = await alice.service.encryptMessage('c1', bob.userId, 'over the cap');
+      expect(sidOf(rotated)).not.toBe(sidOf(first));
+      expect((await bob.service.decryptMessage({ id: 'm0', conversationId: 'c1', authorId: alice.userId, content: first })).text).toBe('m0');
+      expect((await bob.service.decryptMessage({ id: 'mx', conversationId: 'c1', authorId: alice.userId, content: rotated })).text).toBe('over the cap');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a session rotated because a device left sends its old key to nobody', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const bobPhone = makeDevice(server, bobId);
+    const bobTablet = makeDevice(server, bobId);
+    await alice.service.initialize();
+    await bobPhone.service.initialize();
+    await bobTablet.service.initialize();
+    await flushQueue();
+
+    server.setKeyshareUploadFailure(true);
+    const { envelope: one } = await alice.service.encryptMessage('c1', bobId, 'one');
+    server.setKeyshareUploadFailure(false);
+    await bobPhone.service.revokeDevice(bobTablet.service.deviceId);
+
+    const { envelope: two } = await alice.service.encryptMessage('c1', bobId, 'two');
+    expect(sidOf(two)).not.toBe(sidOf(one));
+    // the old session's undelivered shares are not retried: not to the revoked
+    // tablet, and so not to the phone either (the loss any device-set rotation has)
+    expect(server.shares.filter((s) => s.sessionId === sidOf(one))).toHaveLength(0);
+    expect(server.shares.filter((s) => s.sessionId === sidOf(two)).map((s) => s.recipientDeviceId)).toEqual([bobPhone.service.deviceId]);
+    expect((await bobPhone.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: alice.userId, content: two })).text).toBe('two');
+    expect((await bobPhone.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: one })).failed).toBe(true);
+  });
+
+  it('the retry before a rotation keeps the retry cap: a session whose retries are spent rotates without one', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+
+    const t0 = Date.now();
+    // the clock only: IndexedDB and flushQueue keep their own timers
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      server.setKeyshareUploadFailure(true);
+      const { envelope: one } = await alice.service.encryptMessage('c1', bob.userId, 'one');
+      server.setKeyshareUploadFailure(false);
+      // the rounds are spent (MAX_SHARE_RETRIES, 10 in spec §12.4)
+      const internals = alice.service as unknown as { outbound: Map<string, { record: { shareRetryCount?: number } }> };
+      internals.outbound.get('c1')!.record.shareRetryCount = 10;
+
+      vi.setSystemTime(t0 + E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS);
+      const { envelope: two } = await alice.service.encryptMessage('c1', bob.userId, 'a week later');
+      expect(sidOf(two)).not.toBe(sidOf(one));
+      expect(server.shares.filter((s) => s.sessionId === sidOf(one))).toHaveLength(0);
+      expect((await bob.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: alice.userId, content: two })).text).toBe('a week later');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a retry before a rotation whose upload fails again does not stop the rotation: the new session still reaches every device', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const bob = makeParty(server, 'bob');
+    const aliceId = `alice-${uniq}`;
+    const base = server.apiFor(aliceId);
+    let refusedSession: string | null = null;
+    const refusing = {
+      ...base,
+      async post(url: string, body?: Parameters<typeof base.post>[1]) {
+        const shares = (body as { shares?: Array<{ sessionId?: string }> } | undefined)?.shares;
+        if (url === '/e2e/keyshares' && refusedSession && shares?.some((s) => s.sessionId === refusedSession)) {
+          throw new Error('503: key-share upload unavailable');
+        }
+        return base.post(url, body);
+      },
+    };
+    const alice = new E2EService(aliceId, {
+      api: refusing as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+    liveServices.add(alice);
+    await alice.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+
+    const t0 = Date.now();
+    // the clock only: IndexedDB and flushQueue keep their own timers
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      server.setKeyshareUploadFailure(true);
+      const { envelope: one } = await alice.encryptMessage('c1', bob.userId, 'one');
+      server.setKeyshareUploadFailure(false);
+      refusedSession = sidOf(one); // every upload of the old session's key fails
+
+      vi.setSystemTime(t0 + E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS);
+      const { envelope: two } = await alice.encryptMessage('c1', bob.userId, 'a week later');
+      expect(sidOf(two)).not.toBe(sidOf(one));
+      expect((await bob.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: aliceId, content: two })).text).toBe('a week later');
+      // what the last retry could not deliver is dropped with the old session
+      expect((await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: aliceId, content: one })).failed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an unknown session\'s inbox re-poll dated ahead of the clock (set back since) holds no wait', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const base = server.apiFor(bobId);
+    let claims = 0;
+    const counting = {
+      ...base,
+      async get(url: string) {
+        if (url.startsWith('/e2e/keyshares?')) claims++;
+        return base.get(url);
+      },
+    };
+    const bob = new E2EService(bobId, {
+      api: counting as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+    liveServices.add(bob);
+    await alice.service.initialize();
+    await bob.initialize();
+    await flushQueue();
+    // a message whose key share never reached the server
+    server.setKeyshareUploadFailure(true);
+    const { envelope } = await alice.service.encryptMessage('c1', bobId, 'not shared yet');
+    server.setKeyshareUploadFailure(false);
+    let row = 0;
+    const tryToRead = async () =>
+      (await bob.decryptMessage({ id: `u${++row}`, conversationId: 'c1', authorId: alice.userId, content: envelope })).failed;
+    const before = claims;
+
+    const t0 = Date.now();
+    // the clock only: IndexedDB and flushQueue keep their own timers
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      expect(await tryToRead()).toBe(true);
+      expect(claims).toBe(before + 1);
+      // forward, within the wait: no claim, as before
+      vi.setSystemTime(t0 + 5_000);
+      expect(await tryToRead()).toBe(true);
+      expect(claims).toBe(before + 1);
+
+      // set back an hour: the last attempt lies ahead of the clock, so the inbox is read again
+      vi.setSystemTime(t0 - 3_600_000);
+      expect(await tryToRead()).toBe(true);
+      expect(claims).toBe(before + 2);
+      // that attempt is dated by the clock now, and its wait holds
+      expect(await tryToRead()).toBe(true);
+      expect(claims).toBe(before + 2);
+      // forward past the wait: read again, as before
+      vi.setSystemTime(t0 - 3_600_000 + 15_000);
+      expect(await tryToRead()).toBe(true);
+      expect(claims).toBe(before + 3);
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -3523,6 +3869,95 @@ describe('E2EService — secure-channel group sessions', () => {
       content: envelope,
     });
     expect(own.text).toBe('covert hello');
+  });
+
+  it('rotates a channel session past its maximum age, and one dated ahead of the clock (set back since) at the next send', async () => {
+    const { alice, bob, channelId } = await threeMemberChannel();
+    const MAX_AGE = E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS;
+    const send = async (text: string) => sidOf((await alice.service.encryptChannelMessage(channelId, text)).envelope);
+
+    const t0 = Date.now();
+    // the clock only: IndexedDB and flushQueue keep their own timers
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      const first = await send('first');
+      // forward: kept within the maximum age, rotated at it
+      vi.setSystemTime(t0 + MAX_AGE - 1);
+      expect(await send('within the age')).toBe(first);
+      vi.setSystemTime(t0 + MAX_AGE);
+      const aged = await send('at the age');
+      expect(aged).not.toBe(first);
+
+      // set back a day: the session is dated ahead of the clock and rotates now…
+      vi.setSystemTime(t0 + MAX_AGE - 86_400_000);
+      const { envelope } = await alice.service.encryptChannelMessage(channelId, 'after the step back');
+      expect(sidOf(envelope)).not.toBe(aged);
+      // …once: the new session is dated by the clock now, and every member has it
+      expect(await send('the next one')).toBe(sidOf(envelope));
+      expect((await bob.service.decryptMessage({
+        id: 'age-1', conversationId: scope(channelId), authorId: alice.userId, content: envelope,
+      })).text).toBe('after the step back');
+
+      // a session whose time is not a number rotates too
+      const internals = alice.service as unknown as { outbound: Map<string, { record: { createdAt: number } }> };
+      internals.outbound.get(scope(channelId))!.record.createdAt = Number.NaN;
+      const unreadable = await send('after an unreadable time');
+      expect(unreadable).not.toBe(sidOf(envelope));
+      expect(await send('and after that')).toBe(unreadable);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['an hour', 3_600_000],
+    ['3 s', 3_000],
+  ])('a channel share that failed at its session\'s creation, both set back %s ahead of the clock: the next send delivers it, then rotates', async (_label, step) => {
+    const { server, alice, bob, charlie, channelId } = await threeMemberChannel();
+    const t0 = Date.now();
+    // the clock only: IndexedDB and flushQueue keep their own timers
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      server.setKeyshareUploadFailure(true);
+      const { envelope: one } = await alice.service.encryptChannelMessage(channelId, 'one');
+      server.setKeyshareUploadFailure(false);
+
+      vi.setSystemTime(t0 + 1_000 - step);
+      const { envelope: two } = await alice.service.encryptChannelMessage(channelId, 'two');
+      expect(sidOf(two)).not.toBe(sidOf(one));
+      for (const member of [bob, charlie]) {
+        expect((await member.service.decryptMessage({
+          id: 'cs-one', conversationId: scope(channelId), authorId: alice.userId, content: one,
+        })).text).toBe('one');
+        expect((await member.service.decryptMessage({
+          id: 'cs-two', conversationId: scope(channelId), authorId: alice.userId, content: two,
+        })).text).toBe('two');
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a channel session rotated because a member left sends its old key to nobody', async () => {
+    const { server, alice, bob, charlie, channelId } = await threeMemberChannel();
+    server.setKeyshareUploadFailure(true);
+    const { envelope: one } = await alice.service.encryptChannelMessage(channelId, 'one');
+    server.setKeyshareUploadFailure(false);
+    server.setChannelMembers(channelId, [alice.userId, bob.userId]); // charlie is removed
+
+    const { envelope: two } = await alice.service.encryptChannelMessage(channelId, 'two');
+    expect(sidOf(two)).not.toBe(sidOf(one));
+    // nothing of the old session is retried, to the remaining member either
+    expect(server.shares.filter((s) => s.sessionId === sidOf(one))).toHaveLength(0);
+    expect(server.shares.filter((s) => s.sessionId === sidOf(two)).map((s) => s.recipientUserId)).toEqual([bob.userId]);
+    expect((await bob.service.decryptMessage({
+      id: 'cl-two', conversationId: scope(channelId), authorId: alice.userId, content: two,
+    })).text).toBe('two');
+    expect((await charlie.service.decryptMessage({
+      id: 'cl-one', conversationId: scope(channelId), authorId: alice.userId, content: one,
+    })).failed).toBe(true);
   });
 
   it('a session is bound to its channel: the same envelope refuses a different scope', async () => {
