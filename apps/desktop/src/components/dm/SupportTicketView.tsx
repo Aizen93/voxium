@@ -8,6 +8,7 @@ import { StaffBadge } from '../common/StaffBadge';
 import { toast } from '../../stores/toastStore';
 import { clsx } from 'clsx';
 import { LIMITS } from '@voxium/shared';
+import { supportNoticeTranslation } from '../../utils/systemNotices';
 
 export function SupportTicketView() {
   const { t } = useTranslation();
@@ -103,10 +104,11 @@ export function SupportTicketView() {
 
         {messages.map((msg) => {
           if (msg.type === 'system') {
+            const notice = supportNoticeTranslation(msg.content);
             return (
               <div key={msg.id} className="my-2 flex justify-center">
                 <span className="rounded-full bg-vox-bg-secondary px-3 py-1 text-xs text-vox-text-muted">
-                  {msg.content}
+                  {notice ? t(notice.key, { ...notice.params }) : msg.content}
                 </span>
               </div>
             );

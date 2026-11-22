@@ -864,6 +864,8 @@
     "mentionUnknown": "@알 수 없음"
   },
   "dm": {
+    "callStarted": "음성 통화가 시작되었습니다",
+    "callEnded": "음성 통화가 종료되었습니다",
     "title": "다이렉트 메시지",
     "friends": "친구",
     "contactSupport": "고객 지원 문의",
@@ -1086,6 +1088,10 @@
     "image": "이미지"
   },
   "support": {
+    "noticeOpened": "지원 티켓이 열렸습니다",
+    "noticeReopened": "지원 티켓이 다시 열렸습니다",
+    "noticeStaffJoined": "스태프 {{name}} 님이 대화에 참여했습니다",
+    "noticeClosedBy": "{{name}} 님이 티켓을 닫았습니다",
     "sendMessage": "메시지 보내기",
     "title": "지원",
     "open": "열림",

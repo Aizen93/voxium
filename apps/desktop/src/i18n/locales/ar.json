@@ -874,6 +874,8 @@
     "mentionUnknown": "@غير معروف"
   },
   "dm": {
+    "callStarted": "بدأت المكالمة الصوتية",
+    "callEnded": "انتهت المكالمة الصوتية",
     "title": "الرسائل المباشرة",
     "friends": "الأصدقاء",
     "contactSupport": "التواصل مع الدعم",
@@ -1101,6 +1103,10 @@
     "image": "صورة"
   },
   "support": {
+    "noticeOpened": "تم فتح تذكرة دعم",
+    "noticeReopened": "أُعيد فتح تذكرة الدعم",
+    "noticeStaffJoined": "انضم عضو الفريق {{name}} إلى المحادثة",
+    "noticeClosedBy": "أغلق {{name}} التذكرة",
     "sendMessage": "إرسال الرسالة",
     "title": "الدعم",
     "open": "مفتوح",

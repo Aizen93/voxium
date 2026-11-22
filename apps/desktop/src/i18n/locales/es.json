@@ -866,6 +866,8 @@
     "mentionUnknown": "@desconocido"
   },
   "dm": {
+    "callStarted": "Llamada de voz iniciada",
+    "callEnded": "Llamada de voz finalizada",
     "title": "Mensajes directos",
     "friends": "Amigos",
     "contactSupport": "Contactar soporte",
@@ -1089,6 +1091,10 @@
     "image": "imagen"
   },
   "support": {
+    "noticeOpened": "Ticket de soporte abierto",
+    "noticeReopened": "Ticket de soporte reabierto",
+    "noticeStaffJoined": "{{name}}, del equipo, se ha unido a la conversación",
+    "noticeClosedBy": "Ticket cerrado por {{name}}",
     "sendMessage": "Enviar mensaje",
     "title": "Soporte",
     "open": "Abierto",

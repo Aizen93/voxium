@@ -209,3 +209,31 @@ describe('message lists keep vertical space inside what Virtuoso measures', () =
     expectMarginsContained();
   });
 });
+
+describe('DM list call notices read in the viewer\'s language', () => {
+  const noticeRow = (id: string, content: string, encrypted: boolean): Message => {
+    const [first] = conversation({ channelId: null, conversationId: 'dm-1' });
+    return { ...first, id, type: 'system', content, encrypted };
+  };
+  const rowText = (id: string) => slots('row').find((s) => s.getAttribute('data-row-id') === id)?.textContent ?? '';
+
+  it('maps the listed sentences to keys and shows an unknown system sentence as it is', async () => {
+    chatState.messages = [
+      noticeRow('n1', 'Voice call started', false),
+      noticeRow('n2', 'Voice call ended', false),
+      noticeRow('n3', 'Something else happened', false),
+    ];
+    await render(<DMMessageList conversationId="dm-1" />);
+    expect(rowText('n1')).toContain('dm.callStarted');
+    expect(rowText('n2')).toContain('dm.callEnded');
+    expect(rowText('n3')).toContain('Something else happened');
+    expect(rowText('n1')).not.toContain('Voice call started');
+  });
+
+  it('does not map a row flagged encrypted that carries the same words', async () => {
+    chatState.messages = [noticeRow('e1', 'Voice call started', true)];
+    await render(<DMMessageList conversationId="dm-1" />);
+    expect(rowText('e1')).toContain('Voice call started');
+    expect(rowText('e1')).not.toContain('dm.callStarted');
+  });
+});

@@ -866,6 +866,8 @@
     "mentionUnknown": "@unknown"
   },
   "dm": {
+    "callStarted": "Voice call started",
+    "callEnded": "Voice call ended",
     "title": "Direct Messages",
     "friends": "Friends",
     "contactSupport": "Contact Support",
@@ -1089,6 +1091,10 @@
     "image": "image"
   },
   "support": {
+    "noticeOpened": "Support ticket opened",
+    "noticeReopened": "Support ticket reopened",
+    "noticeStaffJoined": "Staff member {{name}} has joined the conversation",
+    "noticeClosedBy": "Ticket closed by {{name}}",
     "title": "Support",
     "open": "Open",
     "inProgress": "In Progress",

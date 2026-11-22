@@ -864,6 +864,8 @@
     "mentionUnknown": "@未知"
   },
   "dm": {
+    "callStarted": "语音通话已开始",
+    "callEnded": "语音通话已结束",
     "title": "私信",
     "friends": "好友",
     "contactSupport": "联系客服",
@@ -1086,6 +1088,10 @@
     "image": "图片"
   },
   "support": {
+    "noticeOpened": "支持工单已创建",
+    "noticeReopened": "支持工单已重新打开",
+    "noticeStaffJoined": "工作人员 {{name}} 已加入对话",
+    "noticeClosedBy": "{{name}} 已关闭工单",
     "sendMessage": "发送消息",
     "title": "客服",
     "open": "开放",
