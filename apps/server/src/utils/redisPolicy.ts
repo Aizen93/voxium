@@ -1,3 +1,4 @@
+import { describeCaughtError } from './loggableError';
 /**
  * Redis holds this server's state, not a cache: rate-limit and abuse budgets,
  * the single-use marks of solved sign-up challenges and of used two-factor
@@ -39,7 +40,7 @@ export async function checkRedisEvictionPolicy(redis: RedisConfigReader): Promis
   } catch (err) {
     console.warn(
       '[Redis] Could not read the eviction policy (CONFIG GET failed or is not allowed):',
-      err instanceof Error ? err.message : String(err),
+      describeCaughtError(err),
       '- make sure maxmemory-policy is noeviction, or keys this server relies on can be dropped when memory runs short',
     );
     return 'unknown';

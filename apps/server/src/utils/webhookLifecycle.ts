@@ -3,6 +3,7 @@ import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { getIO } from '../websocket/socketServer';
 import { retryOnTransactionConflict } from './transactionRetry';
+import { describeCaughtError } from './loggableError';
 
 /**
  * The webhook lifecycle both management surfaces share: the owner's router
@@ -251,7 +252,7 @@ function announceBatchedPurge(webhookId: string, batched: Map<string, number>): 
   } catch (err) {
     console.error(
       `[Webhooks] The receipts of the messages purged with webhook ${webhookId} (gone by its lock) were not sent:`,
-      err instanceof Error ? err.message : err,
+      describeCaughtError(err),
     );
   }
 }

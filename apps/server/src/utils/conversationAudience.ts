@@ -2,6 +2,7 @@ import type { Server as SocketServer } from 'socket.io';
 import type { ClientToServerEvents, Message, ServerToClientEvents } from '@voxium/shared';
 import { prisma } from './prisma';
 import { SIDE_STATE_SELECT, rowForViewer, sidesBelowFloor, type ConversationSideState } from './conversationVisibility';
+import { describeCaughtError } from './loggableError';
 
 /**
  * Who receives an event about one message of a direct conversation (#47):
@@ -35,7 +36,7 @@ export async function readConversationAudience(
   try {
     return await prisma.conversationRead.findMany({ where: { conversationId }, select: SIDE_STATE_SELECT });
   } catch (err) {
-    console.warn(`[DM] The audience of an event in conversation ${conversationId} could not be read (the floors read earlier apply):`, err instanceof Error ? err.message : err);
+    console.warn(`[DM] The audience of an event in conversation ${conversationId} could not be read (the floors read earlier apply):`, describeCaughtError(err));
     return [...fallback];
   }
 }

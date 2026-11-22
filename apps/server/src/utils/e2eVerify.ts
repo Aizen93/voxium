@@ -1,4 +1,5 @@
 import { createPublicKey, verify as cryptoVerify } from 'node:crypto';
+import { describeCaughtError } from './loggableError';
 
 // DER prefix for a raw 32-byte Ed25519 public key wrapped as SPKI
 // (SEQUENCE → AlgorithmIdentifier(id-Ed25519) → BIT STRING). Lets node:crypto
@@ -26,7 +27,7 @@ export function verifyEd25519Signature(publicKeyB64: string, message: string, si
     return cryptoVerify(null, Buffer.from(message, 'utf8'), key, signature);
   } catch (err) {
     // Malformed key material — treat as verification failure, log for diagnosis
-    console.warn('e2e: ed25519 verification threw:', err instanceof Error ? err.message : err);
+    console.warn('e2e: ed25519 verification threw:', describeCaughtError(err));
     return false;
   }
 }

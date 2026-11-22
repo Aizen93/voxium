@@ -37,6 +37,7 @@ import { serverSelect } from '../utils/serverSelect';
 import {
   webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion, disarmWebhookRowsHeldBy,
 } from '../utils/webhookLifecycle';
+import { describeCaughtError, describeCaughtErrorWithStack, storeCall } from '../utils/loggableError';
 
 export const adminRouter = Router();
 
@@ -61,7 +62,7 @@ const BAN_TRANSACTION_OPTIONS = { timeout: 60_000, maxWait: 10_000 };
 
 /** A step after a committed ban failed: logged, never thrown (the ban holds). */
 function logBanFanOutFailure(userId: string, step: string, err: unknown): void {
-  console.error(`[Admin] User ${userId} banned, but ${step} failed:`, err instanceof Error ? err.message : err);
+  console.error(`[Admin] User ${userId} banned, but ${step} failed:`, describeCaughtError(err));
 }
 
 /**
@@ -1098,7 +1099,7 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
         io.to(`dm:${id}`).emit(WS_EVENTS.USER_UPDATED, payload);
       }
     } catch (broadcastErr) {
-      console.error('[Admin] Failed to broadcast role change:', broadcastErr);
+      console.error('[Admin] Failed to broadcast role change:', describeCaughtErrorWithStack(broadcastErr));
     }
 
     res.json({ success: true, message: `User "${target.username}" role changed to ${role}` });
@@ -1155,7 +1156,7 @@ adminRouter.patch('/users/:userId/supporter', async (req: Request<{ userId: stri
         io.to(`dm:${id}`).emit(WS_EVENTS.USER_UPDATED, payload);
       }
     } catch (broadcastErr) {
-      console.error('[Admin] Failed to broadcast supporter change:', broadcastErr);
+      console.error('[Admin] Failed to broadcast supporter change:', describeCaughtErrorWithStack(broadcastErr));
     }
 
     res.json({ success: true, message: `Supporter badge ${isSupporter ? 'granted to' : 'removed from'} "${target.username}"` });
@@ -1955,7 +1956,7 @@ function classifyKey(key: string): 'avatar' | 'server-icon' | 'attachment' {
 adminRouter.get('/storage/stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const [objects, usersWithAvatar, serversWithIcon, attachmentKeys] = await Promise.all([
-      listAllS3Objects(),
+      storeCall(() => listAllS3Objects()),
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { avatarUrl: true } }),
       prisma.server.findMany({ where: { iconUrl: { not: null } }, select: { iconUrl: true } }),
       prisma.messageAttachment.findMany({ where: { expired: false }, select: { s3Key: true } }),
@@ -2012,7 +2013,7 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
     }
 
     // ── 1. S3-based aggregation for avatars & server-icons ──
-    const objects = await listAllS3Objects();
+    const objects = await storeCall(() => listAllS3Objects());
     const s3EntityMap = new Map<string, { type: 'user' | 'server'; fileCount: number; totalSize: number }>();
 
     for (const obj of objects) {
@@ -2161,7 +2162,7 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
       : filter === 'server-icons' ? 'server-icons/'
       : filter === 'attachments' ? 'attachments/'
       : undefined;
-    const objects = await listAllS3Objects(prefix);
+    const objects = await storeCall(() => listAllS3Objects(prefix));
 
     const [usersWithAvatar, serversWithIcon, attachmentRecords] = await Promise.all([
       prisma.user.findMany({ where: { avatarUrl: { not: null } }, select: { id: true, username: true, avatarUrl: true } }),
@@ -2248,13 +2249,13 @@ adminRouter.delete('/storage/files/*path', async (req: Request<{ path: string[] 
       try {
         owners = await prisma.user.findMany({ where: { id: { in: formerOwnerIds } }, select: { id: true, displayName: true, avatarUrl: true } });
       } catch (readErr) {
-        console.error('[Admin] Failed to read the profiles to announce after an avatar removal:', readErr instanceof Error ? readErr.message : readErr);
+        console.error('[Admin] Failed to read the profiles to announce after an avatar removal:', describeCaughtError(readErr));
       }
       for (const owner of owners) {
         try {
           await broadcastProfileUpdate(owner.id, { displayName: owner.displayName, avatarUrl: owner.avatarUrl });
         } catch (broadcastErr) {
-          console.error('[Admin] Failed to broadcast avatar removal:', broadcastErr instanceof Error ? broadcastErr.message : broadcastErr);
+          console.error('[Admin] Failed to broadcast avatar removal:', describeCaughtError(broadcastErr));
         }
       }
     }
@@ -2266,7 +2267,7 @@ adminRouter.delete('/storage/files/*path', async (req: Request<{ path: string[] 
           io.to(`server:${space.id}`).emit(WS_EVENTS.SERVER_UPDATED, space as unknown as Server);
         }
       } catch (broadcastErr) {
-        console.error('[Admin] Failed to broadcast space icon removal:', broadcastErr instanceof Error ? broadcastErr.message : broadcastErr);
+        console.error('[Admin] Failed to broadcast space icon removal:', describeCaughtError(broadcastErr));
       }
     }
 
@@ -3050,7 +3051,7 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
             .emit(WS_EVENTS.DM_MESSAGE_DELETE, { messageId: message.id, conversationId: message.conversationId });
         }
       } catch (err) {
-        console.error(`[Admin] Report ${id} resolved, but the message delete notice failed:`, err instanceof Error ? err.message : err);
+        console.error(`[Admin] Report ${id} resolved, but the message delete notice failed:`, describeCaughtError(err));
       }
     }
 
@@ -3061,7 +3062,7 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       const pendingCount = await prisma.report.count({ where: { status: 'pending' } });
       getIO().to('admin:reports').emit('report:new', { total: pendingCount });
     } catch (err) {
-      console.error(`[Admin] Report ${id} resolved, but the pending-report count update failed:`, err instanceof Error ? err.message : err);
+      console.error(`[Admin] Report ${id} resolved, but the pending-report count update failed:`, describeCaughtError(err));
     }
 
     res.json({ success: true, message: 'Report resolved' });
@@ -3156,7 +3157,7 @@ function removePreviousClaimerFromRoom(previousClaimerId: string | null, newClai
     io.local.in(`user:${previousClaimerId}`).socketsLeave(`support:${ticketId}`);
     io.in(`user:${previousClaimerId}`).socketsLeave(`support:${ticketId}`);
   } catch (err) {
-    console.error('[Admin] Failed to remove the previous claimer from the support room:', err instanceof Error ? err.message : err);
+    console.error('[Admin] Failed to remove the previous claimer from the support room:', describeCaughtError(err));
   }
 }
 

@@ -26,6 +26,7 @@ import { DiscoveryTierThresholds,
 } from '@voxium/shared';
 import type { DiscoveryServer, DiscoveryPage, DiscoverySort, ServerJoinMode, ServerJoinRequest } from '@voxium/shared';
 import { Prisma } from '../generated/prisma/client';
+import { describeCaughtError } from '../utils/loggableError';
 
 export const discoveryRouter = Router();
 
@@ -250,7 +251,7 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
       // Without the generation a key could name a stale page: this request
       // is served uncached and nothing is written (cacheKey stays null).
       cacheKey = null;
-      console.warn('[Discovery] Page cache read failed (serving uncached):', err instanceof Error ? err.message : err);
+      console.warn('[Discovery] Page cache read failed (serving uncached):', describeCaughtError(err));
     }
 
     if (!publicPage) {
@@ -301,7 +302,7 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
         try {
           await getRedis().set(cacheKey, JSON.stringify(publicPage), { EX: DISCOVERY_PAGE_CACHE_TTL_S });
         } catch (err) {
-          console.warn('[Discovery] Page cache write failed:', err instanceof Error ? err.message : err);
+          console.warn('[Discovery] Page cache write failed:', describeCaughtError(err));
         }
       }
     }

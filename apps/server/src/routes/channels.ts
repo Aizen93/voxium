@@ -15,6 +15,7 @@ import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmen
 import { isSortPosition, MAX_SORT_POSITION, positionAfter } from '../utils/sortPosition';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { visibilityRequestMark, resyncRequestedSince, recheckVisibilityAfterJoin } from '../utils/channelVisibilityRooms';
+import { describeCaughtError } from '../utils/loggableError';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -26,7 +27,7 @@ const ROOM_FANOUT_BATCH = 500;
 
 /** A step after a channel's row delete committed failed: logged, never thrown. */
 function logChannelDeleteFanOutFailure(channelId: string, step: string, err: unknown): void {
-  console.error(`[Channels] Channel ${channelId} deleted, but ${step} failed:`, err instanceof Error ? err.message : err);
+  console.error(`[Channels] Channel ${channelId} deleted, but ${step} failed:`, describeCaughtError(err));
 }
 
 /**

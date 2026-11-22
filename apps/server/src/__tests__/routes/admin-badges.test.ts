@@ -489,7 +489,7 @@ describe('Admin Badge Routes', () => {
       // Error should be logged
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining('[Admin] Failed to broadcast role change'),
-        expect.any(Error),
+        expect.stringMatching(/^Error: DB connection lost\n\s+at /),
       );
 
       consoleSpy.mockRestore();
@@ -700,7 +700,7 @@ describe('Admin Badge Routes', () => {
 
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining('[Admin] Failed to broadcast supporter change'),
-        expect.any(Error),
+        expect.stringMatching(/^Error: Redis down\n\s+at /),
       );
 
       consoleSpy.mockRestore();

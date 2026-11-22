@@ -19,6 +19,7 @@ import { getIO } from '../websocket/socketServer';
 import { endDMCall } from '../websocket/dmVoiceHandler';
 import { deletedParticipantId } from './deletedParticipant';
 import { WS_EVENTS } from '@voxium/shared';
+import { describeCaughtError } from './loggableError';
 
 /**
  * Delete an account that owns NO servers, with everything that has to happen
@@ -94,7 +95,7 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     try {
       return await collectAttachmentKeys(messages);
     } catch (err) {
-      console.error(`${opts.logPrefix} Reading the attachment keys of ${what} failed (the orphan sweep will reclaim those files):`, err instanceof Error ? err.message : err);
+      console.error(`${opts.logPrefix} Reading the attachment keys of ${what} failed (the orphan sweep will reclaim those files):`, describeCaughtError(err));
       return [];
     }
   };
@@ -113,7 +114,7 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     try {
       await run();
     } catch (err) {
-      console.warn(`${opts.logPrefix} After the deletion of account ${userId}, ${step} failed:`, err instanceof Error ? err.message : err);
+      console.warn(`${opts.logPrefix} After the deletion of account ${userId}, ${step} failed:`, describeCaughtError(err));
     }
   };
 
@@ -302,7 +303,7 @@ export async function deleteAccountRows(userId: string, opts: { keepConversation
     if (ownsASpaceNow(err)) {
       const servers = await prisma.server.findMany({ where: { ownerId: userId }, select: { id: true, name: true } })
         .catch((readErr: unknown) => {
-          console.warn(`[Accounts] Could not list the spaces account ${userId} owns now:`, readErr instanceof Error ? readErr.message : readErr);
+          console.warn(`[Accounts] Could not list the spaces account ${userId} owns now:`, describeCaughtError(readErr));
           return [];
         });
       throw new OwnedServersError(servers);
@@ -362,7 +363,7 @@ export async function announceConversationsOfDeletedAccount(conversations: Delet
   try {
     io = getIO();
   } catch (err) {
-    console.warn(`${logPrefix} The notices about ${kept.length + deleted.length} direct conversation(s) of a deleted account were not sent:`, err instanceof Error ? err.message : err);
+    console.warn(`${logPrefix} The notices about ${kept.length + deleted.length} direct conversation(s) of a deleted account were not sent:`, describeCaughtError(err));
     return;
   }
 
@@ -370,7 +371,7 @@ export async function announceConversationsOfDeletedAccount(conversations: Delet
     try {
       io.to(`dm:${conversationId}`).emit(WS_EVENTS.DM_CONVERSATION_READ_ONLY, { conversationId });
     } catch (err) {
-      console.warn(`${logPrefix} The read-only notice of conversation ${conversationId} failed:`, err instanceof Error ? err.message : err);
+      console.warn(`${logPrefix} The read-only notice of conversation ${conversationId} failed:`, describeCaughtError(err));
     }
   }
 
@@ -382,7 +383,7 @@ export async function announceConversationsOfDeletedAccount(conversations: Delet
   if (failedCalls.length > 0) {
     console.warn(
       `${logPrefix} Ending the calls of ${failedCalls.length} direct conversation(s) of a deleted account failed:`,
-      failedCalls[0].reason instanceof Error ? failedCalls[0].reason.message : failedCalls[0].reason,
+      describeCaughtError(failedCalls[0].reason),
     );
   }
 
@@ -391,12 +392,12 @@ export async function announceConversationsOfDeletedAccount(conversations: Delet
     try {
       io.local.in(rooms).socketsLeave(rooms);
     } catch (err) {
-      console.warn(`${logPrefix} The local room leave of ${rooms.length} deleted conversation(s) failed:`, err instanceof Error ? err.message : err);
+      console.warn(`${logPrefix} The local room leave of ${rooms.length} deleted conversation(s) failed:`, describeCaughtError(err));
     }
     try {
       io.in(rooms).socketsLeave(rooms);
     } catch (err) {
-      console.warn(`${logPrefix} The cluster room leave of ${rooms.length} deleted conversation(s) failed:`, err instanceof Error ? err.message : err);
+      console.warn(`${logPrefix} The cluster room leave of ${rooms.length} deleted conversation(s) failed:`, describeCaughtError(err));
     }
   }
 }
@@ -446,7 +447,7 @@ async function lowerMemberCounts(serverIds: string[], userId: string): Promise<v
   if (failed > 0) {
     console.warn(
       `[Accounts] The member count of ${failed} of ${serverIds.length} space(s) was not lowered after the deletion of account ${userId} (the nightly recount corrects it):`,
-      lastError instanceof Error ? lastError.message : lastError,
+      describeCaughtError(lastError),
     );
   }
 }

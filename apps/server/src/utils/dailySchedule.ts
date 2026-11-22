@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'crypto';
 import { NODE_ID, getRedis } from './redis';
+import { describeCaughtError } from './loggableError';
 
 /**
  * How close to the slot counts as "this is the run we just did".
@@ -130,7 +131,7 @@ export async function withClusterLock<T>(
   try {
     claimed = await getRedis().set(opts.key, owner, { NX: true, EX: opts.ttlSeconds });
   } catch (err) {
-    console.error(`${opts.tag} Could not claim the cluster lock (Redis unavailable) — skipping this run:`, err instanceof Error ? err.message : err);
+    console.error(`${opts.tag} Could not claim the cluster lock (Redis unavailable) — skipping this run:`, describeCaughtError(err));
     return { skipped: 'unavailable' };
   }
   if (claimed === null) {
@@ -147,7 +148,7 @@ export async function withClusterLock<T>(
       // Only if we still own it: a run that outlives the TTL must not release
       // the lock a peer (or this node's own next run) has since taken.
       await releaseLockIfOwned(getRedis(), opts.key, owner).catch((err) =>
-        console.warn(`${opts.tag} Lock release failed (it expires on its own):`, err instanceof Error ? err.message : err));
+        console.warn(`${opts.tag} Lock release failed (it expires on its own):`, describeCaughtError(err)));
     }
   }
 }

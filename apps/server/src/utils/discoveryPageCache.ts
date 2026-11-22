@@ -1,4 +1,5 @@
 import { getRedis } from './redis';
+import { describeCaughtError } from './loggableError';
 
 /**
  * The Explore page cache's generation.
@@ -36,6 +37,6 @@ export async function bumpDiscoveryPageCache(reason: string): Promise<void> {
   try {
     await getRedis().incr(DISCOVERY_PAGE_GENERATION_KEY);
   } catch (err) {
-    console.warn(`[Discovery] Page cache not invalidated after ${reason}:`, err instanceof Error ? err.message : err);
+    console.warn(`[Discovery] Page cache not invalidated after ${reason}:`, describeCaughtError(err));
   }
 }

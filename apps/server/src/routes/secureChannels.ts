@@ -18,6 +18,7 @@ import {
   removeSecureMember,
   undoRoomJoinsOfRemovedMembers,
 } from '../utils/secureChannelLifecycle';
+import { describeCaughtError } from '../utils/loggableError';
 
 /**
  * Secure channels: invite-only, E2E-encrypted text channels.
@@ -295,7 +296,7 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
       try {
         await replayVoiceState(io.to(`user:${targetUserId}`), [serverId], new Set([channelId]), { source: 'connect' });
       } catch (err) {
-        console.warn('[SecureChannels] Could not replay voice occupancy to the invitee:', err instanceof Error ? err.message : err);
+        console.warn('[SecureChannels] Could not replay voice occupancy to the invitee:', describeCaughtError(err));
       }
     }
 

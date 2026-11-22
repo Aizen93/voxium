@@ -13,6 +13,7 @@ import { retryOnTransactionConflict } from '../utils/transactionRetry';
 import { refreshTokenShape } from '../utils/tokenShapes';
 import * as store from '../utils/sessionStore';
 import type { IssuedSessionRow, SessionDb } from '../utils/sessionStore';
+import { describeCaughtError } from '../utils/loggableError';
 
 /*
  * Sign-in sessions: one row per signed-in device or browser (the `sessions`
@@ -280,7 +281,7 @@ export async function trimSessions(userId: string, keepId: string): Promise<void
   try {
     evicted = await store.evictSessionsBeyond(prisma, userId, keepId, SESSIONS.MAX_PER_ACCOUNT - 1);
   } catch (err) {
-    console.warn('[Sessions] Could not trim the sessions of an account past the cap:', err instanceof Error ? err.message : err);
+    console.warn('[Sessions] Could not trim the sessions of an account past the cap:', describeCaughtError(err));
     return;
   }
   revokeSessionSockets(userId, evicted, SESSION_ENDED_REASON);

@@ -335,7 +335,7 @@ describe('removeMemberFromServer', () => {
 
     await removeMemberFromServer('u-1', 's-1');
 
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Voice eviction'), expect.any(Error));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Voice eviction'), expect.stringContaining('Error: redis down'));
     expect(order).toContain('txn:end');
     expect(order[order.length - 1]).toBe('left');
     warn.mockRestore();

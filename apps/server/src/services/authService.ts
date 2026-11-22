@@ -24,6 +24,7 @@ import {
   createSession, openSession, rekeySession, trimSessions, readCarriedLabel, carriedLabel, endOtherSessions,
   revokeSession, type SessionLabel, type SessionTokens,
 } from './sessionService';
+import { describeCaughtError, describeCaughtErrorWithStack } from '../utils/loggableError';
 
 /**
  * The consent SELECT fragment every user payload includes, and the mapping
@@ -49,7 +50,7 @@ export function withConsentFlag<T extends { termsAcceptedAt: Date | null; privac
 let timingEqualizerHash: string | null = null;
 const timingEqualizerReady = bcrypt.hash(crypto.randomBytes(16).toString('hex'), 12)
   .then((hash) => { timingEqualizerHash = hash; })
-  .catch((err) => console.warn('[Auth] Timing-equalizer hash init failed (will retry lazily):', err));
+  .catch((err) => console.warn('[Auth] Timing-equalizer hash init failed (will retry lazily):', describeCaughtErrorWithStack(err)));
 
 async function getTimingEqualizerHash(): Promise<string> {
   if (!timingEqualizerHash) {
@@ -133,7 +134,7 @@ export async function loginUser(email: string, password: string, rememberMe: boo
       where: { userId_ip: { userId: user.id, ip } },
       update: { lastSeenAt: new Date(), ...geoFields },
       create: { userId: user.id, ip, ...geoFields },
-    }).catch((err) => console.warn('[Auth] IP record upsert failed:', err));
+    }).catch((err) => console.warn('[Auth] IP record upsert failed:', describeCaughtErrorWithStack(err)));
   }
 
   // If TOTP is enabled, check for trusted device token
@@ -261,7 +262,7 @@ function readTrustedDeviceToken(token: string): { userId: string; tokenVersion: 
   try {
     payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] });
   } catch (err) {
-    if (!isJwtVerifyError(err)) console.warn('[Auth] A trusted-device token could not be read:', err instanceof Error ? err.message : err);
+    if (!isJwtVerifyError(err)) console.warn('[Auth] A trusted-device token could not be read:', describeCaughtError(err));
     return null;
   }
   const p = payload as { userId?: unknown; purpose?: unknown; tokenVersion?: unknown; exp?: unknown } | null;
@@ -327,7 +328,7 @@ export async function requestPasswordReset(email: string) {
         select: { id: true },
       });
     } catch (err) {
-      console.error('[Auth] Failed to store password reset token:', err instanceof Error ? err.message : err);
+      console.error('[Auth] Failed to store password reset token:', describeCaughtError(err));
       // No token in the DB, so no mail: a link would be dead on arrival. The
       // mailbox gets back the point this request spent
       await refundRateLimit('resetMail', inbox);
@@ -590,7 +591,7 @@ export async function revokeOtherSessions(input: RevokeOtherSessionsInput): Prom
     try {
       trustedDeviceToken = signTrustedDeviceToken(userId, outcome.newVersion, trusted.exp);
     } catch (err) {
-      console.warn('[Auth] The trusted-device token could not be re-issued:', err instanceof Error ? err.message : err);
+      console.warn('[Auth] The trusted-device token could not be re-issued:', describeCaughtError(err));
     }
   }
   return {
@@ -724,7 +725,7 @@ async function restorePreviousVerificationLink(
       },
     });
   } catch (err) {
-    console.error('[Auth] Failed to restore the previous verification link after a failed send:', err instanceof Error ? err.message : err);
+    console.error('[Auth] Failed to restore the previous verification link after a failed send:', describeCaughtError(err));
   }
 }
 

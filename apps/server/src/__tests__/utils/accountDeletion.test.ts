@@ -728,12 +728,12 @@ describe('deleteUserAccount', () => {
 
     it('a storage failure is logged and the deletion still completes', async () => {
       prismaMock.messageAttachment.findMany.mockResolvedValue([{ id: 'att-1', s3Key: OWN }]);
-      deleteMultipleFromS3.mockRejectedValue(new Error('S3 unavailable'));
+      deleteMultipleFromS3.mockRejectedValue(Object.assign(new Error('S3 unavailable'), { name: 'ServiceUnavailable', $metadata: { httpStatusCode: 503 } }));
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).resolves.toBeUndefined();
         await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
-          '[T] Attachment file cleanup failed for a deleted account (the orphan sweep will reclaim them):', 'S3 unavailable'));
+          '[T] Attachment file cleanup failed for a deleted account (the orphan sweep will reclaim them):', 'ServiceUnavailable, HTTP 503'));
       } finally {
         warn.mockRestore();
       }

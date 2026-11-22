@@ -2,6 +2,7 @@ import type { Server as SocketServer } from 'socket.io';
 import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared';
 import { clearPresenceState, isUserOnline, type PresenceSweepDb } from './redis';
 import { withClusterLock, wasSkipped } from './dailySchedule';
+import { describeCaughtError } from './loggableError';
 
 type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -81,7 +82,7 @@ async function sweepAndAnnounce(io: IO, db: PresenceReaperDb): Promise<number> {
     } catch (err) {
       // Redis and the DB column are already right; the clients catch up on
       // their next fetch. Logged, and the next user still gets its broadcast.
-      console.warn(`[Presence] Could not broadcast the reaped offline status of ${userId}:`, err instanceof Error ? err.message : err);
+      console.warn(`[Presence] Could not broadcast the reaped offline status of ${userId}:`, describeCaughtError(err));
     }
   }
   console.warn(`[Presence] Reaper took ${offlineUserIds.length} ghost user(s) offline`);
@@ -93,7 +94,7 @@ export function startPresenceReaper(io: IO, db: PresenceReaperDb): void {
   if (reaperTimer) clearInterval(reaperTimer);
   reaperTimer = setInterval(() => {
     reapStalePresence(io, db).catch((err) =>
-      console.warn('[Presence] Stale presence reap failed:', err instanceof Error ? err.message : err));
+      console.warn('[Presence] Stale presence reap failed:', describeCaughtError(err)));
   }, PRESENCE_REAP_INTERVAL_MS);
   // Never keep the process alive just for the sweep
   reaperTimer.unref?.();

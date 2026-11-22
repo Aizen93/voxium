@@ -1,6 +1,7 @@
 import { prisma } from './prisma';
 import { E2E_LIMITS } from '@voxium/shared';
 import { withClusterLock, wasSkipped } from './dailySchedule';
+import { describeCaughtError } from './loggableError';
 
 // Sweeps undeliverable E2E key shares (docs/e2e-dm-spec.md §12) and stale
 // master-secret transfers (§14).
@@ -68,7 +69,7 @@ export async function runSweep(): Promise<number> {
     }
     return result;
   } catch (err) {
-    console.error('[E2E] Key-share sweep failed:', err instanceof Error ? err.message : err);
+    console.error('[E2E] Key-share sweep failed:', describeCaughtError(err));
     return 0;
   } finally {
     scheduleNext(nextDelay);

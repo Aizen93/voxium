@@ -1,6 +1,7 @@
 import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import type { AuditAction } from '@voxium/shared';
+import { describeCaughtError } from './loggableError';
 
 interface AuditEventParams {
   /** null for something the SERVER did on its own — a scheduled job has no
@@ -38,6 +39,6 @@ export function logAuditEvent(params: AuditEventParams): void {
       data: auditLogData(params),
     })
     .catch((err) => {
-      console.error('[AuditLog] Failed to write audit event:', err?.message ?? err);
+      console.error('[AuditLog] Failed to write audit event:', describeCaughtError(err));
     });
 }

@@ -1,6 +1,7 @@
 import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { deleteMultipleFromS3, VALID_ATTACHMENT_KEY_RE } from './s3';
+import { describeStoreError } from './loggableError';
 
 /** Attachment rows read per query while collecting the keys of a delete. */
 export const ATTACHMENT_KEY_BATCH = 1000;
@@ -95,7 +96,7 @@ export function deleteAttachmentBlobs(keys: string[], logPrefix: string, what: s
         console.warn(`${logPrefix} ${keys.length - deleted} of ${keys.length} attachment file(s) of ${what} were not deleted (the orphan sweep will reclaim them)`);
       }
     } catch (err) {
-      console.warn(`${logPrefix} Attachment file cleanup failed for ${what} (the orphan sweep will reclaim them):`, err instanceof Error ? err.message : err);
+      console.warn(`${logPrefix} Attachment file cleanup failed for ${what} (the orphan sweep will reclaim them):`, describeStoreError(err));
     }
   })();
 }

@@ -1,5 +1,6 @@
 import { getRedis, getRedisPubSub, getRedisConfigSub } from './redis';
 import { NotFoundError } from './errors';
+import { describeCaughtErrorWithStack } from './loggableError';
 
 // ─── Feature Flag Registry ──────────────────────────────────────────────────
 
@@ -83,7 +84,7 @@ export async function loadFeatureFlags(): Promise<void> {
       }
     }
   } catch (err) {
-    console.error('[FeatureFlags] Failed to load from Redis, using defaults:', err);
+    console.error('[FeatureFlags] Failed to load from Redis, using defaults:', describeCaughtErrorWithStack(err));
   }
 
   // Subscribe to config changes from other nodes
@@ -105,7 +106,7 @@ export async function loadFeatureFlags(): Promise<void> {
       }
     });
   } catch (err) {
-    console.error('[FeatureFlags] Failed to subscribe to config channel:', err);
+    console.error('[FeatureFlags] Failed to subscribe to config channel:', describeCaughtErrorWithStack(err));
   }
 }
 

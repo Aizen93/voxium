@@ -21,6 +21,7 @@ import { deleteUserAccount } from '../utils/accountDeletion';
 import { isReservedUsername } from '../utils/deletedParticipant';
 import { CONSENT_SELECT, withConsentFlag } from './authService';
 import { openSession, type SessionLabel, type SessionTokens } from './sessionService';
+import { describeCaughtError } from '../utils/loggableError';
 
 /*
  * Verify-first registration.
@@ -100,7 +101,7 @@ export async function claimSignupMailSlot(mailboxHash: string, max: number = SIG
       RETURNING sent`;
     return rows.length > 0;
   } catch (err) {
-    console.error('[Signup] Mail ledger write failed (no mail sent):', err instanceof Error ? err.message : err);
+    console.error('[Signup] Mail ledger write failed (no mail sent):', describeCaughtError(err));
     return false;
   }
 }
@@ -224,7 +225,7 @@ export async function resendRegistrationCode(pendingId: string): Promise<SignupS
   if (typeof pendingId !== 'string' || pendingId.length > 64) return answer;
 
   resendInBackground(pendingId).catch((err) => {
-    console.error('[Signup] Code resend failed:', err instanceof Error ? err.message : err);
+    console.error('[Signup] Code resend failed:', describeCaughtError(err));
   });
   return answer;
 }
@@ -278,7 +279,7 @@ function uniqueViolationTarget(err: unknown): string {
   try {
     return JSON.stringify([meta?.target ?? null, meta?.driverAdapterError?.cause?.constraint ?? null]);
   } catch (stringifyErr) {
-    console.warn('[Signup] Unreadable unique-violation details:', stringifyErr instanceof Error ? stringifyErr.message : stringifyErr);
+    console.warn('[Signup] Unreadable unique-violation details:', describeCaughtError(stringifyErr));
     return '';
   }
 }
@@ -343,7 +344,7 @@ export async function completeRegistration(
   // The code is right: from here no failure counts as a guess.
   const refundAttempt = () => prisma.pendingRegistration
     .update({ where: { id: row.id }, data: { attempts: { decrement: 1 } } })
-    .catch((err) => console.warn('[Signup] Attempt refund failed:', err instanceof Error ? err.message : err));
+    .catch((err) => console.warn('[Signup] Attempt refund failed:', describeCaughtError(err)));
 
   const username = (usernameOverride as string | undefined) ?? row.username;
   if (usernameOverride !== undefined) {
@@ -366,7 +367,7 @@ export async function completeRegistration(
     // Someone completed or verified this address meanwhile. The caller proved
     // they read the mailbox, so telling them is no disclosure.
     await prisma.pendingRegistration.delete({ where: { id: row.id } }).catch((err) => {
-      console.warn('[Signup] Pending registration cleanup failed:', err instanceof Error ? err.message : err);
+      console.warn('[Signup] Pending registration cleanup failed:', describeCaughtError(err));
     });
     throw new ConflictError(SIGNUP_EMAIL_REGISTERED_MESSAGE);
   }
@@ -463,7 +464,7 @@ export async function completeRegistration(
     } : {};
     await prisma.ipRecord.create({
       data: { userId: user.id, ip, kind: 'register', ...geoFields },
-    }).catch((err) => console.warn('[Signup] Registration IP record failed:', err instanceof Error ? err.message : err));
+    }).catch((err) => console.warn('[Signup] Registration IP record failed:', describeCaughtError(err)));
   }
 
   const { tokenVersion: _, ...safeUser } = user;

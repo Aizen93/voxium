@@ -599,7 +599,7 @@ describe('User Routes', () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       prismaMock.user.update.mockRejectedValueOnce(new Error('db down'));
-      vi.mocked(deleteFromS3).mockRejectedValueOnce(new Error('denied'));
+      vi.mocked(deleteFromS3).mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }));
 
       const res = await request(app)
         .patch('/api/v1/users/me/profile')
@@ -608,7 +608,7 @@ describe('User Routes', () => {
 
       expect(res.status).toBe(500);
       await vi.waitFor(() => expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to delete unreferenced avatar copy'), 'denied',
+        expect.stringContaining('Failed to delete unreferenced avatar copy'), 'AccessDenied, HTTP 403',
       ));
       errorSpy.mockRestore();
       warnSpy.mockRestore();

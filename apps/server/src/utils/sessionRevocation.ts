@@ -1,5 +1,6 @@
 import { getIO } from '../websocket/socketServer';
 import { sessionRoom, legacySocketsRoom } from './sessionRooms';
+import { describeCaughtError } from './loggableError';
 
 export interface RevokeSessionOptions {
   /**
@@ -40,7 +41,7 @@ export function revokeUserSessions(userId: string, opts: RevokeSessionOptions = 
     io.local.in(room).disconnectSockets(true);
     io.in(room).disconnectSockets(true);
   } catch (err) {
-    console.error(`[Sessions] Could not disconnect the sockets of user ${userId}:`, err instanceof Error ? err.message : err);
+    console.error(`[Sessions] Could not disconnect the sockets of user ${userId}:`, describeCaughtError(err));
   }
 }
 
@@ -77,7 +78,7 @@ export function revokeSessionSockets(userId: string, sids: string | readonly str
     const first = sessionRooms[0].slice('session:'.length, 'session:'.length + 6);
     console.error(
       `[Sessions] Could not disconnect the sockets of ${sessionRooms.length} session(s) (${first}…):`,
-      err instanceof Error ? err.message : err,
+      describeCaughtError(err),
     );
   }
 }
@@ -107,7 +108,7 @@ export function revokeOtherSessionSockets(userId: string, callerSid: string | un
     io.local.in(room).disconnectSockets(true);
     io.in(room).disconnectSockets(true);
   } catch (err) {
-    console.error(`[Sessions] Could not disconnect the other sessions' sockets of user ${userId}:`, err instanceof Error ? err.message : err);
+    console.error(`[Sessions] Could not disconnect the other sessions' sockets of user ${userId}:`, describeCaughtError(err));
   }
 }
 
@@ -130,7 +131,7 @@ export function disconnectSessionRooms(sids: readonly string[]): void {
       io.local.in(rooms).disconnectSockets(true);
       io.in(rooms).disconnectSockets(true);
     } catch (err) {
-      console.error(`[Sessions] Could not disconnect the sockets of ${rooms.length} swept session(s):`, err instanceof Error ? err.message : err);
+      console.error(`[Sessions] Could not disconnect the sockets of ${rooms.length} swept session(s):`, describeCaughtError(err));
     }
   }
 }

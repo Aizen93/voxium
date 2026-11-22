@@ -839,7 +839,7 @@ describe('Server Routes', () => {
         const { deleteFromS3 } = await import('../../utils/s3');
         prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: null, ownerId: 'user-1' });
         prismaMock.server.update.mockRejectedValueOnce(new Error('db down'));
-        vi.mocked(deleteFromS3).mockRejectedValueOnce(new Error('denied'));
+        vi.mocked(deleteFromS3).mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }));
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -850,7 +850,7 @@ describe('Server Routes', () => {
 
         expect(res.status).toBe(500);
         await vi.waitFor(() => expect(warnSpy).toHaveBeenCalledWith(
-          expect.stringContaining('Failed to delete unreferenced icon copy'), 'denied',
+          expect.stringContaining('Failed to delete unreferenced icon copy'), 'AccessDenied, HTTP 403',
         ));
         errorSpy.mockRestore();
         warnSpy.mockRestore();
@@ -1272,7 +1272,7 @@ describe('Server Routes', () => {
       it('a storage failure is logged and the delete still answers 200', async () => {
         prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
         const { deleteMultipleFromS3 } = await import('../../utils/s3');
-        vi.mocked(deleteMultipleFromS3).mockRejectedValueOnce(new Error('S3 unavailable'));
+        vi.mocked(deleteMultipleFromS3).mockRejectedValueOnce(Object.assign(new Error('S3 unavailable'), { name: 'ServiceUnavailable', $metadata: { httpStatusCode: 503 } }));
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         try {
           const res = await deleteServer();
@@ -1280,7 +1280,7 @@ describe('Server Routes', () => {
           expect(res.status).toBe(200);
           expect(res.body).toEqual({ success: true, message: 'Server deleted' });
           await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
-            '[Servers] Attachment file cleanup failed for space srv-1 (the orphan sweep will reclaim them):', 'S3 unavailable'));
+            '[Servers] Attachment file cleanup failed for space srv-1 (the orphan sweep will reclaim them):', 'ServiceUnavailable, HTTP 503'));
         } finally {
           warn.mockRestore();
         }
