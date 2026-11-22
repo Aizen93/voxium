@@ -1,6 +1,8 @@
 import { StorageTable, type StorageRow, type StorageTableHeaders } from './StorageTable';
 import { LEGAL_OPERATOR } from './operator';
 import { MailLink } from './MailLink';
+import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocationLimits';
+import { CREDENTIAL_CHANGE_MARK_SECONDS } from '../../services/credentialChangeLimits';
 
 /**
  * The Cookie Policy text itself, in English, without page chrome (the public
@@ -36,19 +38,25 @@ const SESSION_ROWS: StorageRow[] = [
     item: 'Refresh token',
     purpose: 'Renews the access token without asking for your password again',
     where: 'Same place as the access token',
-    duration: 'Up to 30 days with “Remember me”, 24 hours without; replaced at each renewal and removed when you sign out',
+    duration: `Up to 30 days with “Remember me”, 24 hours without; replaced at each renewal and removed when you sign out. Signing out also ends it on our servers when they can be reached; when they cannot, the app keeps it in memory, never on disk, for up to ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes to try again`,
   },
   {
     item: 'Trusted-device token',
     purpose: 'Issued when you enter a two-factor code on this device, so that your next sign-ins here skip the code',
     where: 'Desktop app: the credential store. Browser: local storage',
-    duration: '30 days; kept when you sign out, removed when you turn off two-factor authentication or delete your account on this device; changing your password invalidates it',
+    duration: '30 days; kept when you sign out, removed when you turn off two-factor authentication or delete your account on this device; changing your password invalidates it, and signing out of your other sessions invalidates it on your other devices',
   },
   {
     item: 'voxium_session_origin, voxium_trusted_device_origin',
     purpose: 'The address of the server that issued the tokens above, so that the app only ever sends them back to that server',
     where: 'Browser: next to the tokens. Desktop app: inside each token’s credential store entry',
     duration: 'Removed with the token it belongs to',
+  },
+  {
+    item: 'voxium_credential_change',
+    purpose: 'Exists only while a password change or a sign-out of your other sessions, made in one tab of this browser, is waiting for its answer, so that the other tabs of the same account wait for the renewed session instead of renewing the one it replaces. It holds the time until which that answer can arrive and a short code computed from your account’s identifier, from which the identifier cannot be read back; the tabs of another account ignore it',
+    where: 'Browser: local storage',
+    duration: `Written when the change starts; removed once its answer has been stored or the change has failed, when you sign out in that tab, or, if that tab was closed meanwhile, by the next session renewal in this browser after about ${CREDENTIAL_CHANGE_MARK_SECONDS} seconds`,
   },
 ];
 
@@ -122,7 +130,7 @@ export function CookiePolicyContentEn() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Cookie Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 20, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 21, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -170,7 +178,7 @@ export function CookiePolicyContentEn() {
           <h2 className="text-xl font-semibold text-vox-text-primary mb-3">4. Managing Stored Data</h2>
           <p className="mb-3">
             <strong className="text-vox-text-primary">Desktop app.</strong> Signing out removes your session
-            from the credential store. With &ldquo;Remember me&rdquo; off, your session is never written to
+            from the credential store and, when our servers can be reached, ends it there too. With &ldquo;Remember me&rdquo; off, your session is never written to
             disk: it stays in memory and ends when you close the app. Signing out keeps your trusted-device
             token, your encryption vault and your preferences, so that your encrypted history is still
             readable when you sign back in; deleting your account removes the vault, its key and the

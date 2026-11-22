@@ -14,6 +14,7 @@ import {
   E2E_LIMITS,
   MINIMUM_AGE,
   SIGNUP,
+  SESSIONS,
   APP_VERSION,
 } from '@voxium/shared';
 import { LEGAL_LANGUAGES, type LegalLanguage } from '../../components/legal/legalLanguage';
@@ -22,6 +23,8 @@ import { formatLegalDate, daysBetween } from '../../components/legal/legalDates'
 import { PRIVACY_CONTENT } from '../../components/legal/PrivacyContent';
 import { TERMS_CONTENT } from '../../components/legal/TermsContent';
 import { COOKIE_POLICY_CONTENT } from '../../components/legal/CookiePolicyContent';
+import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocationLimits';
+import { CREDENTIAL_CHANGE_MARK_SECONDS } from '../../services/credentialChangeLimits';
 
 /**
  * The legal pages state facts the code implements, pinned to the code.
@@ -159,8 +162,8 @@ const LAST_UPDATED: Record<PageName, PerLanguage> = {
     fr: 'Dernière mise à jour : 25 octobre 2026',
   },
   cookies: {
-    en: 'Last updated: November 20, 2026',
-    fr: 'Dernière mise à jour : 20 novembre 2026',
+    en: 'Last updated: November 21, 2026',
+    fr: 'Dernière mise à jour : 21 novembre 2026',
   },
 };
 
@@ -234,6 +237,22 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
       en: `kept for ${SIGNUP.LEDGER_WINDOW_DAYS} days from the first of them, then deleted by a daily clean-up`,
       fr: `conservés pendant ${SIGNUP.LEDGER_WINDOW_DAYS} jours à compter du premier d’entre eux, puis supprimés par un nettoyage quotidien`,
     },
+    {
+      // The release that introduced server-side sign-out: a fixed fact, never APP_VERSION
+      source: 'the release that ended the session on the server at sign-out (a fixed version, not APP_VERSION)',
+      en: 'Since version 2.2.0, signing out of the app also ends the session on our servers when the app can reach them',
+      fr: 'Depuis la version 2.2.0, la déconnexion de l’application met aussi fin à la session sur nos serveurs',
+    },
+    {
+      source: 'sessionService refreshIdleLifetime(): the idle window of a session, with and without "Remember me"',
+      en: `after ${REFRESH_REMEMBERED_DAYS} days without use (${REFRESH_SESSION_HOURS} hours without “Remember me”)`,
+      fr: `après ${REFRESH_REMEMBERED_DAYS} jours sans utilisation (${REFRESH_SESSION_HOURS} heures sans « Se souvenir de moi »)`,
+    },
+    {
+      source: 'SESSIONS.MAX_AGE_DAYS',
+      en: `at the latest ${SESSIONS.MAX_AGE_DAYS} days after you signed in`,
+      fr: `au plus tard ${SESSIONS.MAX_AGE_DAYS} jours après la connexion`,
+    },
     CHANGE_NOTICE,
   ],
   terms: [
@@ -261,6 +280,16 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
       source: 'TRUSTED_DEVICE_TTL_DAYS',
       en: `${TRUSTED_DEVICE_TTL_DAYS} days; kept when you sign out`,
       fr: `${TRUSTED_DEVICE_TTL_DAYS} jours ; conservé lorsque vous vous déconnectez`,
+    },
+    {
+      source: 'SIGN_OUT_RETRY_MAX_AGE_MINUTES (services/sessionRevocationLimits.ts)',
+      en: `for up to ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes to try again`,
+      fr: `pendant ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes au plus pour réessayer`,
+    },
+    {
+      source: 'CREDENTIAL_CHANGE_MARK_SECONDS (services/credentialChangeLimits.ts)',
+      en: `after about ${CREDENTIAL_CHANGE_MARK_SECONDS} seconds`,
+      fr: `au bout d’environ ${CREDENTIAL_CHANGE_MARK_SECONDS} secondes`,
     },
   ],
 };
@@ -357,8 +386,8 @@ describe('the Privacy Policy tells what an account deletion keeps of a direct co
     fr: 'Vos conversations privées lorsque vous supprimez votre compte.',
   };
   const EVERYTHING_ELSE_ITEM: PerLanguage = {
-    en: 'Everything else is kept for as long as your account exists. Deleting your account (Settings → Security) deletes with it your profile, your messages and reactions, their attachments, your devices\' keys and key backups, your connection data, your support conversations and your consent records',
-    fr: 'Tout le reste est conservé tant que votre compte existe. La suppression de votre compte (Paramètres → Sécurité) supprime avec lui votre profil, vos messages et vos réactions, leurs pièces jointes, les clés et les sauvegardes de clés de vos appareils, vos données de connexion, vos conversations de support et les traces de votre consentement',
+    en: 'Everything else is kept for as long as your account exists. Deleting your account (Settings → Security) deletes with it your profile, your messages and reactions, their attachments, your devices\' keys and key backups, your connection data, your sign-in sessions, your support conversations and your consent records',
+    fr: 'Tout le reste est conservé tant que votre compte existe. La suppression de votre compte (Paramètres → Sécurité) supprime avec lui votre profil, vos messages et vos réactions, leurs pièces jointes, les clés et les sauvegardes de clés de vos appareils, vos données de connexion, vos sessions ouvertes, vos conversations de support et les traces de votre consentement',
   };
   const kept = (lang: LegalLanguage) => formatLegalDate(PRIVACY_POLICY_DATES.conversationsKeptFrom, lang);
   const keySentences = (lang: LegalLanguage): string[] => lang === 'en'
@@ -406,6 +435,96 @@ describe('the Privacy Policy tells what an account deletion keeps of a direct co
         'In operator.ts (PRIVACY_POLICY_DATES): set lastUpdated to the release day, conversationsKeptFrom to that day plus at least ' +
         'LEGAL_OPERATOR.changeNoticeDays, then set confirmedForVersion to the released version.',
     ).toBe(APP_VERSION);
+  });
+});
+
+describe('the legal documents tell what a sign-in session is, how long it lasts and how it ends', () => {
+  const CONNECTION_DATA_END: PerLanguage = {
+    en: 'How long it is kept is set out under “Retention” below',
+    fr: 'Leur durée de conservation est précisée sous « Conservation » ci-dessous',
+  };
+  const SESSIONS_COLLECTED: PerLanguage = {
+    en: 'Sign-in sessions, one record for each device or browser your account is signed in on: when you signed in, when the session last renewed itself, whether you chose “Remember me”, and the kind of app and operating system (for example “Desktop app, Windows”). It lets us end a session on our servers and show you where you are signed in. It holds no IP address, no device name and no browser fingerprint.',
+    fr: 'Sessions ouvertes, un enregistrement pour chaque appareil ou navigateur sur lequel votre compte est connecté : la date de la connexion, la date du dernier renouvellement de la session, si vous avez choisi « Se souvenir de moi », et le type d’application et de système d’exploitation (par exemple « Application de bureau, Windows »). Il nous permet de mettre fin à une session sur nos serveurs et de vous montrer où vous êtes connecté. Il ne contient ni adresse IP, ni nom d’appareil, ni empreinte de navigateur.',
+  };
+  const BACKUP_CODES_HASHED: PerLanguage = {
+    en: 'whose backup codes are stored hashed.',
+    fr: 'les codes de secours stockés hachés.',
+  };
+  const SESSIONS_STORAGE: PerLanguage = {
+    en: `Since version 2.2.0, signing out of the app also ends the session on our servers when the app can reach them; otherwise the session ends by itself after ${REFRESH_REMEMBERED_DAYS} days without use (${REFRESH_SESSION_HOURS} hours without “Remember me”). Settings → Security, on any of your devices, shows where you are signed in and lets you sign out of the others.`,
+    fr: `Depuis la version 2.2.0, la déconnexion de l’application met aussi fin à la session sur nos serveurs lorsque l’application peut les joindre ; à défaut, la session prend fin d’elle-même après ${REFRESH_REMEMBERED_DAYS} jours sans utilisation (${REFRESH_SESSION_HOURS} heures sans « Se souvenir de moi »). Paramètres → Sécurité, sur chacun de vos appareils, indique où vous êtes connecté et vous permet de vous déconnecter des autres.`,
+  };
+  const CONNECTION_RETENTION_END: PerLanguage = {
+    en: 'are rotated automatically and kept only for a short period',
+    fr: 'font l’objet d’une rotation automatique et ne sont conservés que pendant une courte période',
+  };
+  const SESSIONS_RETENTION: PerLanguage = {
+    en: `Sign-in sessions end when the app signs out of them on our servers, when you sign out of them from another device, when your password is changed or reset, after ${REFRESH_REMEMBERED_DAYS} days without use (${REFRESH_SESSION_HOURS} hours without “Remember me”), and at the latest ${SESSIONS.MAX_AGE_DAYS} days after you signed in; the record is then deleted within a day`,
+    fr: `Les sessions ouvertes prennent fin lorsque l’application s’en déconnecte auprès de nos serveurs, lorsque vous y mettez fin depuis un autre appareil, lorsque votre mot de passe est changé ou réinitialisé, après ${REFRESH_REMEMBERED_DAYS} jours sans utilisation (${REFRESH_SESSION_HOURS} heures sans « Se souvenir de moi »), et au plus tard ${SESSIONS.MAX_AGE_DAYS} jours après la connexion ; l’enregistrement est alors supprimé dans la journée`,
+  };
+  const CONTRACT_BASIS: PerLanguage = {
+    en: 'your account and its sign-in sessions, profile, messages, presence and calls: the Service you asked for',
+    fr: 'votre compte et ses sessions ouvertes, votre profil, vos messages, votre présence et vos appels : le Service que vous avez demandé',
+  };
+
+  it.each(LEGAL_LANGUAGES)('the Privacy Policy lists the session record right after the connection data item (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    expect(text, SESSIONS_COLLECTED[lang]).toContain(`${CONNECTION_DATA_END[lang]} ${SESSIONS_COLLECTED[lang]}`);
+    expect(text.split(SESSIONS_COLLECTED[lang])).toHaveLength(2);
+  });
+
+  it.each(LEGAL_LANGUAGES)('the Privacy Policy says in Storage & Security that a sign-out ends the session on our servers, and what happens otherwise (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    expect(text, SESSIONS_STORAGE[lang]).toContain(`${BACKUP_CODES_HASHED[lang]} ${SESSIONS_STORAGE[lang]}`);
+  });
+
+  it.each(LEGAL_LANGUAGES)('the Privacy Policy retention list gives the session item right after the connection data one (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    expect(text, SESSIONS_RETENTION[lang]).toContain(`${CONNECTION_RETENTION_END[lang]} ${SESSIONS_RETENTION[lang]}`);
+  });
+
+  it.each(LEGAL_LANGUAGES)('the Privacy Policy keeps the sessions with the account, and bases them on the contract (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    expect(text).toContain(CONTRACT_BASIS[lang]);
+  });
+
+  // The Cookie Policy: the three rows or sentences the session change reworded
+  const COOKIE_SENTENCES: PerLanguage[] = [
+    {
+      en: `Signing out also ends it on our servers when they can be reached; when they cannot, the app keeps it in memory, never on disk, for up to ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes to try again`,
+      fr: `La déconnexion met aussi fin à la session sur nos serveurs lorsqu’ils sont joignables ; dans le cas contraire, l’application le garde en mémoire, jamais sur le disque, pendant ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes au plus pour réessayer`,
+    },
+    {
+      en: 'changing your password invalidates it, and signing out of your other sessions invalidates it on your other devices',
+      fr: 'changer votre mot de passe l’invalide, et vous déconnecter de vos autres sessions l’invalide sur vos autres appareils',
+    },
+    {
+      en: 'Signing out removes your session from the credential store and, when our servers can be reached, ends it there too.',
+      fr: 'La déconnexion supprime votre session du gestionnaire d’identifiants et, lorsque nos serveurs sont joignables, met aussi fin à la session sur ceux-ci.',
+    },
+    // voxium_credential_change: what it holds, and when it goes
+    {
+      en: 'It holds the time until which that answer can arrive and a short code computed from your account’s identifier, from which the identifier cannot be read back; the tabs of another account ignore it',
+      fr: 'Elle contient l’heure jusqu’à laquelle cette réponse peut arriver et un code court calculé à partir de l’identifiant de votre compte, qui ne permet pas de retrouver cet identifiant ; les onglets d’un autre compte l’ignorent',
+    },
+    {
+      en: `Written when the change starts; removed once its answer has been stored or the change has failed, when you sign out in that tab, or, if that tab was closed meanwhile, by the next session renewal in this browser after about ${CREDENTIAL_CHANGE_MARK_SECONDS} seconds`,
+      fr: `Écrite au début du changement ; supprimée une fois sa réponse enregistrée ou l’échec du changement constaté, lorsque vous vous déconnectez dans cet onglet, ou, si cet onglet a été fermé entre-temps, par le renouvellement de session suivant dans ce navigateur au bout d’environ ${CREDENTIAL_CHANGE_MARK_SECONDS} secondes`,
+    },
+  ];
+
+  it.each(LEGAL_LANGUAGES)('the Cookie Policy states the retry window, the other-sessions effect on the trusted-device token and the server-side end (%s)', (lang) => {
+    const text = pages.cookies[lang].text;
+    for (const sentence of COOKIE_SENTENCES) expect(text, sentence[lang]).toContain(sentence[lang]);
+  });
+
+  it('keeps the session lifetimes the documents state in step with the code that applies them', () => {
+    for (const value of [SESSIONS.MAX_AGE_DAYS, SIGN_OUT_RETRY_MAX_AGE_MINUTES, CREDENTIAL_CHANGE_MARK_SECONDS]) {
+      expect(Number.isInteger(value) && value > 0, String(value)).toBe(true);
+    }
+    // the idle window and the cap are applied from these constants (never a second copy of a figure)
+    expect(sessionService).toContain('SESSIONS.MAX_AGE_DAYS');
   });
 });
 

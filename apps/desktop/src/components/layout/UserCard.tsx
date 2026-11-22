@@ -205,7 +205,7 @@ export function UserCard() {
             <Settings size={14} />
           </button>
           <button
-            onClick={logout}
+            onClick={() => logout()}
             className="flex h-[26px] w-[26px] items-center justify-center rounded-md text-vox-text-muted hover:bg-vox-accent-danger/15 hover:text-vox-accent-danger transition-colors"
             title={t('common.logout')}
             aria-label={t('common.logout')}

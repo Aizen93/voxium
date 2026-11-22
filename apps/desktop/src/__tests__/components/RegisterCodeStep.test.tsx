@@ -33,6 +33,15 @@ vi.mock('../../services/tokenStorage', () => ({
   getAccessToken: vi.fn(() => null),
   setTokens: storage.setTokens,
   clearTokens: storage.clearTokens,
+  getRefreshToken: vi.fn(() => null),
+  clearSessionTokens: vi.fn(() => { storage.clearTokens(); return 'cleared'; }),
+  reloadAfterSessionChange: vi.fn(),
+  announceSessionEnded: vi.fn(),
+  // no reload onto another session pending; a sign-out with no session to end lets go of the memory only
+  isReloadPending: vi.fn(() => false),
+  letGoOfSession: vi.fn((): 'cleared' | 'replaced' => 'cleared'),
+  // after a 'replaced' restore: what is stored now, taken up (false: the caller reloads onto it)
+  takeUpStoredSession: vi.fn(() => false),
   isRemembered: vi.fn(() => true),
   hydrateTokens: vi.fn(async () => true),
   getTrustedDeviceToken: vi.fn(() => null),
@@ -43,6 +52,8 @@ vi.mock('../../components/auth/AuthBackground', () => ({ AuthBackground: () => n
 vi.mock('../../components/auth/PeekingThief', () => ({ PeekingThief: () => null }));
 
 import i18n from '../../i18n';
+// The sign-out's server call and its retries: never a real request from a unit test
+vi.mock('../../services/sessionRevocation', () => ({ endSessionOnServer: vi.fn(), holdReplacedSession: vi.fn(), endReplacedSession: vi.fn(), forgetReplacedSession: vi.fn() }));
 import { useAuthStore, type PendingRegistration } from '../../stores/authStore';
 import { RegisterPage } from '../../pages/RegisterPage';
 import { LoginPage } from '../../pages/LoginPage';
@@ -179,7 +190,7 @@ describe('RegisterPage — the code step', () => {
     setInput(codeInput()!, '012345');
     await submit();
 
-    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '012345' });
+    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '012345', client: 'web' });
     expect(storage.setTokens).toHaveBeenCalledWith('at', 'rt', true);
     expect(socket.connectSocket).toHaveBeenCalledWith('at');
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
@@ -215,7 +226,7 @@ describe('RegisterPage — the code step', () => {
     setInput(field, '  alice2 ');
     await submit();
 
-    expect(api.post).toHaveBeenLastCalledWith('/auth/register/complete', { pendingId: 'p1', code: '424242', username: 'alice2' });
+    expect(api.post).toHaveBeenLastCalledWith('/auth/register/complete', { pendingId: 'p1', code: '424242', client: 'web', username: 'alice2' });
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
   });
 

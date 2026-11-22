@@ -1,4 +1,4 @@
-import { MINIMUM_AGE, SIGNUP } from '@voxium/shared';
+import { MINIMUM_AGE, SESSIONS, SIGNUP } from '@voxium/shared';
 import { LEGAL_OPERATOR, PRIVACY_POLICY_DATES, publisherOf } from './operator';
 import { formatLegalDate } from './legalDates';
 import { MailLink } from './MailLink';
@@ -78,6 +78,14 @@ export function PrivacyContentEn() {
               security and abuse prevention — detecting automated registrations, enforcing bans and rate limits —
               and, as aggregate counts of accounts per country only, for our own statistics about the Service. How
               long it is kept is set out under &ldquo;Retention&rdquo; below
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Sign-in sessions</strong>, one record for each device or browser your account is
+              signed in on: when you signed in, when the session last renewed itself, whether you chose
+              &ldquo;Remember me&rdquo;, and the kind of app and operating system (for example &ldquo;Desktop app,
+              Windows&rdquo;). It lets us end a session on our servers and show you where you are signed in. It
+              holds no IP address, no device name and no browser fingerprint. How long it is kept is set out under
+              &ldquo;Retention&rdquo; below
             </li>
             <li>
               <strong className="text-vox-text-primary">Support and moderation records</strong>, the support
@@ -185,7 +193,10 @@ export function PrivacyContentEn() {
           <p>
             Your data is stored on our servers. Passwords are hashed using bcrypt and are never stored in plain
             text. Sessions use signed tokens that we can revoke, and optional two-factor authentication whose
-            secrets are stored encrypted and whose backup codes are stored hashed. Files you upload are kept in
+            secrets are stored encrypted and whose backup codes are stored hashed. Since version 2.2.0, signing out of the app
+            also ends the session on our servers when the app can reach them; otherwise the session ends by itself
+            after 30 days without use (24 hours without &ldquo;Remember me&rdquo;). Settings → Security, on any of
+            your devices, shows where you are signed in and lets you sign out of the others. Files you upload are kept in
             private storage that nothing can reach without a link our servers sign: your device uploads them
             directly through such a short-lived link. Avatars and space icons are served to anyone who has their
             link; message attachments are fetched through our servers, which hand them only to the people allowed
@@ -210,6 +221,12 @@ export function PrivacyContentEn() {
               (for example when an account is banned from Voxium) stays there for as long as the block stands; and
               our server logs, which record the IP address of each request, are rotated automatically and kept only
               for a short period
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Sign-in sessions</strong> end when the app signs out of them on our servers, when you sign
+              out of them from another device, when your password is changed or reset, after 30 days without use
+              (24 hours without &ldquo;Remember me&rdquo;), and at the latest {SESSIONS.MAX_AGE_DAYS} days after you
+              signed in; the record is then deleted within a day
             </li>
             <li>
               <strong className="text-vox-text-primary">Sign-up attempts</strong> that are not completed expire{' '}
@@ -249,7 +266,7 @@ export function PrivacyContentEn() {
             <li>
               <strong className="text-vox-text-primary">Everything else</strong> is kept for as long as your account
               exists. Deleting your account (Settings → Security) deletes with it your profile, your messages and
-              reactions, their attachments, your devices&apos; keys and key backups, your connection data, your support
+              reactions, their attachments, your devices&apos; keys and key backups, your connection data, your sign-in sessions, your support
               conversations and your consent records
             </li>
             <li>
@@ -278,7 +295,7 @@ export function PrivacyContentEn() {
           <h2 className="text-xl font-semibold text-vox-text-primary mb-3">7. Legal Basis</h2>
           <p className="mb-3">Under the GDPR, we process your data on the following bases:</p>
           <ul className="list-disc list-inside space-y-1.5 ml-2">
-            <li><strong className="text-vox-text-primary">Performance of a contract</strong> — your account, profile, messages, presence and calls: the Service you asked for</li>
+            <li><strong className="text-vox-text-primary">Performance of a contract</strong> — your account and its sign-in sessions, profile, messages, presence and calls: the Service you asked for</li>
             <li><strong className="text-vox-text-primary">Legitimate interest</strong> — connection data used to keep the Service secure and prevent abuse, and counted per country in our own statistics; support and moderation records</li>
             <li><strong className="text-vox-text-primary">Consent</strong> — recorded when you accept the Terms of Service and this Privacy Policy at registration, or later from an existing account</li>
           </ul>

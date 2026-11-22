@@ -1,6 +1,7 @@
 import axios, { AxiosError, type AxiosAdapter, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios';
 import { connectSocket } from './socket';
-import { getAccessToken, getRefreshToken } from './tokenStorage';
+import { getAccessToken, getRefreshToken, isTokenOfAnotherAccount, reloadAfterSessionChange } from './tokenStorage';
+import { userIdOf } from './tokenClaims';
 import { API_BASE, isAccessTokenFresh, shouldRenewBeforeSending, refreshAccessToken, currentSessionEpoch, SessionLostError } from './session';
 import { requestGeneration, bumpRequestGeneration } from './requestGeneration';
 
@@ -16,7 +17,21 @@ export type SessionRequestConfig = InternalAxiosRequestConfig & {
   _renewalFailed?: boolean;
   /** The session the request was sent under (`currentSessionEpoch()` at send time). */
   _sessionEpoch?: number;
+  /**
+   * A credential change (a password change, signing out of the other
+   * sessions): renewals are held until its answer is stored
+   * (session.runCredentialChange), so the request renews nothing itself,
+   * neither before sending nor on a 401; the caller handles that 401.
+   */
+  _noRenewal?: boolean;
 };
+
+/** Two tokens of one account, as far as they tell (decoded for routing only): a token that names no account matches any. */
+function sameAccount(a: string, b: string): boolean {
+  const ua = userIdOf(a);
+  const ub = userIdOf(b);
+  return ua === null || ub === null || ua === ub;
+}
 
 /** The token a request carried, from its Authorization header (an AxiosHeaders on a sent request, a plain object before). */
 function bearerOf(config: SessionRequestConfig): string | null {
@@ -150,7 +165,7 @@ export const api = axios.create({
 // and the renewal failing leaves the request to the 401 path below.
 api.interceptors.request.use(async (config) => {
   let token = getAccessToken();
-  if (token && shouldRenewBeforeSending(token)) {
+  if (token && !(config as SessionRequestConfig)._noRenewal && shouldRenewBeforeSending(token)) {
     try {
       token = await refreshAccessToken();
     } catch (err) {
@@ -160,6 +175,13 @@ api.interceptors.request.use(async (config) => {
       console.warn('[API] Could not renew the token before the request:', err instanceof Error ? err.message : err);
       (config as SessionRequestConfig)._renewalFailed = true;
     }
+  }
+  // Never a token of another account than the one this page shows (another
+  // tab signed in as someone else): the request is refused unsent and the
+  // page reloads onto the stored session (tokenStorage follows the same rule)
+  if (token && isTokenOfAnotherAccount(token)) {
+    reloadAfterSessionChange();
+    throw new SessionLostError('Another account is signed in on this browser');
   }
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
@@ -192,7 +214,7 @@ api.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config as SessionRequestConfig | undefined;
 
-    if (error.response?.status === 401 && originalRequest && !originalRequest._retry) {
+    if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !originalRequest._noRenewal) {
       originalRequest._retry = true;
       const sent = bearerOf(originalRequest);
       if (!sent || !getRefreshToken()) return Promise.reject(error);
@@ -201,6 +223,12 @@ api.interceptors.response.use(
       let accessToken: string;
       const stored = getAccessToken();
       if (stored && stored !== sent && isAccessTokenFresh(stored)) {
+        // Never retried as another account: the request's 401 is its caller's
+        if (isTokenOfAnotherAccount(stored)) {
+          reloadAfterSessionChange();
+          return Promise.reject(error);
+        }
+        if (!sameAccount(stored, sent)) return Promise.reject(error);
         accessToken = stored;
       } else if (originalRequest._renewalFailed) {
         return Promise.reject(error);
@@ -210,6 +238,8 @@ api.interceptors.response.use(
         } catch (refreshErr) {
           return Promise.reject(refreshErr);
         }
+        // The renewal answers only its own account's tokens (services/session.ts): the same rule here
+        if (!sameAccount(accessToken, sent)) return Promise.reject(error);
         // The socket re-handshakes with the renewed token (or is reopened if
         // the server had closed its manager while the token was expired)
         connectSocket(accessToken);

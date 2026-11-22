@@ -1,6 +1,8 @@
 import { StorageTable, type StorageRow, type StorageTableHeaders } from './StorageTable';
 import { LEGAL_OPERATOR } from './operator';
 import { MailLink } from './MailLink';
+import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocationLimits';
+import { CREDENTIAL_CHANGE_MARK_SECONDS } from '../../services/credentialChangeLimits';
 
 /**
  * La Politique de cookies en français: the translation of
@@ -56,19 +58,25 @@ const SESSION_ROWS: StorageRow[] = withFrenchSpacing([
     item: 'Jeton de rafraîchissement',
     purpose: 'Renouvelle le jeton d’accès sans vous redemander votre mot de passe',
     where: 'Au même endroit que le jeton d’accès',
-    duration: 'Jusqu’à 30 jours avec « Se souvenir de moi », 24 heures sans ; remplacé à chaque renouvellement et supprimé lorsque vous vous déconnectez',
+    duration: `Jusqu’à 30 jours avec « Se souvenir de moi », 24 heures sans ; remplacé à chaque renouvellement et supprimé lorsque vous vous déconnectez. La déconnexion met aussi fin à la session sur nos serveurs lorsqu’ils sont joignables ; dans le cas contraire, l’application le garde en mémoire, jamais sur le disque, pendant ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes au plus pour réessayer`,
   },
   {
     item: 'Jeton d’appareil de confiance',
     purpose: 'Délivré lorsque vous saisissez un code d’authentification à deux facteurs sur cet appareil, afin que vos prochaines connexions ici se passent du code',
     where: 'Application de bureau : le gestionnaire d’identifiants. Navigateur : stockage local',
-    duration: '30 jours ; conservé lorsque vous vous déconnectez, supprimé lorsque vous désactivez l’authentification à deux facteurs ou supprimez votre compte sur cet appareil ; changer votre mot de passe l’invalide',
+    duration: '30 jours ; conservé lorsque vous vous déconnectez, supprimé lorsque vous désactivez l’authentification à deux facteurs ou supprimez votre compte sur cet appareil ; changer votre mot de passe l’invalide, et vous déconnecter de vos autres sessions l’invalide sur vos autres appareils',
   },
   {
     item: 'voxium_session_origin, voxium_trusted_device_origin',
     purpose: 'L’adresse du serveur qui a délivré les jetons ci-dessus, afin que l’application ne les renvoie qu’à ce serveur',
     where: 'Navigateur : à côté des jetons. Application de bureau : dans l’entrée de chaque jeton du gestionnaire d’identifiants',
     duration: 'Supprimée avec le jeton auquel elle se rapporte',
+  },
+  {
+    item: 'voxium_credential_change',
+    purpose: 'N’existe que pendant qu’un changement de mot de passe ou une déconnexion de vos autres sessions, fait dans un onglet de ce navigateur, attend sa réponse, afin que les autres onglets du même compte attendent la session renouvelée au lieu de renouveler celle qu’il remplace. Elle contient l’heure jusqu’à laquelle cette réponse peut arriver et un code court calculé à partir de l’identifiant de votre compte, qui ne permet pas de retrouver cet identifiant ; les onglets d’un autre compte l’ignorent',
+    where: 'Navigateur : stockage local',
+    duration: `Écrite au début du changement ; supprimée une fois sa réponse enregistrée ou l’échec du changement constaté, lorsque vous vous déconnectez dans cet onglet, ou, si cet onglet a été fermé entre-temps, par le renouvellement de session suivant dans ce navigateur au bout d’environ ${CREDENTIAL_CHANGE_MARK_SECONDS} secondes`,
   },
 ]);
 
@@ -142,7 +150,7 @@ export function CookiePolicyContentFr() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Politique de cookies</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 20 novembre 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 21 novembre 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -193,7 +201,7 @@ export function CookiePolicyContentFr() {
           <h2 className="text-xl font-semibold text-vox-text-primary mb-3">4. Gérer les données stockées</h2>
           <p className="mb-3">
             <strong className="text-vox-text-primary">Application de bureau.</strong> La déconnexion supprime votre
-            session du gestionnaire d’identifiants. Lorsque «&nbsp;Se souvenir de moi&nbsp;» est désactivé, votre
+            session du gestionnaire d’identifiants et, lorsque nos serveurs sont joignables, met aussi fin à la session sur ceux-ci. Lorsque «&nbsp;Se souvenir de moi&nbsp;» est désactivé, votre
             session n’est jamais écrite sur le disque&nbsp;: elle reste en mémoire et prend fin lorsque vous fermez
             l’application. La déconnexion conserve votre jeton d’appareil de confiance, votre coffre de chiffrement et
             vos préférences, afin que votre historique chiffré reste lisible lorsque vous vous reconnectez&nbsp;; la

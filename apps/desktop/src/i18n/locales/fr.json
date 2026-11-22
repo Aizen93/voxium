@@ -52,7 +52,13 @@
       "signIn": "Se connecter",
       "signingIn": "Connexion en cours…",
       "noAccount": "Vous n'avez pas de compte ?",
-      "createOne": "Créer un compte"
+      "createOne": "Créer un compte",
+      "reason": {
+        "signedOutElsewhere": "Vous avez été déconnecté depuis un autre appareil.",
+        "sessionEnded": "Votre session a pris fin. Reconnectez-vous.",
+        "accountBanned": "Votre compte a été banni.",
+        "accountDeleted": "Votre compte a été supprimé."
+      }
     },
     "register": {
       "registrationFailed": "L'inscription a échoué. Vérifiez votre connexion et réessayez.",
@@ -219,6 +225,46 @@
       "failed": "Impossible de supprimer votre compte. Veuillez réessayer."
     },
     "security": {
+      "sessions": {
+        "title": "Où vous êtes connecté",
+        "description": "Les appareils et navigateurs actuellement connectés à votre compte.",
+        "thisDevice": "Cet appareil",
+        "kind": {
+          "desktop": "Application de bureau",
+          "web": "Navigateur web",
+          "admin": "Tableau de bord d’administration",
+          "android": "Application Android",
+          "ios": "Application iPhone ou iPad",
+          "unknown": "Application inconnue"
+        },
+        "os": {
+          "windows": "Windows",
+          "macos": "macOS",
+          "linux": "Linux",
+          "android": "Android",
+          "ios": "iOS",
+          "other": "Autre système"
+        },
+        "kindAndOs": "{{kind}} · {{os}}",
+        "signedInOn": "Connecté le {{date}}",
+        "activeToday": "Actif aujourd’hui",
+        "activeYesterday": "Actif hier",
+        "activeOn": "Actif le {{date}}",
+        "signOut": "Se déconnecter",
+        "signOutOthers": "Se déconnecter de toutes les autres sessions",
+        "noOthers": "Vous n’êtes connecté nulle part ailleurs.",
+        "confirmTitle": "Confirmez avec votre mot de passe",
+        "confirmOthers": "Tous les autres appareils et navigateurs seront déconnectés. Ceux que vous aviez marqués comme approuvés pour l’authentification à deux facteurs demanderont de nouveau votre code. Cet appareil reste connecté.",
+        "confirmOne": "{{label}} sera déconnecté.",
+        "confirmOneTrusted": "Si cet appareil était approuvé pour l’authentification à deux facteurs, il le reste jusqu’à ce que vous changiez votre mot de passe ou que vous vous déconnectiez de toutes les autres sessions.",
+        "password": "Mot de passe",
+        "signedOutOthers_one": "Déconnecté de {{count}} autre session",
+        "signedOutOthers_other": "Déconnecté de {{count}} autres sessions",
+        "signedOutOne": "Déconnecté",
+        "failed": "La déconnexion a échoué. Réessayez.",
+        "loadFailed": "Impossible de charger les endroits où vous êtes connecté.",
+        "retry": "Réessayer"
+      },
       "hidePasswords": "Masquer les mots de passe",
       "showPasswords": "Afficher les mots de passe",
       "changePassword": "Changer le mot de passe",
@@ -1487,6 +1533,12 @@
     "mustAcceptPrivacy": "Vous devez accepter la Politique de confidentialité",
     "mustAcceptTermsAndPrivacy": "Vous devez accepter les Conditions d'utilisation et la Politique de confidentialité",
     "passwordIncorrect": "Mot de passe incorrect",
+    "sessionNotFound": "Cette session est introuvable. Elle a peut-être déjà pris fin.",
+    "sessionRevokeCurrent": "C’est la session que vous utilisez. Déconnectez-vous pour y mettre fin.",
+    "trustedDeviceTokenInvalid": "Le jeton d’appareil de confiance de cet appareil n’a pas été accepté. Réessayez.",
+    "rememberMeInvalid": "Le choix « Se souvenir de moi » n’a pas été accepté. Réessayez.",
+    "signedOutElsewhere": "Vous avez été déconnecté depuis un autre appareil.",
+    "sessionEnded": "Votre session a pris fin. Reconnectez-vous.",
     "twoFactorCodeRequired": "Le code d'authentification à deux facteurs est requis",
     "invalidTwoFactorCode": "Code d'authentification à deux facteurs invalide",
     "emailAlreadyVerified": "Votre adresse e-mail est déjà vérifiée",

@@ -52,7 +52,13 @@
       "signIn": "Sign In",
       "signingIn": "Signing in...",
       "noAccount": "Don't have an account?",
-      "createOne": "Create one"
+      "createOne": "Create one",
+      "reason": {
+        "signedOutElsewhere": "You were signed out from another device.",
+        "sessionEnded": "Your session ended. Sign in again.",
+        "accountBanned": "Your account has been banned.",
+        "accountDeleted": "Your account has been deleted."
+      }
     },
     "register": {
       "registrationFailed": "Registration failed. Check your connection and try again.",
@@ -219,6 +225,46 @@
       "failed": "Could not delete your account. Please try again."
     },
     "security": {
+      "sessions": {
+        "title": "Where you're signed in",
+        "description": "The devices and browsers currently signed in to your account.",
+        "thisDevice": "This device",
+        "kind": {
+          "desktop": "Desktop app",
+          "web": "Web browser",
+          "admin": "Admin dashboard",
+          "android": "Android app",
+          "ios": "iPhone or iPad app",
+          "unknown": "Unknown app"
+        },
+        "os": {
+          "windows": "Windows",
+          "macos": "macOS",
+          "linux": "Linux",
+          "android": "Android",
+          "ios": "iOS",
+          "other": "Other system"
+        },
+        "kindAndOs": "{{kind}} · {{os}}",
+        "signedInOn": "Signed in {{date}}",
+        "activeToday": "Active today",
+        "activeYesterday": "Active yesterday",
+        "activeOn": "Active {{date}}",
+        "signOut": "Sign out",
+        "signOutOthers": "Sign out of all other sessions",
+        "noOthers": "You're not signed in anywhere else.",
+        "confirmTitle": "Confirm with your password",
+        "confirmOthers": "Every other device and browser will be signed out. Those you had marked as trusted for two-factor authentication will ask for your code again. This device stays signed in.",
+        "confirmOne": "{{label}} will be signed out.",
+        "confirmOneTrusted": "If that device was trusted for two-factor authentication, it stays trusted until you change your password or sign out of all other sessions.",
+        "password": "Password",
+        "signedOutOthers_one": "Signed out of {{count}} other session",
+        "signedOutOthers_other": "Signed out of {{count}} other sessions",
+        "signedOutOne": "Signed out",
+        "failed": "Couldn't sign out. Try again.",
+        "loadFailed": "Couldn't load where you're signed in.",
+        "retry": "Retry"
+      },
       "changePassword": "Change Password",
       "currentPassword": "Current Password",
       "newPassword": "New Password",
@@ -1440,6 +1486,12 @@
     "mustAcceptPrivacy": "You must accept the Privacy Policy",
     "mustAcceptTermsAndPrivacy": "You must accept the Terms of Service and the Privacy Policy",
     "passwordIncorrect": "Password is incorrect",
+    "sessionNotFound": "That session was not found. It may have ended already.",
+    "sessionRevokeCurrent": "This is the session you're using. Sign out to end it.",
+    "trustedDeviceTokenInvalid": "This device's trusted-device token was not accepted. Try again.",
+    "rememberMeInvalid": "The “Remember me” choice was not accepted. Try again.",
+    "signedOutElsewhere": "You were signed out from another device.",
+    "sessionEnded": "Your session ended. Sign in again.",
     "twoFactorCodeRequired": "Two-factor authentication code is required",
     "invalidTwoFactorCode": "Invalid two-factor authentication code",
     "emailAlreadyVerified": "Your email address is already verified",

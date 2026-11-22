@@ -52,7 +52,13 @@
       "signIn": "Anmelden",
       "signingIn": "Anmeldung läuft...",
       "noAccount": "Noch kein Konto?",
-      "createOne": "Erstelle eins"
+      "createOne": "Erstelle eins",
+      "reason": {
+        "signedOutElsewhere": "Du wurdest von einem anderen Gerät aus abgemeldet.",
+        "sessionEnded": "Deine Sitzung wurde beendet. Melde dich erneut an.",
+        "accountBanned": "Dein Konto wurde gesperrt.",
+        "accountDeleted": "Dein Konto wurde gelöscht."
+      }
     },
     "register": {
       "registrationFailed": "Registrierung fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut.",
@@ -219,6 +225,46 @@
       "failed": "Dein Konto konnte nicht gelöscht werden. Bitte versuche es erneut."
     },
     "security": {
+      "sessions": {
+        "title": "Wo du angemeldet bist",
+        "description": "Die Geräte und Browser, die aktuell bei deinem Konto angemeldet sind.",
+        "thisDevice": "Dieses Gerät",
+        "kind": {
+          "desktop": "Desktop-App",
+          "web": "Webbrowser",
+          "admin": "Admin-Dashboard",
+          "android": "Android-App",
+          "ios": "iPhone- oder iPad-App",
+          "unknown": "Unbekannte App"
+        },
+        "os": {
+          "windows": "Windows",
+          "macos": "macOS",
+          "linux": "Linux",
+          "android": "Android",
+          "ios": "iOS",
+          "other": "Anderes System"
+        },
+        "kindAndOs": "{{kind}} · {{os}}",
+        "signedInOn": "Angemeldet am {{date}}",
+        "activeToday": "Heute aktiv",
+        "activeYesterday": "Gestern aktiv",
+        "activeOn": "Aktiv am {{date}}",
+        "signOut": "Abmelden",
+        "signOutOthers": "Von allen anderen Sitzungen abmelden",
+        "noOthers": "Du bist nirgendwo sonst angemeldet.",
+        "confirmTitle": "Mit deinem Passwort bestätigen",
+        "confirmOthers": "Alle anderen Geräte und Browser werden abgemeldet. Geräte, die du für die Zwei-Faktor-Authentifizierung als vertrauenswürdig markiert hattest, fragen wieder nach deinem Code. Dieses Gerät bleibt angemeldet.",
+        "confirmOne": "{{label}} wird abgemeldet.",
+        "confirmOneTrusted": "Wenn dieses Gerät für die Zwei-Faktor-Authentifizierung als vertrauenswürdig galt, bleibt es das, bis du dein Passwort änderst oder dich von allen anderen Sitzungen abmeldest.",
+        "password": "Passwort",
+        "signedOutOthers_one": "Von {{count}} anderen Sitzung abgemeldet",
+        "signedOutOthers_other": "Von {{count}} anderen Sitzungen abgemeldet",
+        "signedOutOne": "Abgemeldet",
+        "failed": "Abmeldung fehlgeschlagen. Versuche es erneut.",
+        "loadFailed": "Die Liste deiner Anmeldungen konnte nicht geladen werden.",
+        "retry": "Erneut versuchen"
+      },
       "hidePasswords": "Passwörter ausblenden",
       "showPasswords": "Passwörter anzeigen",
       "changePassword": "Passwort ändern",
@@ -1487,6 +1533,12 @@
     "mustAcceptPrivacy": "Du musst die Datenschutzerklärung akzeptieren",
     "mustAcceptTermsAndPrivacy": "Du musst die Nutzungsbedingungen und die Datenschutzerklärung akzeptieren",
     "passwordIncorrect": "Das Passwort ist falsch",
+    "sessionNotFound": "Diese Sitzung wurde nicht gefunden. Vielleicht wurde sie bereits beendet.",
+    "sessionRevokeCurrent": "Das ist die Sitzung, die du gerade verwendest. Melde dich ab, um sie zu beenden.",
+    "trustedDeviceTokenInvalid": "Das Token dieses vertrauenswürdigen Geräts wurde nicht akzeptiert. Versuche es erneut.",
+    "rememberMeInvalid": "Die Auswahl „Angemeldet bleiben“ wurde nicht akzeptiert. Versuche es erneut.",
+    "signedOutElsewhere": "Du wurdest von einem anderen Gerät aus abgemeldet.",
+    "sessionEnded": "Deine Sitzung wurde beendet. Melde dich erneut an.",
     "twoFactorCodeRequired": "Der Code für die Zwei-Faktor-Authentifizierung ist erforderlich",
     "invalidTwoFactorCode": "Ungültiger Code für die Zwei-Faktor-Authentifizierung",
     "emailAlreadyVerified": "Deine E-Mail-Adresse ist bereits bestätigt",

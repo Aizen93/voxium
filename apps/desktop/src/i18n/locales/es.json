@@ -52,7 +52,13 @@
       "signIn": "Iniciar sesión",
       "signingIn": "Iniciando sesión...",
       "noAccount": "¿No tienes una cuenta?",
-      "createOne": "Crear una"
+      "createOne": "Crear una",
+      "reason": {
+        "signedOutElsewhere": "Se cerró tu sesión desde otro dispositivo.",
+        "sessionEnded": "Tu sesión ha finalizado. Vuelve a iniciar sesión.",
+        "accountBanned": "Tu cuenta ha sido suspendida.",
+        "accountDeleted": "Tu cuenta ha sido eliminada."
+      }
     },
     "register": {
       "registrationFailed": "No se pudo completar el registro. Comprueba tu conexión e inténtalo de nuevo.",
@@ -219,6 +225,46 @@
       "failed": "No se pudo eliminar tu cuenta. Inténtalo de nuevo."
     },
     "security": {
+      "sessions": {
+        "title": "Dónde has iniciado sesión",
+        "description": "Los dispositivos y navegadores que tienen la sesión iniciada en tu cuenta ahora mismo.",
+        "thisDevice": "Este dispositivo",
+        "kind": {
+          "desktop": "Aplicación de escritorio",
+          "web": "Navegador web",
+          "admin": "Panel de administración",
+          "android": "Aplicación de Android",
+          "ios": "Aplicación de iPhone o iPad",
+          "unknown": "Aplicación desconocida"
+        },
+        "os": {
+          "windows": "Windows",
+          "macos": "macOS",
+          "linux": "Linux",
+          "android": "Android",
+          "ios": "iOS",
+          "other": "Otro sistema"
+        },
+        "kindAndOs": "{{kind}} · {{os}}",
+        "signedInOn": "Sesión iniciada el {{date}}",
+        "activeToday": "Activa hoy",
+        "activeYesterday": "Activa ayer",
+        "activeOn": "Activa el {{date}}",
+        "signOut": "Cerrar sesión",
+        "signOutOthers": "Cerrar todas las demás sesiones",
+        "noOthers": "No tienes la sesión iniciada en ningún otro sitio.",
+        "confirmTitle": "Confirma con tu contraseña",
+        "confirmOthers": "Se cerrará la sesión en todos los demás dispositivos y navegadores. Los que hubieras marcado como de confianza para la verificación en dos pasos volverán a pedir tu código. Este dispositivo mantiene la sesión iniciada.",
+        "confirmOne": "Se cerrará la sesión de {{label}}.",
+        "confirmOneTrusted": "Si ese dispositivo era de confianza para la verificación en dos pasos, seguirá siéndolo hasta que cambies tu contraseña o cierres todas las demás sesiones.",
+        "password": "Contraseña",
+        "signedOutOthers_one": "Se cerró {{count}} otra sesión",
+        "signedOutOthers_other": "Se cerraron {{count}} otras sesiones",
+        "signedOutOne": "Sesión cerrada",
+        "failed": "No se pudo cerrar la sesión. Inténtalo de nuevo.",
+        "loadFailed": "No se pudo cargar dónde has iniciado sesión.",
+        "retry": "Reintentar"
+      },
       "hidePasswords": "Ocultar contraseñas",
       "showPasswords": "Mostrar contraseñas",
       "changePassword": "Cambiar contraseña",
@@ -1487,6 +1533,12 @@
     "mustAcceptPrivacy": "Debes aceptar la Política de privacidad",
     "mustAcceptTermsAndPrivacy": "Debes aceptar los Términos del servicio y la Política de privacidad",
     "passwordIncorrect": "La contraseña es incorrecta",
+    "sessionNotFound": "No se encontró esa sesión. Puede que ya haya finalizado.",
+    "sessionRevokeCurrent": "Es la sesión que estás usando. Cierra sesión para finalizarla.",
+    "trustedDeviceTokenInvalid": "No se aceptó el token de dispositivo de confianza de este dispositivo. Inténtalo de nuevo.",
+    "rememberMeInvalid": "No se aceptó la opción «Recordarme». Inténtalo de nuevo.",
+    "signedOutElsewhere": "Se cerró tu sesión desde otro dispositivo.",
+    "sessionEnded": "Tu sesión ha finalizado. Vuelve a iniciar sesión.",
     "twoFactorCodeRequired": "Se requiere el código de autenticación en dos pasos",
     "invalidTwoFactorCode": "Código de autenticación en dos pasos no válido",
     "emailAlreadyVerified": "Tu dirección de correo ya está verificada",

@@ -105,7 +105,7 @@ export function ConsentPage() {
 
             <button
               type="button"
-              onClick={logout}
+              onClick={() => logout()}
               className="flex w-full items-center justify-center gap-2 rounded-lg border border-vox-border py-2.5 text-sm text-vox-text-secondary hover:bg-vox-bg-tertiary hover:text-vox-text-primary transition-colors"
             >
               <LogOut size={16} />

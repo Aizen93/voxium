@@ -2,10 +2,16 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { connectSocket, disconnectSocket, reconnectSocketAfterCredentialChange, beginCredentialChange } from '../services/socket';
 import {
-  getAccessToken, setTokens, clearTokens, isRemembered, hydrateTokens,
-  getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken, flushTokenStorage,
+  getAccessToken, getRefreshToken, setTokens, clearTokens, clearSessionTokens, reloadAfterSessionChange,
+  isRemembered, hydrateTokens, isReloadPending, letGoOfSession, takeUpStoredSession,
+  getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken, flushTokenStorage, announceSessionEnded,
 } from '../services/tokenStorage';
-import { endSessionRenewals } from '../services/session';
+import { endSessionOnServer, holdReplacedSession, endReplacedSession } from '../services/sessionRevocation';
+import type { AxiosRequestConfig } from 'axios';
+import {
+  endSessionRenewals, runCredentialChange, refreshAccessToken, currentSessionEpoch, SessionLostError, CREDENTIAL_CHANGE_TIMEOUT_MS,
+  forgetIgnoredSessionEnd,
+} from '../services/session';
 import { isAuthRefusal } from '../services/authRefusal';
 import { accountDeletionInFlight, accountDeletionSettled, beginAccountDeletion } from '../services/accountDeletion';
 import { useServerStore } from './serverStore';
@@ -15,7 +21,12 @@ import { resetAccountStores } from './resetStores';
 import { processImage, ASSET_UPLOAD_CONTENT_TYPE } from '../utils/imageProcessing';
 import i18n from '../i18n';
 import { getTranslatedError } from '../utils/serverErrors';
-import type { User, RegistrationConsent } from '@voxium/shared';
+import type {
+  User, RegistrationConsent, LoginRequest, TotpVerifyRequest, RegisterCompleteRequest, ChangePasswordRequest,
+  RevokeOtherSessionsRequest, RevokeOtherSessionsResponse,
+} from '@voxium/shared';
+import { sessionClientHint } from '../services/sessionClient';
+import { userIdOf } from '../services/tokenClaims';
 import { PowExpiredError, PowAbortedError, SIGNUP, USERNAME_TAKEN_MESSAGE } from '@voxium/shared';
 import { solveRegistrationPowOffThread } from '../services/powSolver';
 import { forgetLocalE2EState } from '../services/e2e/e2eService';
@@ -37,6 +48,111 @@ export interface PendingRegistration {
   /** The completion answered "username taken": the code step asks for
    *  another one and retries with the same code */
   usernameTaken: boolean;
+}
+
+export interface LogoutOptions {
+  /**
+   * Tell the server to end the session too (POST /auth/logout, not awaited,
+   * retried in memory for a while: services/sessionRevocation.ts). Default
+   * yes: a sign-out the user made. False where the session is over already
+   * or the server ended it: its `force:logout`, an account deletion, a
+   * session the vault gate found refused.
+   */
+  tellServer?: boolean;
+  /**
+   * A token (access or refresh) of the session that ended, when the caller
+   * knows which one did: the socket the server signed out, the session an
+   * account deletion was sent from. The pair is cleared only while it is
+   * still of that session. Default: the refresh token held when logout runs.
+   */
+  endingSession?: string | null;
+  /**
+   * The server ended every session of the account (a ban, an account
+   * deletion): any stored pair of the account `endingSession` names is then
+   * of the ended session, whichever session it is (tokenClaims.isSameSession).
+   */
+  accountEnded?: boolean;
+}
+
+/** What a logout found: the session cleared, or another session stored meanwhile (kept; the page reloads onto it). */
+export type LogoutOutcome = 'cleared' | 'replaced';
+
+/** What "sign out of all other sessions" did. */
+export interface RevokeOtherSessionsResult {
+  /** The other sessions that were live and are now ended (rows: a token issued before sessions and never used since is not counted). */
+  revoked: number;
+}
+
+/**
+ * The request of a credential change: it renews nothing itself (renewals are
+ * held until its answer is stored, services/session.ts), and its deadline
+ * bounds that hold.
+ */
+function credentialChangeRequest(): AxiosRequestConfig & { _noRenewal: true } {
+  return { _noRenewal: true, timeout: CREDENTIAL_CHANGE_TIMEOUT_MS };
+}
+
+/**
+ * Store the pair a credential change answered, when it carried one and its
+ * answer is still this tab's to store (`current`: the change's
+ * stillCurrent(), asked once before anything of the answer is stored — the
+ * session it was made in has not ended here, and the shared storage still
+ * holds that session: another tab's sign-in or sign-out meanwhile stands).
+ * The server re-keyed this device's session to the new version. The server
+ * then disconnects every socket opened with the old tokens, this one
+ * included: it reopens with the new access token (never force:logout — the
+ * session is valid).
+ */
+function storeCredentialChangePair(answer: { accessToken?: unknown; refreshToken?: unknown } | undefined, current: boolean): void {
+  const accessToken = answer?.accessToken;
+  const refreshToken = answer?.refreshToken;
+  if (typeof accessToken !== 'string' || typeof refreshToken !== 'string' || !accessToken || !refreshToken) return;
+  if (!current) {
+    console.warn('[Auth] The credential change answered after the session it was made in ended or was replaced — its answer is not stored');
+    return;
+  }
+  setTokens(accessToken, refreshToken);
+  reconnectSocketAfterCredentialChange(accessToken);
+}
+
+/**
+ * A credential change, its rules kept in one place: one at a time, renewals
+ * held around it (runCredentialChange), the socket's own disconnect by the
+ * server not answered with the old token meanwhile (beginCredentialChange).
+ * A 401 means the account moved under the request (a reset, a ban, another
+ * change committed first) or this session ended: once the hold is lifted the
+ * session is renewed, and a refused renewal signs out (services/session.ts);
+ * the error is the caller's either way. An answer lost after the commit
+ * leaves a pair of the old version: its next renewal is refused, a normal
+ * session loss.
+ */
+async function credentialChange<T>(send: (stillCurrent: () => boolean) => Promise<T>): Promise<T> {
+  // The session the change is made in: a 401 that answers after a sign-out
+  // (or a new sign-in) is its caller's, and renews nothing of what is stored now
+  const epoch = currentSessionEpoch();
+  try {
+    return await runCredentialChange(async (stillCurrent) => {
+      const endCredentialChange = beginCredentialChange();
+      try {
+        return await send(stillCurrent);
+      } finally {
+        endCredentialChange();
+      }
+    });
+  } catch (err) {
+    if ((err as { response?: { status?: unknown } } | null)?.response?.status === 401 && epoch === currentSessionEpoch()) {
+      try {
+        await refreshAccessToken();
+      } catch (renewalErr) {
+        // A refusal has ended the session already; anything else is a
+        // passing failure the next request tries again
+        if (!(renewalErr instanceof SessionLostError)) {
+          console.warn('[Auth] Could not renew the session after a refused credential change:', renewalErr instanceof Error ? renewalErr.message : String(renewalErr));
+        }
+      }
+    }
+    throw err;
+  }
 }
 
 interface AuthState {
@@ -86,7 +202,13 @@ interface AuthState {
    *  code works only with this pending id: coming back to /register shows the
    *  code step again. Memory only — a reload starts over. */
   leaveRegistration: () => void;
-  logout: () => void;
+  /**
+   * Sign out on this device. The local end is synchronous and complete
+   * whatever happens next. Resolves 'replaced' when another tab of this
+   * browser stored a different session meanwhile: that session is kept and
+   * the page reloads onto it (tokenStorage.clearSessionTokens).
+   */
+  logout: (options?: LogoutOptions) => LogoutOutcome;
   /** The session restore at launch: loads the stored session, verifies it
    *  with `/auth/me`, connects. Single-flight. A transport failure keeps the
    *  tokens and retries on a back-off (`SESSION_RESTORE_RETRY_DELAYS_MS`). */
@@ -100,7 +222,20 @@ interface AuthState {
   updateProfile: (fields: { displayName?: string; bio?: string }) => Promise<void>;
   forgotPassword: (email: string) => Promise<string>;
   resetPassword: (token: string, password: string) => Promise<string>;
+  /**
+   * A credential change (services/session.ts runCredentialChange): renewals
+   * are held until the answer is stored, the socket is reopened with the
+   * new access token, a 401 renews (a refused renewal signs out).
+   */
   changePassword: (currentPassword: string, newPassword: string) => Promise<string>;
+  /**
+   * "Sign out of all other sessions" (`POST /auth/sessions/revoke-others`),
+   * behind the account password. The same rules as the password change; the
+   * device's trusted-device token is sent, the one that comes back stored,
+   * and one sent that does not come back is dropped (it died with the
+   * version). Resolves how many other sessions were ended.
+   */
+  revokeOtherSessions: (password: string) => Promise<RevokeOtherSessionsResult>;
   resendVerification: () => Promise<void>;
   /** Accept the Terms of Service and the Privacy Policy from an existing
    *  account (one that predates consent-at-signup). Clears the gate the
@@ -122,8 +257,16 @@ interface AuthState {
  * session being replaced must not ride along. The stale token would be sent
  * — and renewed, or refused — on the sign-in request itself, and a socket
  * still open for the old account would be handed to the new one.
+ *
+ * The discarded session is abandoned on this device, so the server is told
+ * to end it — once the new sign-in has SUCCEEDED (endReplacedSession, at
+ * each step that stores the new pair), never on a failed one: until then
+ * its refresh token is held in memory only (services/sessionRevocation.ts).
  */
 function discardStaleSession(): void {
+  holdReplacedSession(getRefreshToken());
+  // An end of a session this tab ignored before says nothing about the new one
+  forgetIgnoredSessionEnd();
   endSessionRestore();
   // A renewal of the OLD session still in flight must store nothing when it
   // lands — and, refused, must not end the NEW session (the stale session is
@@ -154,7 +297,7 @@ export const SESSION_RESTORE_RETRY_AFTER_MAX_MS = 300_000;
 type RestoreOutcome =
   | { kind: 'signed-in'; user: User }
   | { kind: 'no-session'; storeAnswered: boolean }
-  | { kind: 'refused' }
+  | { kind: 'refused'; /** The refresh token of the session that was refused. */ sessionToken: string | null }
   | { kind: 'failed'; message: string; /** A 429's `Retry-After`, when the server named one. */ retryAfterMs?: number };
 
 /** The `Retry-After` of a 429 in milliseconds, bounded; undefined for anything else. */
@@ -224,13 +367,54 @@ async function attemptRestore(): Promise<RestoreOutcome> {
   // app (asynchronous IPC): nothing is known before this answers
   const storeAnswered = await hydrateTokens();
   if (!getAccessToken()) return { kind: 'no-session', storeAnswered };
+  const sessionToken = getRefreshToken();
   try {
     const { data } = await api.get('/auth/me', { timeout: SESSION_RESTORE_TIMEOUT_MS });
     return { kind: 'signed-in', user: data.data as User };
   } catch (err) {
-    if (isAuthRefusal(err)) return { kind: 'refused' };
+    if (isAuthRefusal(err)) return { kind: 'refused', sessionToken };
     return { kind: 'failed', message: err instanceof Error ? err.message : String(err), retryAfterMs: retryAfterOf(err) };
   }
+}
+
+/**
+ * A restore was refused, and the clear found a different session stored in
+ * its place (another tab signed in meanwhile, as anyone): the memory let go
+ * of both (tokenStorage.clearSessionTokens). Once the clear of the refused
+ * session's copies has landed, this tab takes up the stored session and the
+ * restore runs again on it; where it cannot (the desktop app, another
+ * account than the one on screen, a reload already pending) the page reloads
+ * onto it. Never the sign-in page over a stored session: signing in there
+ * would clear it. Nothing happens once the restore's session is over (a
+ * sign-in or a sign-out since: `epoch`). The restore runs again on a timer,
+ * once the refused one has finished (checkAuth is single-flight).
+ *
+ * The loading state the refusal found stays as it is meanwhile, so the
+ * sign-in or landing page never flashes between the refusal and the restore
+ * of the stored session: `restore` (the restore run again) settles it, a
+ * reload leaves it up (the page goes), and `release` takes it down when
+ * nothing is restored after all (a sign-in or a sign-out since) or when the
+ * take-up failed; a failure is logged by its message.
+ */
+function restoreStoredSessionInstead(epoch: number, restore: () => Promise<void>, release: () => void): void {
+  flushTokenStorage()
+    .then(async () => {
+      if (epoch !== restoreEpoch) {
+        release();
+        return;
+      }
+      if (!takeUpStoredSession()) {
+        reloadAfterSessionChange();
+        return;
+      }
+      // once the refused restore has finished (checkAuth is single-flight)
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await restore();
+    })
+    .catch((err: unknown) => {
+      console.error('[Auth] The session stored in place of a refused one could not be restored:', err instanceof Error ? err.message : String(err));
+      release();
+    });
 }
 
 /** @internal tests */
@@ -299,7 +483,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // With none in flight nothing is awaited: the order is today's
       if (accountDeletionInFlight()) await accountDeletionSettled();
       const trustedDeviceToken = getTrustedDeviceToken() || undefined;
-      const { data } = await api.post('/auth/login', { email, password, rememberMe, trustedDeviceToken });
+      const body: LoginRequest = { email, password, rememberMe, trustedDeviceToken, client: sessionClientHint() };
+      const { data } = await api.post('/auth/login', body);
 
       // If TOTP is required, pause login flow
       if (data.data.totpRequired) {
@@ -309,6 +494,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       const { user, accessToken, refreshToken } = data.data;
       setTokens(accessToken, refreshToken, rememberMe);
+      endReplacedSession(refreshToken);
       if (canConnect(user)) {
         connectSocket(accessToken);
       }
@@ -331,9 +517,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       // as in login
       if (accountDeletionInFlight()) await accountDeletionSettled();
-      const { data } = await api.post('/auth/totp/verify', { totpToken, code });
+      const body: TotpVerifyRequest = { totpToken, code, client: sessionClientHint() };
+      const { data } = await api.post('/auth/totp/verify', body);
       const { user, accessToken, refreshToken, trustedDeviceToken } = data.data;
       setTokens(accessToken, refreshToken, totpRememberMe);
+      endReplacedSession(refreshToken);
       if (trustedDeviceToken) {
         setTrustedDeviceToken(trustedDeviceToken);
       }
@@ -436,7 +624,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       // as in login
       if (accountDeletionInFlight()) await accountDeletionSettled();
-      const body: { pendingId: string; code: string; username?: string } = { pendingId: pending.pendingId, code };
+      const body: RegisterCompleteRequest = { pendingId: pending.pendingId, code, client: sessionClientHint() };
       if (username !== undefined) body.username = username;
       const { data } = await api.post('/auth/register/complete', body);
       const { user, accessToken, refreshToken } = data.data;
@@ -449,9 +637,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // account they walked away from; they can sign in to it deliberately.
       const current = get();
       if (controller.signal.aborted && current.isAuthenticated && current.user && current.user.id !== user.id) {
+        // The server opened a session for the account with this answer: it
+        // is abandoned here, so the server is told to end it (fire and
+        // forget). Nothing of it is stored, and the session on screen stays
+        endSessionOnServer(refreshToken);
         return;
       }
       setTokens(accessToken, refreshToken, true);
+      endReplacedSession(refreshToken);
 
       // The code proved the mailbox and the consent travelled with step one,
       // but the socket still waits for whatever the server says is missing
@@ -523,7 +716,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isRegistering: false, powProgress: null, error: null });
   },
 
-  logout: () => {
+  logout: ({ tellServer = true, endingSession, accountEnded = false }: LogoutOptions = {}) => {
+    // A reload of this page onto another session is pending: the page holds
+    // no session of its own any more (what its memory holds, if anything, is
+    // another tab's). Only its memory signs out: no storage, no server, no
+    // other tab is touched
+    const ownSession = !isReloadPending();
+    // The session this sign-out ends, read before anything clears it: its
+    // refresh token, or its access token when that is all this tab holds
+    const refreshToken = ownSession ? getRefreshToken() : null;
+    const sessionToken = !ownSession ? null : endingSession !== undefined ? endingSession : (refreshToken ?? getAccessToken());
+
     // Clean up voice state before disconnecting socket (stops mic, audio pipeline)
     const vs = useVoiceStore.getState();
     if (vs.activeChannelId) vs.leaveChannel();
@@ -535,12 +738,26 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // ... and a session restore in flight (one the email-verification page
     // started, a retry) must not sign the logged-out user back in
     endSessionRestore();
-    clearTokens();
+    // Only while the stored pair is still of the session that ended: another
+    // tab's sign-in meanwhile (as anyone) is not this tab's to wipe. No
+    // session to end (none held, or the caller's own session check was made
+    // with none): the memory signs out and nothing else is touched
+    const outcome = sessionToken === null ? letGoOfSession() : clearSessionTokens(sessionToken, { accountWide: accountEnded });
     disconnectSocket();
     // Wipe every account-scoped store — on a shared machine the next login must
     // never see the previous account's servers, DMs, or support transcript
     resetAccountStores();
     set({ user: null, isAuthenticated: false, pendingRegistration: null });
+    if (tellServer && ownSession) {
+      // Signed out on this device whatever happens next: the server is told
+      // in the background (never awaited, nothing stored from its answer)
+      endSessionOnServer(refreshToken);
+      // ... and the not-remembered tabs of the same session forget their copy
+      announceSessionEnded(sessionToken);
+    }
+    // ... the screen then belongs to that other session
+    if (outcome === 'replaced') reloadAfterSessionChange();
+    return outcome;
   },
 
   retrySessionRestore: async () => {
@@ -583,7 +800,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           // have renewed it (an app launched after its access token expired),
           // and a handshake with the old one is refused and waits a back-off
           const token = getAccessToken();
-          if (token && canConnect(outcome.user)) connectSocket(token);
+          // ... but only while it is still a session of the account the
+          // answer is about: another tab may have signed out, or in as
+          // someone else, while `/auth/me` was out. Then nothing of this
+          // answer is applied, and the restore runs again on what is stored now
+          const owner = userIdOf(token);
+          if (!token || (owner !== null && owner !== outcome.user.id)) {
+            set({ isLoading: false });
+            setTimeout(retry, 0);
+            break;
+          }
+          if (canConnect(outcome.user)) connectSocket(token);
           set({ user: outcome.user, isAuthenticated: true, isLoading: false });
           break;
         }
@@ -595,9 +822,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           break;
         case 'refused':
           // The one case that ends the session (a refused renewal has
-          // cleared the tokens already)
+          // cleared the tokens already) — the session that was refused: a
+          // different one another tab stored meanwhile is restored instead
           cancelRestoreRetry();
-          clearTokens();
+          if (clearSessionTokens(outcome.sessionToken) === 'replaced') {
+            // The loading state stays up until that session's restore has settled
+            restoreStoredSessionInstead(
+              epoch,
+              async () => {
+                if (get().isAuthenticated) set({ isLoading: false });
+                else await get().checkAuth();
+              },
+              () => set({ isLoading: false }),
+            );
+            break;
+          }
           set({ isLoading: false });
           break;
         case 'failed':
@@ -677,23 +916,50 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // It stores a renewed pair: never while an account deletion of this
     // client is in flight (services/accountDeletion.ts)
     if (accountDeletionInFlight()) await accountDeletionSettled();
-    // The server disconnects this socket when the change commits, possibly
-    // before the answer arrives: no reopen with the old token meanwhile
-    const endCredentialChange = beginCredentialChange();
-    try {
-      const { data } = await api.post('/auth/change-password', { currentPassword, newPassword, rememberMe: isRemembered() });
+    return credentialChange(async (stillCurrent) => {
+      const body: ChangePasswordRequest = { currentPassword, newPassword, rememberMe: isRemembered(), client: sessionClientHint() };
+      const { data } = await api.post('/auth/change-password', body, credentialChangeRequest());
       // Store fresh tokens so the current session survives the tokenVersion bump
-      if (data.data?.accessToken && data.data?.refreshToken) {
-        setTokens(data.data.accessToken, data.data.refreshToken);
-        // The server disconnects every socket opened with the old tokens, this
-        // one included: reopen it with the new one (never force:logout — the
-        // session is still valid)
-        reconnectSocketAfterCredentialChange(data.data.accessToken);
-      }
+      storeCredentialChangePair(data.data, stillCurrent());
       return data.message;
-    } finally {
-      endCredentialChange();
-    }
+    });
+  },
+
+  revokeOtherSessions: async (password) => {
+    // as in changePassword
+    if (accountDeletionInFlight()) await accountDeletionSettled();
+    return credentialChange(async (stillCurrent) => {
+      // The trusted-device token is of the version this moves away from: the
+      // server re-issues it under the new one when it is sent and valid
+      const sentTrustedDeviceToken = getTrustedDeviceToken();
+      const body: RevokeOtherSessionsRequest = {
+        password,
+        rememberMe: isRemembered(),
+        client: sessionClientHint(),
+        ...(sentTrustedDeviceToken ? { trustedDeviceToken: sentTrustedDeviceToken } : {}),
+      };
+      const { data } = await api.post<{ success: boolean; data: RevokeOtherSessionsResponse }>(
+        '/auth/sessions/revoke-others', body, credentialChangeRequest(),
+      );
+      const answer: Partial<RevokeOtherSessionsResponse> = data?.data ?? {};
+      // Asked once, before anything of the answer is stored: storing the
+      // pair makes the stored session the answer's own
+      const current = stillCurrent();
+      // The pair may be absent (a later server may end the others without
+      // moving this device to a new one): only what came back is stored
+      storeCredentialChangePair(answer, current);
+      if (current) {
+        if (typeof answer.trustedDeviceToken === 'string' && answer.trustedDeviceToken.length > 0) {
+          setTrustedDeviceToken(answer.trustedDeviceToken);
+        } else if (sentTrustedDeviceToken && getTrustedDeviceToken() === sentTrustedDeviceToken) {
+          // Sent and not given back: dead after the version bump (and only
+          // that one: another tab may have stored a new one meanwhile)
+          clearTrustedDeviceToken();
+        }
+      }
+      const revoked = typeof answer.revoked === 'number' && Number.isInteger(answer.revoked) && answer.revoked >= 0 ? answer.revoked : 0;
+      return { revoked };
+    });
   },
 
   deleteAccount: async (password, totpCode) => {
@@ -704,13 +970,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // (services/accountDeletion.ts). Nothing below reads a store logout()
     // resets: the account is the id read here.
     const endDeletion = beginAccountDeletion();
+    // The session the deletion is sent from: in the browser build another
+    // tab may sign in (as anyone) while the deletion runs, and that session
+    // is not this cleanup's to wipe
+    const sessionToken = getRefreshToken() ?? getAccessToken();
     try {
       await api.delete('/auth/account', { data: { password, ...(totpCode ? { totpCode } : {}) } });
       // The server has purged the account and disconnected its sockets; what
       // is left is this device's copy of it. Same cleanup as logout, plus the
       // E2E vault and its key, which logout deliberately keeps — every key
       // the vault pairs with is gone.
-      get().logout();
+      get().logout({ tellServer: false, endingSession: sessionToken, accountEnded: true });
       // Never rejects: a part it could not remove is logged, and the account
       // is deleted either way
       const localE2EStateForgotten = userId ? forgetLocalE2EState(userId) : Promise.resolve();

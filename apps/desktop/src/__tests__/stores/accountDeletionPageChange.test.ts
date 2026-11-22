@@ -51,6 +51,14 @@ const storage = vi.hoisted(() => ({
   getRefreshToken: vi.fn(() => null as string | null),
   setTokens: vi.fn((access: string) => void events.push(`tokens set (${access})`)),
   clearTokens: vi.fn(() => void events.push('tokens cleared')),
+  clearSessionTokens: vi.fn((_endedToken: string | null) => { storage.clearTokens(); return 'cleared' as const; }),
+  reloadAfterSessionChange: vi.fn(),
+  announceSessionEnded: vi.fn(),
+  // no reload onto another session pending; a sign-out with no session to end lets go of the memory only
+  isReloadPending: vi.fn(() => false),
+  letGoOfSession: vi.fn((): 'cleared' | 'replaced' => 'cleared'),
+  // after a 'replaced' restore: what is stored now, taken up (false: the caller reloads onto it)
+  takeUpStoredSession: vi.fn(() => false),
   isRemembered: vi.fn(() => true),
   hydrateTokens: vi.fn(async () => true),
   getTrustedDeviceToken: vi.fn(() => null as string | null),
@@ -75,6 +83,8 @@ vi.mock('../../services/powSolver', () => ({ solveRegistrationPowOffThread: vi.f
 vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
 
 import type { User } from '@voxium/shared';
+// The sign-out's server call and its retries: never a real request from a unit test
+vi.mock('../../services/sessionRevocation', () => ({ endSessionOnServer: vi.fn(), holdReplacedSession: vi.fn(), endReplacedSession: vi.fn(), forgetReplacedSession: vi.fn() }));
 import { useAuthStore } from '../../stores/authStore';
 import { connectSocket, disconnectSocket } from '../../services/socket';
 import { handleSessionLost, setSessionLostNavigation } from '../../services/session';
@@ -119,6 +129,8 @@ beforeEach(async () => {
   events.length = 0;
   sockets.length = 0;
   localStorage.clear();
+  // A fresh page load: one trip to the sign-in page each (services/session.ts goToLoginPage)
+  setSessionLostNavigation((path) => { window.location.href = path; });
   warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   Object.defineProperty(window, 'location', {
     value: {
@@ -186,7 +198,7 @@ describe('a force:logout during an account deletion of this client', () => {
     const deletion = useAuthStore.getState().deleteAccount('password123');
     expect(accountDeletionInFlight()).toBe(true);
     // the server's first one, before its transaction
-    forceLogout({ reason: 'account_deleted' });
+    forceLogout({ reason: 'Your account has been deleted' });
     await settle();
     expect(useAuthStore.getState().user).toBeNull(); // the handler's own logout ran
     expect(window.location.href).toBe(''); // and it waits
@@ -206,7 +218,7 @@ describe('a force:logout during an account deletion of this client', () => {
       'trusted-device token cleared',
       'vault key removed',
       'token store flushed', // the deletion's flush of the trusted-device clear
-      'navigated to /login?reason=account_deleted',
+      'navigated to /login?reason=deleted',
     ]);
   });
 
@@ -222,7 +234,7 @@ describe('a force:logout during an account deletion of this client', () => {
     const atRemoval = watchVaultAtKeyRemoval(keyGate.promise);
 
     const deletion = useAuthStore.getState().deleteAccount('password123');
-    forceLogout({ reason: 'account_deleted' });
+    forceLogout({ reason: 'Your account has been deleted' });
     await settle();
     answer.resolve({ data: {} });
     await settle();
@@ -235,20 +247,20 @@ describe('a force:logout during an account deletion of this client', () => {
     await settle();
 
     expectLocalStateErased(atRemoval);
-    expect(events.at(-1)).toBe('navigated to /login?reason=account_deleted');
-    expect(events.indexOf('vault key removed')).toBeLessThan(events.indexOf('navigated to /login?reason=account_deleted'));
+    expect(events.at(-1)).toBe('navigated to /login?reason=deleted');
+    expect(events.indexOf('vault key removed')).toBeLessThan(events.indexOf('navigated to /login?reason=deleted'));
     expect(events.filter((e) => e.startsWith('navigated'))).toHaveLength(1);
   });
 
   it('a second force:logout (after the commit) changes nothing more', async () => {
     api.delete.mockResolvedValueOnce({ data: {} });
     const deletion = useAuthStore.getState().deleteAccount('password123');
-    forceLogout({ reason: 'account_deleted' });
-    forceLogout({ reason: 'account_deleted' });
+    forceLogout({ reason: 'Your account has been deleted' });
+    forceLogout({ reason: 'Your account has been deleted' });
     await deletion;
     await settle();
     expect(keys.remove).toHaveBeenCalledTimes(1);
-    expect(window.location.href).toBe('/login?reason=account_deleted');
+    expect(window.location.href).toBe('/login?reason=deleted');
   });
 
   it.each([
@@ -260,14 +272,14 @@ describe('a force:logout during an account deletion of this client', () => {
     api.delete.mockReturnValueOnce(answer.promise);
 
     const deletion = useAuthStore.getState().deleteAccount('password123');
-    forceLogout({ reason: 'account_deleted' });
+    forceLogout({ reason: 'Your account has been deleted' });
     await settle();
     expect(window.location.href).toBe('');
     answer.reject(failure);
     await expect(deletion).rejects.toBe(failure);
     await settle();
 
-    expect(window.location.href).toBe('/login?reason=account_deleted');
+    expect(window.location.href).toBe('/login?reason=deleted');
     expect(accountDeletionInFlight()).toBe(false);
     expect(keys.remove).not.toHaveBeenCalled();
     expect(await vaultNames()).toContain(vaultDbName('alice'));
@@ -281,7 +293,7 @@ describe('a force:logout during an account deletion of this client', () => {
     vi.useFakeTimers();
     const deletion = useAuthStore.getState().deleteAccount('password123');
     try {
-      forceLogout({ reason: 'account_deleted' });
+      forceLogout({ reason: 'Your account has been deleted' });
       // the handler's logout, its flush, then the wait (vi.waitFor would move the fake clock)
       await vi.dynamicImportSettled();
       await vi.advanceTimersByTimeAsync(0);
@@ -289,7 +301,7 @@ describe('a force:logout during an account deletion of this client', () => {
       await vi.advanceTimersByTimeAsync(ACCOUNT_DELETION_WAIT_MS - 1);
       expect(window.location.href).toBe('');
       await vi.advanceTimersByTimeAsync(1);
-      expect(window.location.href).toBe('/login?reason=account_deleted');
+      expect(window.location.href).toBe('/login?reason=deleted');
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith('[Account] The account deletion did not finish its local clean-up in time — leaving the page');
     } finally {
@@ -313,7 +325,7 @@ describe('a session started while an account deletion of this client is in fligh
     api.post.mockResolvedValueOnce(bobSignedIn);
 
     const deletion = useAuthStore.getState().deleteAccount('password123');
-    forceLogout({ reason: 'account_deleted' });
+    forceLogout({ reason: 'Your account has been deleted' });
     await settle();
     // the login page is on screen: someone signs in to another account
     const signIn = useAuthStore.getState().login('bob@example.org', 'password456');
@@ -346,7 +358,7 @@ describe('a session started while an account deletion of this client is in fligh
     api.get.mockResolvedValue({ data: { data: bob } });
 
     const deletion = useAuthStore.getState().deleteAccount('password123');
-    forceLogout({ reason: 'account_deleted' });
+    forceLogout({ reason: 'Your account has been deleted' });
     await settle();
     // another tab signed in meanwhile: the shared storage holds its session
     storage.getAccessToken.mockReturnValue('access-other-tab');
@@ -384,7 +396,7 @@ describe('with no account deletion in flight', () => {
   });
 
   it('a force:logout changes the page right after its token flush, as before', async () => {
-    forceLogout({ reason: 'banned' });
+    forceLogout({ reason: 'Your account has been banned' });
     await settle();
     expect(steps()).toEqual(['token store flushed', 'navigated to /login?reason=banned']);
     expect(useAuthStore.getState().user).toBeNull();

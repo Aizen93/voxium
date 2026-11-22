@@ -1,14 +1,20 @@
 import { useState, useRef, useCallback, useEffect, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../stores/authStore';
-import { Eye, EyeOff, ShieldCheck, ArrowLeft } from 'lucide-react';
+import { Eye, EyeOff, ShieldCheck, ArrowLeft, Info } from 'lucide-react';
 import { AuthBackground } from '../components/auth/AuthBackground';
 import { PeekingThief } from '../components/auth/PeekingThief';
+import { loginReasonKey } from '../utils/loginReasons';
 
 export function LoginPage() {
   const { t } = useTranslation();
   const { login, verifyTOTP, cancelTOTP, totpRequired, error, clearError, isSubmitting } = useAuthStore();
+  // Why the last session ended (`/login?reason=<code>`): a sentence from a
+  // closed list, never the address's own text. Shown until a sign-in is tried
+  const { search } = useLocation();
+  const [reasonKey] = useState(() => loginReasonKey(new URLSearchParams(search).get('reason')));
+  const [reasonShown, setReasonShown] = useState(true);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -45,6 +51,7 @@ export function LoginPage() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    setReasonShown(false);
     try {
       await login(email, password, rememberMe);
     } catch {
@@ -151,6 +158,18 @@ export function LoginPage() {
               {t('auth.login.subtitle')}
             </p>
           </div>
+
+          {/* Why the last session ended */}
+          {reasonKey && reasonShown && !error && (
+            <div
+              role="status"
+              data-testid="login-reason"
+              className="mb-4 flex items-start gap-2 rounded-lg bg-vox-accent-primary/10 border border-vox-accent-primary/20 px-4 py-3 text-sm text-vox-text-primary"
+            >
+              <Info size={16} className="mt-0.5 shrink-0 text-vox-accent-primary" aria-hidden="true" />
+              <span>{t(reasonKey)}</span>
+            </div>
+          )}
 
           {/* Error */}
           {error && (

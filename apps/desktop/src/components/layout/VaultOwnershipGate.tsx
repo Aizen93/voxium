@@ -277,6 +277,11 @@ class GateController {
     }
     this.opening = true;
     this.show({ kind: 'opening' });
+    // The session the check is made with: a refusal ends that one, never
+    // one another tab stores while the check runs. None (this tab's memory
+    // let go: another tab signed out, or in, and this page may be reloading):
+    // the sign-out then ends nothing but this tab's memory (authStore.logout)
+    const sessionToken = getAccessToken();
     try {
       const verdict = await checkSession(this.userId);
       if (getVaultOwnershipState(this.userId) !== 'owned') {
@@ -291,7 +296,7 @@ class GateController {
         reloadPage();
       } else {
         // signed out (or the account is gone): this tab follows
-        useAuthStore.getState().logout();
+        useAuthStore.getState().logout({ tellServer: false, endingSession: sessionToken });
       }
     } finally {
       this.opening = false;

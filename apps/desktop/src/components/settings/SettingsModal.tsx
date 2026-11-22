@@ -14,6 +14,7 @@ import { ThemeEditor } from './ThemeEditor';
 import { ThemeBrowser } from './ThemeBrowser';
 import { E2EDevicesSection } from './E2EDevicesSection';
 import { DeleteAccountSection } from './DeleteAccountSection';
+import { SessionsSection } from './SessionsSection';
 import { api } from '../../services/api';
 import { SUPPORTED_LANGUAGES } from '../../i18n';
 import { getTranslatedError, getTranslatedActionError } from '../../utils/serverErrors';
@@ -606,6 +607,7 @@ function SecurityTab() {
     <div className="space-y-6">
       <ChangePasswordForm />
       <TwoFactorSection />
+      <SessionsSection />
       {/* Account-level encryption: devices, linking, recovery key, identity
           reset. It is here rather than behind a DM's lock badge because all of
           it has always been account-scoped — one device list, one account key,

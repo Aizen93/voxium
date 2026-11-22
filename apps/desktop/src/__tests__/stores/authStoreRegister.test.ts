@@ -3,6 +3,9 @@ import { AxiosError } from 'axios';
 import {
   PowAbortedError, SIGNUP, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE,
 } from '@voxium/shared';
+// The sign-out's server call and its retries: never a real request from a unit test
+const revocation = vi.hoisted(() => ({ endSessionOnServer: vi.fn(), holdReplacedSession: vi.fn(), endReplacedSession: vi.fn(), forgetReplacedSession: vi.fn() }));
+vi.mock('../../services/sessionRevocation', () => revocation);
 import type { PendingRegistration } from '../../stores/authStore';
 
 // Moving the proof-of-work into a worker made the register view navigable
@@ -36,6 +39,15 @@ vi.mock('../../services/tokenStorage', () => ({
   getAccessToken: vi.fn(() => null),
   setTokens: storage.setTokens,
   clearTokens: storage.clearTokens,
+  getRefreshToken: vi.fn(() => null),
+  clearSessionTokens: vi.fn(() => { storage.clearTokens(); return 'cleared'; }),
+  reloadAfterSessionChange: vi.fn(),
+  announceSessionEnded: vi.fn(),
+  // no reload onto another session pending; a sign-out with no session to end lets go of the memory only
+  isReloadPending: vi.fn(() => false),
+  letGoOfSession: vi.fn((): 'cleared' | 'replaced' => 'cleared'),
+  // after a 'replaced' restore: what is stored now, taken up (false: the caller reloads onto it)
+  takeUpStoredSession: vi.fn(() => false),
   isRemembered: vi.fn(() => true),
   hydrateTokens: vi.fn(async () => true),
   getTrustedDeviceToken: vi.fn(() => null),
@@ -294,7 +306,7 @@ describe('authStore.completeRegistration — the code creates the account', () =
 
     await useAuthStore.getState().completeRegistration('123456');
 
-    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '123456' });
+    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '123456', client: 'web' });
     // The stale session of this launch is dropped BEFORE the request goes out
     expect(storage.clearTokens.mock.invocationCallOrder[0]).toBeLessThan(api.post.mock.invocationCallOrder[0]);
     expect(socket.disconnectSocket.mock.invocationCallOrder[0]).toBeLessThan(api.post.mock.invocationCallOrder[0]);
@@ -311,7 +323,7 @@ describe('authStore.completeRegistration — the code creates the account', () =
   it('sends the new username when one is given', async () => {
     api.post.mockResolvedValue({ data: { data: { user, accessToken: 'at', refreshToken: 'rt' } } });
     await useAuthStore.getState().completeRegistration('123456', 'alice2');
-    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '123456', username: 'alice2' });
+    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '123456', client: 'web', username: 'alice2' });
   });
 
   it('does not connect the socket for an account the server still gates (consent missing)', async () => {
@@ -387,6 +399,20 @@ describe('authStore.completeRegistration — the code creates the account', () =
     await pending;
     expect(useAuthStore.getState().user?.id).toBe('u-existing');
     expect(storage.setTokens).not.toHaveBeenCalled();
+    // the session the server opened with that answer is abandoned: the server is told to end it
+    expect(revocation.endSessionOnServer).toHaveBeenCalledTimes(1);
+    expect(revocation.endSessionOnServer).toHaveBeenCalledWith('rt');
+    expect(revocation.endReplacedSession).not.toHaveBeenCalled();
+  });
+
+  it('a completion it finishes (the view left, nobody else signed in) ends nothing on the server', async () => {
+    const post = hangingPost();
+    const pending = useAuthStore.getState().completeRegistration('123456');
+    await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
+    useAuthStore.getState().leaveRegistration();
+    post().resolve({ data: { data: { user, accessToken: 'at', refreshToken: 'rt' } } });
+    await pending;
+    expect(revocation.endSessionOnServer).not.toHaveBeenCalled();
   });
 });
 
