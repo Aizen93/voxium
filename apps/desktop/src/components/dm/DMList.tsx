@@ -9,6 +9,7 @@ import { ConfirmDialog } from '../common/ConfirmDialog';
 import { MessageSquare, Users, X, LifeBuoy } from 'lucide-react';
 import { clsx } from 'clsx';
 import { dmPreviewText } from '../../utils/dmPreview';
+import { dmNoticeTranslation } from '../../utils/systemNotices';
 import { DMVoicePanel } from '../voice/DMVoicePanel';
 import { toast } from '../../stores/toastStore';
 import { StaffBadge } from '../common/StaffBadge';
@@ -21,6 +22,14 @@ import { isDeletedPreview } from '../../utils/dmPreview';
 
 export function DMList() {
   const { t } = useTranslation();
+  // What the preview prints is still dmPreviewText's decision; a listed call
+  // notice (never an encrypted row) is then shown in the viewer's language.
+  const previewLine = (last: NonNullable<Conversation['lastMessage']>): string => {
+    const text = dmPreviewText(last);
+    if (text === null) return `🔒 ${t('e2e.encryptedMessage')}`;
+    const notice = last.encrypted ? null : dmNoticeTranslation(text);
+    return notice ? t(notice.key) : text;
+  };
   const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, participantStatuses, removeConversation } = useDMStore();
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
   const pendingIncoming = useFriendStore((s) => s.pendingIncoming);
@@ -210,7 +219,7 @@ export function DMList() {
                         the row carries. */}
                     {isDeletedPreview(conv.lastMessage)
                       ? t('dm.deletedParticipant.messageDeleted')
-                      : dmPreviewText(conv.lastMessage) ?? `🔒 ${t('e2e.encryptedMessage')}`}
+                      : previewLine(conv.lastMessage)}
                   </p>
                 )}
               </div>

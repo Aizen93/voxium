@@ -8,6 +8,7 @@ import { DeletedMessageRow } from './DeletedParticipant';
 import { isDeletedMessageRow } from '../../services/e2e/displayGate';
 import { Phone, ArrowDown, Lock } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
+import { dmNoticeTranslation } from '../../utils/systemNotices';
 
 interface Props {
   conversationId: string;
@@ -242,6 +243,10 @@ export function DMMessageList({ conversationId, readOnly = false }: Props) {
                   : format(date, 'MM/dd/yyyy h:mm a');
 
               const isEncryptionNotice = message.content.toLowerCase().includes('encryption');
+              // Display only, after the gate: the two listed call sentences read in
+              // the viewer's language, anything else exactly as it is.
+              const notice = message.encrypted ? null : dmNoticeTranslation(message.content);
+              const noticeText = notice ? t(notice.key) : message.content;
               return (
                 // pt, not my: a row's own margin is outside the box Virtuoso
                 // measures (see the message row below). Top only: the row
@@ -254,7 +259,7 @@ export function DMMessageList({ conversationId, readOnly = false }: Props) {
                     ) : (
                       <Phone size={14} className="text-vox-text-muted" />
                     )}
-                    <span className="text-xs text-vox-text-secondary">{message.content}</span>
+                    <span className="text-xs text-vox-text-secondary">{noticeText}</span>
                     <span className="text-[10px] text-vox-text-muted">{timeStr}</span>
                   </div>
                 </div>

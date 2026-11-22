@@ -864,6 +864,8 @@
     "mentionUnknown": "@不明"
   },
   "dm": {
+    "callStarted": "音声通話を開始しました",
+    "callEnded": "音声通話を終了しました",
     "title": "ダイレクトメッセージ",
     "friends": "フレンド",
     "contactSupport": "サポートに連絡",
@@ -1086,6 +1088,10 @@
     "image": "画像"
   },
   "support": {
+    "noticeOpened": "サポートチケットを作成しました",
+    "noticeReopened": "サポートチケットを再開しました",
+    "noticeStaffJoined": "スタッフの {{name}} が会話に参加しました",
+    "noticeClosedBy": "{{name}} がチケットをクローズしました",
     "sendMessage": "メッセージを送信",
     "title": "サポート",
     "open": "オープン",
