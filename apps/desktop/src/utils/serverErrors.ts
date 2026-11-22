@@ -171,6 +171,39 @@ const ERROR_MAP: Record<string, string> = {
   [`Message must be at most ${LIMITS.JOIN_REQUEST_MESSAGE_MAX} characters`]: 'joinMessageTooLong',
   // Explore paging past the depth cap (DISCOVERY_MAX_PAGES × page size)
   'Refine your search': 'refineSearch',
+  // The search text of the member directory and the space list refused (control characters)
+  'Invalid search text': 'searchTextInvalid',
+  // What a person can meet outside the routes of one screen: a failed request
+  // (the error handler's 500), the upload store down, a friendship the caller
+  // is not part of, and the label rule's refusal of a name
+  'Internal server error': 'internalServerError',
+  'Storage is unavailable': 'storageUnavailable',
+  'Not part of this friendship': 'notPartOfFriendship',
+  'Display name contains unsupported characters': 'displayNameUnsupportedChars',
+  'Nickname contains unsupported characters': 'nicknameUnsupportedChars',
+  'Role name contains unsupported characters': 'roleNameUnsupportedChars',
+  'Category name contains unsupported characters': 'categoryNameUnsupportedChars',
+  // The send path (an attachment the server refuses), a search narrowed to a channel
+  'Invalid attachment': 'attachmentInvalid',
+  'Invalid attachment size': 'attachmentSizeInvalid',
+  'Attachment does not belong to this channel': 'attachmentWrongChannel',
+  'Attachment does not belong to this conversation': 'attachmentWrongConversation',
+  'Invalid channel': 'searchChannelInvalid',
+  // The encrypted-message services' own reads and uploads during a send
+  'No conversation with this user': 'e2eNoSharedContext',
+  'E2E device not found': 'e2eDeviceNotFound',
+  'No keys available for this device': 'e2eNoKeysAvailable',
+  'Unknown device': 'e2eUnknownDevice',
+  'No E2E device registered': 'e2eNoDevice',
+  'Unknown recipient device': 'e2eUnknownRecipientDevice',
+  'Recipient is not a participant of this conversation': 'e2eRecipientNotParticipant',
+  // The shared theme validators (publish answers them, and a theme file import runs them here)
+  'Pattern must be an object': 'themePatternNotObject',
+  'Pattern color must be a valid hex color (#RRGGBB)': 'themePatternColor',
+  'Pattern opacity must be a number between 0 and 1': 'themePatternOpacity',
+  'Pattern size must be a number between 4 and 400': 'themePatternSize',
+  'Pattern angle must be a number between -180 and 180': 'themePatternAngle',
+  'Custom SVG pattern requires svgData': 'themePatternSvgRequired',
   // The opacity answer: a hidden, blocked or deleted server on join / request / report
   'Server not found': 'serverNotFound',
 
@@ -430,7 +463,15 @@ const ERROR_VARS: Record<string, Record<string, unknown>> = {
  * can be mapped: matched by pattern, anchored at both ends, and the captured
  * number travels as `{{max}}` (or `{{min}}` where the entry says so).
  */
-const ERROR_PATTERNS: ReadonlyArray<{ re: RegExp; key: string; param?: 'max' | 'min' }> = [
+const ERROR_PATTERNS: ReadonlyArray<{
+  re: RegExp;
+  key: string;
+  param?: 'max' | 'min';
+  /** Names of the captured groups that travel as plain text (instead of one number). */
+  text?: readonly string[];
+  /** The last text capture is itself a server sentence, translated first. */
+  nested?: boolean;
+}> = [
   { re: /^Server can have at most (\d+) webhooks$/, key: 'webhookCap' },
   { re: /^Server can have at most (\d+) channels$/, key: 'channelCap' },
   { re: /^Server can have at most (\d+) secure channels$/, key: 'secureChannelCap' },
@@ -445,6 +486,19 @@ const ERROR_PATTERNS: ReadonlyArray<{ re: RegExp; key: string; param?: 'max' | '
   // validateSearchQuery (message search) and the directory search share the sentence, not the numbers
   { re: /^Search query must be at least (\d+) characters$/, key: 'searchQueryTooShort', param: 'min' },
   { re: /^Search query must be at most (\d+) characters$/, key: 'searchQueryTooLong' },
+
+  // The shared theme validators: the offending key or number travels as a plain value
+  { re: /^Colors must have exactly (\d+) keys$/, key: 'themeColorCount' },
+  { re: /^Missing color key: (.+)$/, key: 'themeColorMissing', text: ['key'] },
+  { re: /^Color value for "(.+)" must be a string$/, key: 'themeColorNotString', text: ['key'] },
+  { re: /^Invalid color value for "(.+)": must be hex \(#RRGGBB\) or rgba\(\)$/, key: 'themeColorInvalidAlpha', text: ['key'] },
+  { re: /^Invalid color value for "(.+)": must be hex \(#RRGGBB\)$/, key: 'themeColorInvalid', text: ['key'] },
+  { re: /^Unknown pattern area: "(.+)"$/, key: 'themePatternArea', text: ['key'] },
+  { re: /^Invalid pattern type: must be one of (.+)$/, key: 'themePatternType', text: ['types'] },
+  { re: /^Pattern "([^"]+)": (.+)$/, key: 'themePatternDetail', text: ['key', 'detail'], nested: true },
+  // A sign-in or sign-up refused for a ban that carries the moderator's reason
+  // the reason is text a moderator typed: it may hold line breaks
+  { re: /^Account banned: ([\s\S]+)$/, key: 'accountBannedReason', text: ['reason'] },
 ];
 
 /**
@@ -500,9 +554,17 @@ export function translateServerError(
   const key = Object.hasOwn(ERROR_MAP, serverMessage) ? ERROR_MAP[serverMessage] : undefined;
   if (key) return t(`serverErrors.${key}`, { defaultValue: serverMessage, ...ERROR_VARS[key] });
 
-  for (const { re, key: patternKey, param = 'max' } of ERROR_PATTERNS) {
+  for (const { re, key: patternKey, param = 'max', text, nested } of ERROR_PATTERNS) {
     const match = re.exec(serverMessage);
-    if (match) return t(`serverErrors.${patternKey}`, { defaultValue: serverMessage, [param]: Number(match[1]) });
+    if (!match) continue;
+    if (text) {
+      const values: Record<string, string> = {};
+      text.forEach((name, i) => { values[name] = match[i + 1]; });
+      // `Pattern "x": <sentence>`: the sentence after the colon is translated too
+      if (nested) values[text[text.length - 1]] = translateServerError(match[text.length], t);
+      return t(`serverErrors.${patternKey}`, { defaultValue: serverMessage, ...values });
+    }
+    return t(`serverErrors.${patternKey}`, { defaultValue: serverMessage, [param]: Number(match[1]) });
   }
 
   // A message no mapping knows (a newer server's): the raw text is still more

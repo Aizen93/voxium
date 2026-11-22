@@ -24,6 +24,8 @@ const OLD_E2E_WORDING = /server settings|create (?:a |or join a )?server|join se
 const MACHINE_SENSE = new Set([
   'serverErrors.voiceServerUnavailable', // the SFU
   'serverErrors.voiceServerRestarted',
+  'serverErrors.internalServerError', // the machine answering
+  'serverErrors.e2eUnknownDevice', // the machine answering
   'landing.why.ownDataDesc', // "self-host or use our servers"
   'secureVoice.createHint', // "the server only ever relays sound"
   'secureChannel.pinnedDowngrade', // "the server now lists it"

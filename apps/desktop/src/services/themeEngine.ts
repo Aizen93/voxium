@@ -243,14 +243,14 @@ export async function importTheme(file: File): Promise<CommunityThemeData> {
     throw new Error(i18n.t('themes.import.missingColors'));
   }
   const colorsErr = validateThemeColors(obj.colors as Record<string, string>);
-  // The validator's detail names the offending key: kept verbatim inside the sentence
-  if (colorsErr) throw new Error(i18n.t('themes.import.invalidColors', { detail: colorsErr }));
+  // The validator's sentence (it names the offending key) is translated before it is placed in ours
+  if (colorsErr) throw new Error(i18n.t('themes.import.invalidColors', { detail: translateServerError(colorsErr, i18n.t) }));
 
   // Validate patterns if present
   let patterns: CommunityThemeData['patterns'];
   if (obj.patterns && typeof obj.patterns === 'object') {
     const patternsErr = validateThemePatterns(obj.patterns as Record<string, unknown>);
-    if (patternsErr) throw new Error(i18n.t('themes.import.invalidPatterns', { detail: patternsErr }));
+    if (patternsErr) throw new Error(i18n.t('themes.import.invalidPatterns', { detail: translateServerError(patternsErr, i18n.t) }));
     patterns = obj.patterns as CommunityThemeData['patterns'];
   }
 
