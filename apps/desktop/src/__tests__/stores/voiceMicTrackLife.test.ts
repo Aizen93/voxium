@@ -25,11 +25,12 @@ vi.mock('../../services/socket', () => ({
   onSocketReconnect: vi.fn(),
 }));
 
-// The audio service, with the one rule of it this file relies on (pinned in
+// The audio service, with the rules of it this file relies on (pinned in
 // audioAnalyser.test.ts): the pipeline's stops end its gated and suppressed
-// tracks
+// tracks, and a resend of the speaking state sends "speaking" only while the
+// detector hears it
 const aa = vi.hoisted(() => {
-  const state = { gated: null as MediaStream | null, suppressed: null as MediaStream | null };
+  const state = { gated: null as MediaStream | null, suppressed: null as MediaStream | null, speaking: false };
   return {
     state,
     startSpeakingDetection: vi.fn(),
@@ -50,6 +51,9 @@ const aa = vi.hoisted(() => {
     setSpeakingDetectionPaused: vi.fn(),
     onNoiseSuppressionFailure: vi.fn(),
     getSpeakingDetectionMode: vi.fn(() => null),
+    resendSpeaking: vi.fn(() => {
+      if (state.speaking) socket.emit('voice:speaking', true);
+    }),
   };
 });
 vi.mock('../../services/audioAnalyser', () => aa);
@@ -140,6 +144,9 @@ let sendTransports: Transport[];
 /** The `enabled` of the track each produce() was handed, when it was called. */
 let enabledAtProduce: Array<boolean | undefined>;
 
+/** Runs once a produce() has made its producer, before the store goes on. */
+let afterProduce: (() => void) | null;
+
 /** What the server answers to `voice:produce`. */
 let answerProduce: () => { producerId?: string; error?: string };
 
@@ -189,8 +196,10 @@ beforeEach(() => {
   });
   aa.state.gated = null;
   aa.state.suppressed = null;
+  aa.state.speaking = false;
   sendTransports = [];
   enabledAtProduce = [];
+  afterProduce = null;
   vi.mocked(Device).mockImplementation(function realDeviceOverFakeHandler() {
     const device = new RealDevice({ handlerFactory: FakeHandler.createFactory(fakeParameters) });
     const createSendTransport = device.createSendTransport.bind(device);
@@ -199,7 +208,10 @@ beforeEach(() => {
       const produce = transport.produce.bind(transport);
       vi.spyOn(transport, 'produce').mockImplementation((produceOptions) => {
         enabledAtProduce.push(produceOptions?.track?.enabled);
-        return produce(produceOptions);
+        return produce(produceOptions).then((producer) => {
+          afterProduce?.();
+          return producer;
+        });
       });
       sendTransports.push(transport);
       return transport;
@@ -437,5 +449,208 @@ describe('a channel gone on the server (its space was deleted while in its voice
     useVoiceStore.getState().leaveChannel();
 
     expect(socket.emit).toHaveBeenCalledWith('voice:leave');
+  });
+});
+
+describe('the speaking state once the microphone producer is made', () => {
+  /** The speaking states this client sent. */
+  function speakingSent(): unknown[] {
+    return socket.emit.mock.calls.filter((call) => call[0] === 'voice:speaking').map((call) => call[1]);
+  }
+
+  /** The send transport, once connected (which resets the store's count of
+   *  restarts in a row), fails its DTLS: the SFU side is closed and joined again. */
+  function restartTransport(index: number) {
+    const { handler } = sendTransports[index] as unknown as { handler: { setConnectionState: (state: string) => void } };
+    handler.setConnectionState('connected');
+    handler.setConnectionState('failed');
+  }
+
+  it('someone talking as the producer is made: their speaking state goes out once', async () => {
+    inChannel(fakeTrack('raw'), fakeTrack('gated'));
+    aa.state.speaking = true;
+
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+
+    expect(micProducers()).toHaveLength(1);
+    expect(speakingSent()).toEqual([true]);
+  });
+
+  it('silent as the producer is made: nothing is sent', async () => {
+    inChannel(fakeTrack('raw'), fakeTrack('gated'));
+
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+
+    expect(aa.resendSpeaking).toHaveBeenCalledTimes(1);
+    expect(speakingSent()).toEqual([]);
+  });
+
+  it('self-muted: nothing is sent, whatever the detector heard', async () => {
+    const raw = fakeTrack('raw');
+    inChannel(raw, fakeTrack('gated'));
+    useVoiceStore.setState({ selfMute: true });
+    raw.enabled = false;
+    aa.state.speaking = true;
+
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+
+    expect(micProducers()).toHaveLength(1);
+    expect(aa.resendSpeaking).not.toHaveBeenCalled();
+    expect(speakingSent()).toEqual([]);
+  });
+
+  it('push-to-talk with the key up: nothing is sent; with the key held: the state goes out', async () => {
+    useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+    try {
+      const raw = fakeTrack('raw');
+      inChannel(raw, fakeTrack('gated'));
+      raw.enabled = false;
+      aa.state.speaking = true;
+
+      await useVoiceStore.getState().handleTransportCreated(transportCreated());
+      expect(aa.resendSpeaking).not.toHaveBeenCalled();
+      expect(speakingSent()).toEqual([]);
+
+      // Held at the next producer (a transport restart)
+      useVoiceStore.setState({ pttActive: true });
+      raw.enabled = true;
+      restartTransport(0);
+      await useVoiceStore.getState().handleTransportCreated(transportCreated());
+      expect(speakingSent()).toEqual([true]);
+    } finally {
+      useSettingsStore.setState({ voiceMode: 'voice_activity' });
+    }
+  });
+
+  /** The `selfMute` of the voice:join a transport restart sent. */
+  function restartJoinSelfMute(): unknown {
+    const joins = socket.emit.mock.calls.filter((call) => call[0] === 'voice:join');
+    return (joins[joins.length - 1][2] as { selfMute: boolean }).selfMute;
+  }
+
+  it('push-to-talk with the key held at a transport restart: the join states the microphone open', async () => {
+    useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+    try {
+      inChannel(fakeTrack('raw'), fakeTrack('gated'));
+      await useVoiceStore.getState().handleTransportCreated(transportCreated());
+      useVoiceStore.setState({ pttActive: true });
+      restartTransport(0);
+      expect(restartJoinSelfMute()).toBe(false);
+    } finally {
+      useSettingsStore.setState({ voiceMode: 'voice_activity' });
+    }
+  });
+
+  it('push-to-talk with the key up at a transport restart: the join states the microphone muted', async () => {
+    useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+    try {
+      inChannel(fakeTrack('raw'), fakeTrack('gated'));
+      await useVoiceStore.getState().handleTransportCreated(transportCreated());
+      restartTransport(0);
+      expect(restartJoinSelfMute()).toBe(true);
+    } finally {
+      useSettingsStore.setState({ voiceMode: 'voice_activity' });
+    }
+  });
+
+  it('push-to-talk held under the mute flag at a transport restart: the join states it muted', async () => {
+    useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+    try {
+      inChannel(fakeTrack('raw'), fakeTrack('gated'));
+      await useVoiceStore.getState().handleTransportCreated(transportCreated());
+      // The new producer starts paused under the mute flag, whatever the key does
+      useVoiceStore.setState({ pttActive: true, selfMute: true });
+      restartTransport(0);
+      expect(restartJoinSelfMute()).toBe(true);
+    } finally {
+      useSettingsStore.setState({ voiceMode: 'voice_activity' });
+    }
+  });
+
+  it('outside push-to-talk a transport restart joins with the manual mute flag', async () => {
+    inChannel(fakeTrack('raw'), fakeTrack('gated'));
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+    useVoiceStore.setState({ selfMute: true, pttActive: true });
+    restartTransport(0);
+    expect(restartJoinSelfMute()).toBe(true);
+  });
+
+  it('push-to-talk held while self-muted: nothing is sent', async () => {
+    useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+    try {
+      inChannel(fakeTrack('raw'), fakeTrack('gated'));
+      useVoiceStore.setState({ selfMute: true, pttActive: true });
+      aa.state.speaking = true;
+
+      await useVoiceStore.getState().handleTransportCreated(transportCreated());
+
+      expect(micProducers()).toHaveLength(1);
+      expect(speakingSent()).toEqual([]);
+    } finally {
+      useSettingsStore.setState({ voiceMode: 'voice_activity' });
+    }
+  });
+
+  it('a produce the server refuses (no SPEAK) sends nothing', async () => {
+    inChannel(fakeTrack('raw'), fakeTrack('gated'));
+    aa.state.speaking = true;
+    answerProduce = () => ({ error: VOICE_SPEAK_REFUSED_MESSAGE });
+
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+
+    expect(micProducers()).toHaveLength(0);
+    expect(aa.resendSpeaking).not.toHaveBeenCalled();
+    expect(speakingSent()).toEqual([]);
+  });
+
+  it('a plaintext transport restart while talking: the new producer sends the state once more', async () => {
+    inChannel(fakeTrack('raw'), fakeTrack('gated'));
+    aa.state.speaking = true;
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+    expect(speakingSent()).toEqual([true]);
+
+    // The detector runs on across the restart, still hearing speech: no change to send
+    restartTransport(0);
+    expect(socket.emit).toHaveBeenCalledWith('voice:join', 'ch-1', expect.anything());
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+
+    expect(micProducers()).toHaveLength(1);
+    expect(speakingSent()).toEqual([true, true]);
+  });
+
+  it('a producer closed before it was handed over (its transport failed) sends nothing', async () => {
+    inChannel(fakeTrack('raw'), fakeTrack('gated'));
+    aa.state.speaking = true;
+    // The send transport fails right as the producer is made: the SFU side
+    // is closed (the producer with its transport) and joined again, in the
+    // same voice session
+    afterProduce = () => restartTransport(0);
+
+    await useVoiceStore.getState().handleTransportCreated(transportCreated());
+
+    expect(socket.emit).toHaveBeenCalledWith('voice:join', 'ch-1', expect.anything());
+    expect(aa.resendSpeaking).not.toHaveBeenCalled();
+    expect(speakingSent()).toEqual([]);
+  });
+
+  it('a producer whose voice session moved on while produce() ran sends nothing', async () => {
+    inChannel(fakeTrack('raw'), fakeTrack('gated'));
+    aa.state.speaking = true;
+    let answer!: () => void;
+    socket.emit.mockImplementation((event: string, _payload: unknown, ack?: (response: unknown) => void) => {
+      if (event === 'voice:transport:connect') ack?.({});
+      else if (event === 'voice:produce') answer = () => ack?.({ producerId: 'producer-late' });
+    });
+
+    const created = useVoiceStore.getState().handleTransportCreated(transportCreated());
+    await vi.waitFor(() => expect(answer).toBeTypeOf('function'));
+    // Another session begins meanwhile (here a DM call's end moves the
+    // generation without closing this transport)
+    useVoiceStore.getState().handleDMCallEnded();
+    answer();
+    await created;
+
+    expect(aa.resendSpeaking).not.toHaveBeenCalled();
+    expect(speakingSent()).toEqual([]);
   });
 });

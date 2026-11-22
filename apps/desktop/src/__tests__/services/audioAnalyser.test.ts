@@ -26,7 +26,7 @@ const mockAnalyserNode = {
 };
 
 const mockGainNode = {
-  gain: { value: 0, cancelScheduledValues: vi.fn(), linearRampToValueAtTime: vi.fn() },
+  gain: { value: 0, cancelScheduledValues: vi.fn(), linearRampToValueAtTime: vi.fn(), setTargetAtTime: vi.fn() },
   connect: vi.fn(),
   disconnect: vi.fn(),
 };
@@ -108,7 +108,10 @@ import {
   startSpeakingDetection,
   stopSpeakingDetection,
   stopNoiseSuppression,
+  setSpeakingDetectionPaused,
+  resendSpeaking,
 } from '../../services/audioAnalyser';
+import { getSocket } from '../../services/socket';
 
 const micStream = (name = 'mic') => ({ id: name, getAudioTracks: () => [] }) as unknown as MediaStream;
 const lastNode = () => MockAudioWorkletNode.created.at(-1)!;
@@ -461,6 +464,81 @@ describe('audioAnalyser', () => {
       stopSpeakingDetection();
       expect(next.stop).toHaveBeenCalledTimes(1);
       expect(getGatedStream()).toBeNull();
+    });
+  });
+
+  // The tick sends only changes: right after a mic producer is made, the
+  // store asks for the current state once (a change sent before the session
+  // existed on the server reached nobody)
+  describe('resendSpeaking', () => {
+    /** What the detector's analyser reads at each tick. */
+    const level = (value: number) => {
+      mockAnalyserNode.getFloatTimeDomainData.mockImplementation((data: Float32Array) => { data.fill(value); });
+    };
+    const sent = () => vi.mocked(getSocket()!.emit).mock.calls;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      level(0);
+    });
+
+    afterEach(() => {
+      mockAnalyserNode.getFloatTimeDomainData.mockReset();
+    });
+
+    /** A running detector that has heard speech (and sent that change). */
+    function talking(mode: 'server' | 'dm' = 'server') {
+      startSpeakingDetection(micStream(), mode);
+      level(0.5);
+      vi.advanceTimersByTime(20);
+    }
+
+    it('while the detector hears speech: "speaking" goes out once more, through the sender the tick uses', () => {
+      talking();
+      expect(sent()).toEqual([['voice:speaking', true]]);
+
+      resendSpeaking();
+
+      expect(sent()).toEqual([['voice:speaking', true], ['voice:speaking', true]]);
+    });
+
+    it('in a DM call, on the DM event', () => {
+      talking('dm');
+      vi.mocked(getSocket()!.emit).mockClear();
+
+      resendSpeaking();
+
+      expect(sent()).toEqual([['dm:voice:speaking', true]]);
+    });
+
+    it('in a silence: nothing', () => {
+      startSpeakingDetection(micStream(), 'server');
+      vi.advanceTimersByTime(100);
+
+      resendSpeaking();
+
+      expect(sent()).toEqual([]);
+    });
+
+    it('paused (muted): nothing, the tick having sent the end of speech', () => {
+      talking();
+      setSpeakingDetectionPaused(true);
+      expect(sent().at(-1)).toEqual(['voice:speaking', false]);
+      vi.mocked(getSocket()!.emit).mockClear();
+
+      resendSpeaking();
+
+      expect(sent()).toEqual([]);
+    });
+
+    it('not running: nothing', () => {
+      talking();
+      stopSpeakingDetection();
+      vi.mocked(getSocket()!.emit).mockClear();
+
+      resendSpeaking();
+
+      expect(sent()).toEqual([]);
     });
   });
 

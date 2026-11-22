@@ -370,6 +370,19 @@ function emitSpeaking(speaking: boolean) {
 }
 
 /**
+ * Send the detector's current state once more when it is "speaking", through
+ * the sender the tick uses. The tick sends only changes, and a change it sent
+ * before the voice session existed on the server reached nobody, so someone
+ * already talking when their microphone producer is made would show no ring
+ * until their next pause. Only while the detector hears speech: a stop and a
+ * pause (the mute) end speech first, so nothing goes out then either.
+ */
+export function resendSpeaking(): void {
+  if (!isSpeaking) return;
+  emitSpeaking(true);
+}
+
+/**
  * Start speaking detection on a stream (should be the noise-suppressed stream).
  * For SFU mode: also applies a gain gate (silence when not speaking).
  * For DM mode: gain gate bypassed — only detects speaking state.

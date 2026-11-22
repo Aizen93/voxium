@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { Device } from 'mediasoup-client';
 import type { Transport, Producer, Consumer, RtpCapabilities, IceParameters, IceCandidate, DtlsParameters, RtpParameters } from 'mediasoup-client/types';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused, onNoiseSuppressionFailure, getSpeakingDetectionMode } from '../services/audioAnalyser';
+import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused, onNoiseSuppressionFailure, getSpeakingDetectionMode, resendSpeaking } from '../services/audioAnalyser';
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
 import { teardownComposite, prepareComposite, attachCompositeProducerHandles } from '../services/screenComposite';
@@ -763,6 +763,7 @@ let micRefusedOn: Transport | null = null;
 
 async function produceMicOn(sendTransport: Transport, device: Device): Promise<Producer | null> {
   const state = useVoiceStore.getState;
+  const session = voiceSessionGeneration;
   const gated = getGatedStream();
   const audioTrack = (gated || state().localStream)?.getAudioTracks()[0];
   if (!audioTrack || audioTrack.readyState !== 'live' || !device.canProduce('audio')) return null;
@@ -830,8 +831,26 @@ async function produceMicOn(sendTransport: Transport, device: Device): Promise<P
   // rebuild ended
   await adoptCurrentMicTrack(producer);
 
+  // Still this session's producer: someone already talking shows their ring
+  if (session === voiceSessionGeneration && !producer.closed) resendSpeakingForNewMicProducer();
+
   debugLog('[Voice SFU] Audio producer created:', producer.id);
   return producer;
+}
+
+/**
+ * Right after a mic producer is made: the speaking detector started before
+ * the session existed on the server, and runs on across a plaintext
+ * transport restart, and it sends only changes, so someone already talking
+ * would show no ring until their next pause. Their current state is sent
+ * once, through the detector's own sender (resendSpeaking: only while it
+ * hears speech), never while muted (as the speaking callback,
+ * followSpeakingWithMicProducer, does nothing then) nor with push-to-talk's
+ * key up (micShouldBeOpen).
+ */
+function resendSpeakingForNewMicProducer() {
+  if (useVoiceStore.getState().selfMute || !micShouldBeOpen()) return;
+  resendSpeaking();
 }
 
 /** Server voice: the mic producer follows the noise gate (paused in silence,
@@ -1800,9 +1819,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
               }
               const s = getSocket();
               if (s) {
-                const { selfMute: m, selfDeaf: d } = get();
-                const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
-                s.emit('voice:join', currentChannelId, { selfMute: isPTT ? true : m, selfDeaf: d });
+                s.emit('voice:join', currentChannelId, { selfMute: rejoinSelfMute(), selfDeaf: get().selfDeaf });
                 set({ activeChannelId: currentChannelId, activeVoiceServerId: currentServerId });
               }
             } else if (currentChannelId) {
@@ -3210,6 +3227,23 @@ function micShouldBeOpen(): boolean {
   return isPTT ? state.pttActive : !state.selfMute;
 }
 
+/** What a voice channel's re-join (a transport restart, a socket reconnect)
+ *  states about the microphone: muted under the mute flag (which wins at a
+ *  re-join, whatever the key does: the new producer starts paused under it),
+ *  with no microphone at all (as a first join states it), or with
+ *  push-to-talk's key up. A held key without the flag says the microphone is
+ *  open, so the server does not keep the new producer paused under it. */
+function rejoinSelfMute(): boolean {
+  const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
+  const state = useVoiceStore.getState();
+  return state.selfMute || !state.localStream || (isPTT && !state.pttActive);
+}
+
+/** Whether a stream's microphone is open (an audio track of it is enabled). */
+function micOpenOn(stream: MediaStream | null): boolean {
+  return !!stream?.getAudioTracks().some((track) => track.enabled);
+}
+
 /** A failed switch: tell the user, and put the picker back on the device the call uses. */
 function reportFailedSwitch() {
   toast.error(i18n.t('voice.toasts.micSwitchFailed'));
@@ -3504,6 +3538,11 @@ onSocketReconnect(async () => {
       newStream?.getTracks().forEach((t) => t.stop());
       localStream = meanwhile;
     } else {
+      // The new microphone starts as the one it replaces was left (the
+      // push-to-talk key kept that one current while this one opened), and
+      // closed where there was none; the settle below then decides
+      const leftOpen = micOpenOn(localStream);
+      newStream?.getAudioTracks().forEach((track) => { track.enabled = leftOpen; });
       localStream = newStream;
       useVoiceStore.setState({ localStream: newStream });
       liveInputDeviceId = inputDeviceOf(reopened, requestedInputDevice);
@@ -3511,14 +3550,21 @@ onSocketReconnect(async () => {
     }
   }
 
-  const { selfMute, selfDeaf } = useVoiceStore.getState();
-  const settings = useSettingsStore.getState();
-  const isPTT = settings.voiceMode === 'push_to_talk';
-
-  // Apply mute state to the (possibly new) stream
+  // Settle the microphone on the (possibly new) stream, before the waits
+  // below. Outside push-to-talk it follows the mute flag. Under push-to-talk
+  // the reconnect opens nothing itself. In a voice channel the track stays
+  // open only where it was left open for the held key (by the key handler,
+  // or by a device switch made under it) and the key is still held without
+  // the mute flag. In a direct call it is closed here whatever the key does:
+  // a direct call's re-join tells the other person nothing (they keep the
+  // last state they were shown), so a microphone kept open here could be
+  // heard while they still see it muted. A key pressed during the waits
+  // below opens it again, as it always did
   if (localStream) {
-    const shouldDisable = isPTT || selfMute;
-    localStream.getAudioTracks().forEach((track) => { track.enabled = !shouldDisable; });
+    const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
+    const keptOpen = !dmCallConversationId && micOpenOn(localStream);
+    const open = !rejoinSelfMute() && (!isPTT || keptOpen);
+    localStream.getAudioTracks().forEach((track) => { track.enabled = open; });
   }
 
   // Restart audio pipelines BEFORE emitting voice:join (the producer and the
@@ -3547,7 +3593,9 @@ onSocketReconnect(async () => {
       void useVoiceStore.getState().joinChannel(activeChannelId, serverId ?? undefined, { secure: true });
     } else {
       // Re-emit voice:join — server will send voice:transport_created to re-establish SFU
-      socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+      // Both flags are read now, after the waits above: a mute, a deafen or
+      // a key event during them is what the join states
+      socket.emit('voice:join', activeChannelId, { selfMute: rejoinSelfMute(), selfDeaf: useVoiceStore.getState().selfDeaf });
     }
   } else if (dmCallConversationId) {
     debugLog('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
@@ -3571,7 +3619,14 @@ onSocketReconnect(async () => {
       const { dmCallUsers, localUserId } = useVoiceStore.getState();
       const placeConfirmed = !!localUserId && dmCallUsers.some((u) => u.id === localUserId);
       if (placeConfirmed) dmRejoinSentUnder = session;
-      socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf, deviceId, ...(placeConfirmed && { rejoin: true }) });
+      // Push-to-talk re-joins a direct call muted whatever its key does (the
+      // reconnect closed the track when it settled it above); otherwise the
+      // mute flag. Both flags are read now, after the waits above. The
+      // server stores them for the call; a re-join tells the other person
+      // nothing, they keep the last state they were told
+      const pushToTalk = useSettingsStore.getState().voiceMode === 'push_to_talk';
+      const { selfMute: muteNow, selfDeaf: deafNow } = useVoiceStore.getState();
+      socket.emit('dm:voice:join', dmCallConversationId, { selfMute: pushToTalk || muteNow, selfDeaf: deafNow, deviceId, ...(placeConfirmed && { rejoin: true }) });
     }
   }
 

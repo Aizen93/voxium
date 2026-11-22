@@ -38,6 +38,7 @@ const aa = vi.hoisted(() => {
     setSpeakingDetectionPaused: vi.fn(),
     onNoiseSuppressionFailure: vi.fn((listener: typeof state.failureListener) => { state.failureListener = listener; }),
     getSpeakingDetectionMode: vi.fn(() => state.mode),
+    resendSpeaking: vi.fn(),
   };
 });
 vi.mock('../../services/audioAnalyser', () => aa);
@@ -797,6 +798,376 @@ describe('a join by a member who may not speak in the channel', () => {
     expect(sendTransport.produce).toHaveBeenCalledTimes(1);
     expect(toast.info).toHaveBeenCalledTimes(1);
     expect(toast.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('a socket reconnect re-joining a running call: the microphone and what the join states', () => {
+  const lastJoin = (event: 'voice:join' | 'dm:voice:join') => {
+    const joins = socket.emit.mock.calls.filter((call) => call[0] === event);
+    expect(joins.length).toBeGreaterThan(0);
+    return joins[joins.length - 1][2] as { selfMute: boolean; selfDeaf: boolean };
+  };
+  /** A stream whose track is as the key (or the mute) left it. */
+  const streamLeft = (enabled: boolean) => {
+    const s = fakeStream('raw');
+    s.track.enabled = enabled;
+    return s;
+  };
+  const inChannel = { activeChannelId: 'ch-1', activeVoiceServerId: 'srv-1' };
+  const inDirectCall = { dmCallConversationId: 'conv-1' };
+
+  describe.each([
+    { kind: 'a voice channel', call: inChannel, event: 'voice:join' as const },
+    { kind: 'a direct call', call: inDirectCall, event: 'dm:voice:join' as const },
+  ])('$kind', ({ call, event }) => {
+    const leave = () => {
+      if (event === 'voice:join') useVoiceStore.getState().leaveChannel();
+      else useVoiceStore.getState().leaveDMCall();
+    };
+
+    it('push-to-talk, the key up: the microphone is closed and the join states it muted', async () => {
+      const raw = streamLeft(true);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      useVoiceStore.setState({ ...call, localStream: raw, pttActive: false });
+      await reconnectHandler();
+      expect(raw.track.enabled).toBe(false);
+      expect(lastJoin(event).selfMute).toBe(true);
+      leave();
+    });
+
+    it('push-to-talk, the key held under the mute flag: the flag wins, the microphone is closed and the join states it muted', async () => {
+      const raw = streamLeft(true);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      useVoiceStore.setState({ ...call, localStream: raw, pttActive: true, selfMute: true });
+      await reconnectHandler();
+      expect(raw.track.enabled).toBe(false);
+      expect(lastJoin(event).selfMute).toBe(true);
+      leave();
+    });
+
+    it('push-to-talk, the key held on a microphone that was closed before the reconnect: it is not opened', async () => {
+      // A mute and an unmute during one hold leave the track closed with the key down
+      const raw = streamLeft(false);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      useVoiceStore.setState({ ...call, localStream: raw, pttActive: true, selfMute: false });
+      await reconnectHandler();
+      expect(raw.track.enabled).toBe(false);
+      leave();
+    });
+
+    it('outside push-to-talk the microphone and the join follow the mute flag, whatever the key state says', async () => {
+      const raw = streamLeft(true);
+      useSettingsStore.setState({ voiceMode: 'voice_activity' });
+      useVoiceStore.setState({ ...call, localStream: raw, pttActive: true, selfMute: true });
+      await reconnectHandler();
+      expect(raw.track.enabled).toBe(false);
+      expect(lastJoin(event).selfMute).toBe(true);
+      leave();
+    });
+
+    it('outside push-to-talk and not muted: the microphone is open and the join states it open', async () => {
+      const raw = streamLeft(false);
+      useSettingsStore.setState({ voiceMode: 'voice_activity' });
+      useVoiceStore.setState({ ...call, localStream: raw, selfMute: false });
+      await reconnectHandler();
+      expect(raw.track.enabled).toBe(true);
+      expect(lastJoin(event).selfMute).toBe(false);
+      leave();
+    });
+
+    it('a mute and a deafen pressed while the pipeline restarts are what the join states', async () => {
+      const raw = streamLeft(true);
+      const pipeline = deferred<MediaStream>();
+      aa.applyNoiseSuppression.mockImplementationOnce(() => pipeline.promise);
+      useVoiceStore.setState({ ...call, localStream: raw, selfMute: false, selfDeaf: false });
+
+      const done = reconnectHandler();
+      await flush();
+      expect(socket.emit).not.toHaveBeenCalledWith(event, expect.anything(), expect.anything());
+      useVoiceStore.setState({ selfMute: true, selfDeaf: true });
+      pipeline.resolve(fakeStream('suppressed'));
+      await done;
+
+      expect(lastJoin(event)).toMatchObject({ selfMute: true, selfDeaf: true });
+      leave();
+    });
+
+    it('an unmute pressed while the pipeline restarts is what the join states', async () => {
+      const raw = streamLeft(false);
+      const pipeline = deferred<MediaStream>();
+      aa.applyNoiseSuppression.mockImplementationOnce(() => pipeline.promise);
+      useVoiceStore.setState({ ...call, localStream: raw, selfMute: true });
+
+      const done = reconnectHandler();
+      await flush();
+      useVoiceStore.setState({ selfMute: false });
+      pipeline.resolve(fakeStream('suppressed'));
+      await done;
+
+      expect(lastJoin(event).selfMute).toBe(false);
+      leave();
+    });
+  });
+
+  describe.each([
+    { kind: 'a voice channel', call: inChannel, leave: () => useVoiceStore.getState().leaveChannel() },
+    { kind: 'a direct call', call: inDirectCall, leave: () => useVoiceStore.getState().leaveDMCall() },
+  ])('$kind: the microphone is settled before the pipeline restarts', ({ call, leave }) => {
+    it('push-to-talk with the key up: the track is closed while the pipeline is still starting', async () => {
+      const raw = streamLeft(true);
+      const pipeline = deferred<MediaStream>();
+      aa.applyNoiseSuppression.mockImplementationOnce(() => pipeline.promise);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      useVoiceStore.setState({ ...call, localStream: raw, pttActive: false });
+
+      const done = reconnectHandler();
+      await flush();
+      expect(raw.track.enabled).toBe(false);
+      pipeline.resolve(fakeStream('suppressed'));
+      await done;
+      leave();
+    });
+  });
+
+  it('a voice channel with no microphone left (its reopening failed): the join states it muted', async () => {
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn(async () => { throw new Error('denied'); }) } });
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errored = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dead = fakeStream('dead');
+    dead.track.readyState = 'ended';
+    useVoiceStore.setState({ ...inChannel, localStream: dead, selfMute: false });
+    await reconnectHandler();
+    expect(useVoiceStore.getState().localStream).toBeNull();
+    expect(lastJoin('voice:join').selfMute).toBe(true);
+    warned.mockRestore();
+    errored.mockRestore();
+    useVoiceStore.getState().leaveChannel();
+  });
+
+  describe('a voice channel under push-to-talk with the key held', () => {
+    it('the microphone the key left open stays open and the join states it open', async () => {
+      const raw = streamLeft(true);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      useVoiceStore.setState({ ...inChannel, localStream: raw, pttActive: true });
+      await reconnectHandler();
+      expect(raw.track.enabled).toBe(true);
+      expect(lastJoin('voice:join').selfMute).toBe(false);
+      useVoiceStore.getState().leaveChannel();
+    });
+
+    it('a key pressed while the pipeline restarts is what the join states', async () => {
+      const raw = streamLeft(false);
+      const pipeline = deferred<MediaStream>();
+      aa.applyNoiseSuppression.mockImplementationOnce(() => pipeline.promise);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      useVoiceStore.setState({ ...inChannel, localStream: raw, pttActive: false });
+
+      const done = reconnectHandler();
+      await flush();
+      // What the key handler does on a press
+      useVoiceStore.setState({ pttActive: true });
+      raw.track.enabled = true;
+      pipeline.resolve(fakeStream('suppressed'));
+      await done;
+
+      expect(lastJoin('voice:join').selfMute).toBe(false);
+      expect(raw.track.enabled).toBe(true);
+      useVoiceStore.getState().leaveChannel();
+    });
+
+    it('push-to-talk chosen while the pipeline restarts: the join states the key up', async () => {
+      const raw = streamLeft(true);
+      const pipeline = deferred<MediaStream>();
+      aa.applyNoiseSuppression.mockImplementationOnce(() => pipeline.promise);
+      useVoiceStore.setState({ ...inChannel, localStream: raw, selfMute: false, pttActive: false });
+
+      const done = reconnectHandler();
+      await flush();
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      pipeline.resolve(fakeStream('suppressed'));
+      await done;
+
+      expect(lastJoin('voice:join').selfMute).toBe(true);
+      useVoiceStore.getState().leaveChannel();
+    });
+  });
+
+  describe('a direct call under push-to-talk', () => {
+    it('the key held: the microphone is closed and the join states it muted (the other person is told nothing at a re-join)', async () => {
+      const raw = streamLeft(true);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      useVoiceStore.setState({ ...inDirectCall, localStream: raw, pttActive: true });
+      await reconnectHandler();
+      expect(raw.track.enabled).toBe(false);
+      expect(lastJoin('dm:voice:join').selfMute).toBe(true);
+      useVoiceStore.getState().leaveDMCall();
+    });
+
+    it('push-to-talk chosen while the pipeline restarts: the join states it muted', async () => {
+      const raw = streamLeft(true);
+      const pipeline = deferred<MediaStream>();
+      aa.applyNoiseSuppression.mockImplementationOnce(() => pipeline.promise);
+      useVoiceStore.setState({ ...inDirectCall, localStream: raw, selfMute: false });
+
+      const done = reconnectHandler();
+      await flush();
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      pipeline.resolve(fakeStream('suppressed'));
+      await done;
+
+      expect(lastJoin('dm:voice:join').selfMute).toBe(true);
+      useVoiceStore.getState().leaveDMCall();
+    });
+  });
+
+  describe('the microphone reopened by the reconnect (its tracks had ended)', () => {
+    const ended = (enabled: boolean) => {
+      const s = fakeStream('dead');
+      s.track.readyState = 'ended';
+      s.track.enabled = enabled;
+      return s;
+    };
+    const reopenWith = (stream: FakeStream) => {
+      const mic = deferred<MediaStream>();
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn(() => mic.promise) } });
+      return { open: () => mic.resolve(stream as unknown as MediaStream) };
+    };
+    /** The reconnect up to its microphone request, in a voice channel holding `stream`. */
+    const reconnectFrom = async (stream: FakeStream | null, state: object) => {
+      useVoiceStore.setState({ ...inChannel, localStream: stream as unknown as MediaStream | null, ...state });
+      const done = reconnectHandler();
+      await flush();
+      return done;
+    };
+
+    it('push-to-talk, the key held: the new microphone is open, as the one it replaces was left', async () => {
+      const opened = fakeStream('reopened');
+      const mic = reopenWith(opened);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      const done = reconnectFrom(ended(true), { pttActive: true });
+      await flush();
+      mic.open();
+      await done;
+      expect(useVoiceStore.getState().localStream).toBe(opened);
+      expect(opened.track.enabled).toBe(true);
+      useVoiceStore.getState().leaveChannel();
+    });
+
+    it('push-to-talk, the key up: the new microphone is closed', async () => {
+      const opened = fakeStream('reopened');
+      const mic = reopenWith(opened);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      const done = reconnectFrom(ended(false), { pttActive: false });
+      await flush();
+      mic.open();
+      await done;
+      expect(opened.track.enabled).toBe(false);
+      useVoiceStore.getState().leaveChannel();
+    });
+
+    it('push-to-talk, the key held on a microphone that was closed: the new one is closed too', async () => {
+      const opened = fakeStream('reopened');
+      const mic = reopenWith(opened);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      const done = reconnectFrom(ended(false), { pttActive: true });
+      await flush();
+      mic.open();
+      await done;
+      expect(opened.track.enabled).toBe(false);
+      useVoiceStore.getState().leaveChannel();
+    });
+
+    it('push-to-talk, the key released while the microphone reopens: the new one is closed', async () => {
+      const [dead, opened] = [ended(true), fakeStream('reopened')];
+      const mic = reopenWith(opened);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      const done = reconnectFrom(dead, { pttActive: true });
+      await flush();
+      // What the key handler does on a release
+      useVoiceStore.setState({ pttActive: false });
+      dead.track.enabled = false;
+      mic.open();
+      await done;
+      expect(opened.track.enabled).toBe(false);
+      expect(lastJoin('voice:join').selfMute).toBe(true);
+      useVoiceStore.getState().leaveChannel();
+    });
+
+    it('push-to-talk, the key pressed while the microphone reopens: the new one is open, as the key handler left the old', async () => {
+      const [dead, opened] = [ended(false), fakeStream('reopened')];
+      const mic = reopenWith(opened);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      const done = reconnectFrom(dead, { pttActive: false });
+      await flush();
+      // What the key handler does on a press: the store still holds the old stream
+      useVoiceStore.setState({ pttActive: true });
+      dead.track.enabled = true;
+      mic.open();
+      await done;
+      expect(opened.track.enabled).toBe(true);
+      expect(lastJoin('voice:join').selfMute).toBe(false);
+      useVoiceStore.getState().leaveChannel();
+    });
+
+    it('push-to-talk with no microphone before the reconnect: the one it opens starts closed, whatever the key state says', async () => {
+      const opened = fakeStream('reopened');
+      const mic = reopenWith(opened);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      const done = reconnectFrom(null, { pttActive: true });
+      await flush();
+      mic.open();
+      await done;
+      expect(useVoiceStore.getState().localStream).toBe(opened);
+      expect(opened.track.enabled).toBe(false);
+      useVoiceStore.getState().leaveChannel();
+    });
+
+    it('a direct call under push-to-talk, the key held: the new microphone is closed', async () => {
+      const opened = fakeStream('reopened');
+      const mic = reopenWith(opened);
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      useVoiceStore.setState({ ...inDirectCall, localStream: ended(true) as unknown as MediaStream, pttActive: true });
+      const done = reconnectHandler();
+      await flush();
+      mic.open();
+      await done;
+      expect(useVoiceStore.getState().localStream).toBe(opened);
+      expect(opened.track.enabled).toBe(false);
+      useVoiceStore.getState().leaveDMCall();
+    });
+
+    it('outside push-to-talk with no microphone before the reconnect: the one it opens follows the mute flag', async () => {
+      const opened = fakeStream('reopened');
+      const mic = reopenWith(opened);
+      const done = reconnectFrom(null, { selfMute: false });
+      await flush();
+      mic.open();
+      await done;
+      expect(opened.track.enabled).toBe(true);
+      useVoiceStore.getState().leaveChannel();
+    });
+
+    it('push-to-talk, a device switch installs a stream while the microphone reopens: that stream is settled by its own state, not the old one', async () => {
+      const [dead, reopened, switched] = [ended(false), fakeStream('reopened'), fakeStream('switched')];
+      const answers = [deferred<MediaStream>(), deferred<MediaStream>()];
+      let call = 0;
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn(() => answers[call++].promise) } });
+      useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+      const done = reconnectFrom(dead, { pttActive: true });
+      await flush();
+      useSettingsStore.getState().setAudioInputDeviceId('mic-b');
+      answers[1].resolve(switched as unknown as MediaStream);
+      await flush();
+      expect(useVoiceStore.getState().localStream).toBe(switched);
+      // The switch opened it for the held key
+      expect(switched.track.enabled).toBe(true);
+      answers[0].resolve(reopened as unknown as MediaStream);
+      await done;
+
+      expect(useVoiceStore.getState().localStream).toBe(switched);
+      expect(switched.track.enabled).toBe(true);
+      useVoiceStore.getState().leaveChannel();
+    });
   });
 });
 

@@ -24,6 +24,7 @@ vi.mock('../../services/audioAnalyser', () => ({
   setSpeakingDetectionPaused: vi.fn(),
   onNoiseSuppressionFailure: vi.fn(),
   getSpeakingDetectionMode: vi.fn().mockReturnValue(null),
+  resendSpeaking: vi.fn(),
 }));
 
 vi.mock('../../services/sdpUtils', () => ({
@@ -186,6 +187,7 @@ vi.mock('../../stores/settingsStore', async () => {
 });
 
 import { useVoiceStore, isMicProducer, registerShareMaskHooks } from '../../stores/voiceStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { getSocket, onSocketReconnect } from '../../services/socket';
 import type { VoiceUser } from '@voxium/shared';
 
@@ -1593,6 +1595,37 @@ describe('voiceStore — socket reconnect clears stale voice occupancy', () => {
       }
     });
 
+    it('a mute, a deafen and push-to-talk chosen while the device id resolves are what the re-join states', async () => {
+      dmEnv.conversations = [{ id: 'conv-1', participant: { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null } }];
+      const joinState = () => {
+        const joins = socket.emit.mock.calls.filter((c) => c[0] === 'dm:voice:join');
+        expect(joins).toHaveLength(1);
+        return joins[0][2] as { selfMute: boolean; selfDeaf: boolean };
+      };
+      const held = async (change: () => void) => {
+        socket.emit.mockClear();
+        useVoiceStore.setState({ dmCallConversationId: 'conv-1', selfMute: false, selfDeaf: false });
+        e2eEnv.ready = false;
+        const done = reconnectHandler();
+        await flushAsync();
+        change();
+        e2eEnv.ready = true;
+        for (const cb of e2eEnv.subscribers.splice(0)) cb({ ready: true, error: null });
+        await done;
+        return joinState();
+      };
+      try {
+        expect(await held(() => useVoiceStore.setState({ selfMute: true, selfDeaf: true }))).toMatchObject({ selfMute: true, selfDeaf: true });
+        expect(await held(() => {})).toMatchObject({ selfMute: false, selfDeaf: false });
+        expect(await held(() => useSettingsStore.setState({ voiceMode: 'push_to_talk' }))).toMatchObject({ selfMute: true });
+      } finally {
+        e2eEnv.ready = true;
+        useSettingsStore.setState({ voiceMode: 'voice_activity' });
+        useVoiceStore.getState().leaveDMCall();
+        useVoiceStore.setState({ selfMute: false, selfDeaf: false });
+      }
+    });
+
     it('another call begins while the device id resolves: the old one is not re-joined', async () => {
       dmEnv.conversations = [
         { id: 'conv-1', participant: { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null } },
@@ -1749,7 +1782,8 @@ describe('voiceStore — socket reconnect clears stale voice occupancy', () => {
 
     await done;
 
-    expect(socketEmit).toHaveBeenCalledWith('voice:join', 'ch-reconnect', expect.objectContaining({ selfMute: false, selfDeaf: false }));
+    // No microphone is held in this test, so the re-join states it muted
+    expect(socketEmit).toHaveBeenCalledWith('voice:join', 'ch-reconnect', expect.objectContaining({ selfMute: true, selfDeaf: false }));
     expect(useVoiceStore.getState().activeChannelId).toBe('ch-reconnect');
   });
 
