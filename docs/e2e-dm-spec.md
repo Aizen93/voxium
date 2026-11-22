@@ -1220,6 +1220,13 @@ A new outbound session is created when: none exists, either participant's
 **device set** changed, `GROUP_SESSION_MAX_MESSAGES` (100) is reached, or the
 session is older than `GROUP_SESSION_MAX_AGE_MS` (7 days).
 
+Ages are read on the device's clock. A cached device list, a session, or the
+last attempt behind a share retry, dated after the clock's time now counts as
+expired, never as fresh until the clock catches up: the rotation decision's
+two device-list reads are never answered from the cache, whatever the clock
+reads, and such a session rotates at the next send as one past its age does
+(its undelivered shares: below). What a smaller step back leaves is in §12.6.
+
 Rotation keys off the device **set fingerprint**, not the server-supplied
 `listVersion` — a server that injects a device while replaying the old version
 must still force a re-key. The rotation decision always fetches device lists
@@ -1235,6 +1242,15 @@ first known index from our own (encrypted) inbound copy via
 messages it missed. Because it travels as an **ExportedSessionKey**, the share
 payload carries `keyType: 'exported'` and the importer uses
 `fromExportedSessionKey`.
+
+A session rotated by age or message count first retries its undelivered
+shares once, past the backoff (the 10 rounds still count): the rotation keeps
+only the new session's undelivered shares, and with the device sets unchanged
+every target of that retry is a device the fresh lists still name. A rotation
+caused by a changed device set (in a secure channel also a changed member set,
+§19.4) retries nothing, so the rotation hands the old key to no device or
+member that left; the old session's undelivered shares are dropped with it,
+and so are the ones the last retry could not deliver.
 
 **Both** device lists are fetched fresh when deciding to rotate. A stale peer
 list keeps feeding session keys to a revoked device; a stale *own* list
@@ -1326,6 +1342,16 @@ read.
 - Ratchet-position bindings (§9.1) are per device and per session: a new
   device or wiped vault binds history as it is served, and an edit rolled
   back to a version sent under an EARLIER session is not detected.
+- Ages are read on the device's clock (§12.4), so a clock set back by LESS
+  than an entry's age leaves that age at zero or more, and every window
+  measured from it runs longer by the size of the step: an unforced
+  device-list read (safety numbers, device warnings) reuses a cached list
+  longer, and the share-retry backoff and the wait before a message of an
+  unknown session claims the inbox again both last longer; a session can
+  outlive `GROUP_SESSION_MAX_AGE_MS` by as much, still rotated at
+  `GROUP_SESSION_MAX_MESSAGES`. No key-distribution decision reads the cache:
+  the DM rotation decision forces both reads (§12.4), and a secure channel's
+  lists are fetched at every send (§19.3).
 - ~~Cross-signing~~ — shipped, see §14: one safety number per account, and
   device trust is now a signature check rather than a user judgement call.
 
