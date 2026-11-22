@@ -70,11 +70,60 @@ describe('ChatArea channel effect', () => {
     expect(H.clearMessages).toHaveBeenCalledTimes(1);
   });
 
-  it('a re-render on the same channel neither clears nor fetches again', async () => {
+  it('the effect running again for the open channel neither clears nor fetches', async () => {
+    await render();
+    // new identities for the store's actions: the effect's dependencies
+    // change, so it runs again with the same channel
+    H.clearMessages = vi.fn();
+    H.fetchMessages = vi.fn();
+    await render();
+    expect(H.clearMessages).not.toHaveBeenCalled();
+    expect(H.fetchMessages).not.toHaveBeenCalled();
+  });
+
+  it('a channel opened again after no channel was open is loaded again', async () => {
+    await render();
+    H.server = { ...H.server, activeChannelId: null };
     await render();
     H.clearMessages.mockClear();
     H.fetchMessages.mockClear();
+    H.server = { ...H.server, activeChannelId: 'a' };
     await render();
+    expect(H.clearMessages).toHaveBeenCalledTimes(1);
+    expect(H.fetchMessages).toHaveBeenCalledTimes(1);
+    expect(H.fetchMessages).toHaveBeenCalledWith('a');
+  });
+
+  it('a reconnect loads the open channel once per connection', async () => {
+    await render();
+    const onConnect = H.socket!.on.mock.calls.find((c) => c[0] === 'connect')?.[1] as (() => void) | undefined;
+    expect(onConnect).toBeTypeOf('function');
+    H.clearMessages.mockClear();
+    H.fetchMessages.mockClear();
+    H.socket!.emit.mockClear();
+
+    // a new connection of the same socket object
+    H.socket!.id = 's2';
+    act(() => onConnect!());
+    expect(H.socket!.emit).toHaveBeenCalledWith('channel:join', 'a');
+    expect(H.clearMessages).toHaveBeenCalledTimes(1);
+    expect(H.fetchMessages).toHaveBeenCalledTimes(1);
+    expect(H.fetchMessages).toHaveBeenCalledWith('a');
+
+    // the same connection reported a second time
+    act(() => onConnect!());
+    expect(H.fetchMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it('a reconnect while no channel is open loads nothing', async () => {
+    await render();
+    const onConnect = H.socket!.on.mock.calls.find((c) => c[0] === 'connect')?.[1] as (() => void) | undefined;
+    H.server = { ...H.server, activeChannelId: null };
+    await render();
+    H.clearMessages.mockClear();
+    H.fetchMessages.mockClear();
+    H.socket!.id = 's2';
+    act(() => onConnect!());
     expect(H.clearMessages).not.toHaveBeenCalled();
     expect(H.fetchMessages).not.toHaveBeenCalled();
   });
