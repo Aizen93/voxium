@@ -747,14 +747,30 @@ let micRefusedOn: Transport | null = null;
 
 async function produceMicOn(sendTransport: Transport, device: Device): Promise<Producer | null> {
   const state = useVoiceStore.getState;
-  const audioTrack = (getGatedStream() || state().localStream)?.getAudioTracks()[0];
+  const gated = getGatedStream();
+  const audioTrack = (gated || state().localStream)?.getAudioTracks()[0];
   if (!audioTrack || audioTrack.readyState !== 'live' || !device.canProduce('audio')) return null;
+  // The gated track outlives the producers made from it (a transport restart
+  // makes a new one from the same pipeline). Only a producer's pause disables
+  // it, and a producer starts paused on a disabled track: handed over enabled,
+  // as a new one is, this producer's pause state is its own. The raw track is
+  // never touched here: its `enabled` is the mute and push-to-talk.
+  if (gated) audioTrack.enabled = true;
   const maxBitrate = VOICE_QUALITY_BITRATE[useSettingsStore.getState().voiceQuality];
   const secureSession = activeSecureVoiceSession(state().activeChannelId);
   let attachError: unknown = null;
   let attachInvoked = false;
   const producer = await sendTransport.produce({
     track: audioTrack,
+    // The pipeline owns the track's life, not the producer. Unless told not
+    // to, mediasoup stops the track of a produce that fails or is refused, of
+    // a producer or transport that closes, and either track of a replace,
+    // while the pipeline still uses it (the listen-only state after a
+    // refusal, a transport restart, the next rebuild). The pipeline stops its
+    // tracks where it ends: stopSpeakingDetection, stopNoiseSuppression and
+    // the localStream's own stops. The pause defaults stay (the noise gate,
+    // mute and push-to-talk pause by disabling the track).
+    stopTracks: false,
     codecOptions: {
       opusStereo: false,
       opusDtx: true,

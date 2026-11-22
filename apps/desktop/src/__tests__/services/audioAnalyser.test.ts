@@ -60,7 +60,9 @@ class MockAudioContext {
   createGain = vi.fn().mockReturnValue(mockGainNode);
   createMediaStreamSource = vi.fn().mockReturnValue(mockSourceNode);
   createMediaStreamDestination = vi.fn(() => {
-    const destination = { stream: { getAudioTracks: () => [{ kind: 'audio', enabled: true }] } as unknown as MediaStream, connect: vi.fn(), disconnect: vi.fn() };
+    const track = { kind: 'audio', enabled: true, readyState: 'live', stop: vi.fn(() => { track.readyState = 'ended'; }) };
+    const stream = { getAudioTracks: () => [track], getTracks: () => [track] } as unknown as MediaStream;
+    const destination = { stream, connect: vi.fn(), disconnect: vi.fn() };
     this.destinations.push(destination);
     return destination;
   });
@@ -440,11 +442,45 @@ describe('audioAnalyser', () => {
       expect(warn.mock.calls.filter(([m]) => String(m).includes('Failed to resume'))).toEqual([]);
       warn.mockRestore();
     });
+
+    // The mic producer made from the gated track leaves it alone (stopTracks:
+    // false): the pipeline is the one place that ends it
+    it('the gated track lives as long as its pipeline and is stopped where the pipeline ends', () => {
+      const mic = micStream();
+      startSpeakingDetection(mic, 'server');
+      const gated = getGatedStream()!.getAudioTracks()[0];
+      expect(gated.readyState).toBe('live');
+
+      // A rebuild ends this pipeline and starts another: the old track only
+      startSpeakingDetection(mic, 'server');
+      expect(gated.stop).toHaveBeenCalledTimes(1);
+      const next = getGatedStream()!.getAudioTracks()[0];
+      expect(next).not.toBe(gated);
+      expect(next.readyState).toBe('live');
+
+      stopSpeakingDetection();
+      expect(next.stop).toHaveBeenCalledTimes(1);
+      expect(getGatedStream()).toBeNull();
+    });
   });
 
   describe('stopNoiseSuppression', () => {
     it('should handle being called when no pipeline is active', () => {
       expect(() => stopNoiseSuppression()).not.toThrow();
+    });
+
+    it('stops the suppressed track where its pipeline ends (a DM peer or a producer sending it leaves it alone)', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+      setNoiseSuppression(true);
+      addModule.mockResolvedValue(undefined);
+      const pending = applyNoiseSuppression(micStream());
+      await vi.advanceTimersByTimeAsync(100);
+      const suppressed = (await pending).getAudioTracks()[0];
+      expect(suppressed.readyState).toBe('live');
+
+      stopNoiseSuppression();
+      expect(suppressed.stop).toHaveBeenCalledTimes(1);
+      expect(getSuppressedStream()).toBeNull();
     });
 
     it('should handle double-stop gracefully', () => {

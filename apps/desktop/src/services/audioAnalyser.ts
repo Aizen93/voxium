@@ -34,6 +34,16 @@ export function setNoiseSuppression(enabled: boolean) {
 }
 
 /**
+ * Stop the tracks of a pipeline's output, where that pipeline ends. Whatever
+ * sends them (a mic producer, a DM peer's sender) does not stop them: the
+ * pipeline owns their life. A destination's track holds no device, so this
+ * frees the track only; the microphone is released by the raw stream's stop.
+ */
+function stopDestinationTracks(destination: MediaStreamAudioDestinationNode | null) {
+  destination?.stream.getTracks().forEach((track) => track.stop());
+}
+
+/**
  * Noise suppression could not run: the worklet's module did not load
  * (`load-error`) or its processor threw (`processor-error`), at `start` (the
  * caller already got the raw stream back) or while `running` (the outgoing
@@ -264,6 +274,9 @@ export function stopNoiseSuppression() {
     }
     nsWorklet = null;
   }
+  // The suppressed track ends with its pipeline: whatever sent it (a DM peer,
+  // a mic producer made without a gated stream) leaves it alone
+  stopDestinationTracks(nsDestination);
   nsDestination = null;
   if (nsContext) {
     nsContext.close().catch((err) => {
@@ -472,6 +485,10 @@ export function stopSpeakingDetection() {
 
   sdAnalyser = null;
   sdGainNode = null;
+  // The gated track ends with its pipeline: the mic producer made from it
+  // leaves it alone (stopTracks: false), so a transport restart can make the
+  // next producer from the same pipeline
+  stopDestinationTracks(sdDestination);
   sdDestination = null;
   currentLevel = 0;
   silenceStart = 0;
