@@ -43,7 +43,7 @@ import { decryptChannelMessagesForDisplay } from '../../services/e2e/channelCryp
 import { E2EServiceDisposedError, type E2ESessionsAvailable } from '../../services/e2e/e2eService';
 import { registerE2ESessionUser } from '../../services/e2e/session';
 import { raiseClearedFloor, resetClearedFloors } from '../../services/e2e/clearedFloors';
-import { useChatStore } from '../../stores/chatStore';
+import { useChatStore, channelView, conversationView } from '../../stores/chatStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
 
@@ -112,14 +112,19 @@ function arrive(scope: string, sessionIds: string[]): void {
 }
 
 const rowById = (id: string) => useChatStore.getState().messages.find((m) => m.id === id);
+// the chat store's view of it too, as the view's fetch records it
 const viewDM = (conversationId: string) => {
   useServerStore.setState({ activeServerId: null, activeChannelId: null });
   useDMStore.setState({ activeConversationId: conversationId });
+  useChatStore.setState({ viewScope: conversationView(conversationId) });
 };
 const viewChannel = (channelId: string) => {
   useDMStore.setState({ activeConversationId: null });
   useServerStore.setState({ activeServerId: 's1', activeChannelId: channelId });
+  useChatStore.setState({ viewScope: channelView(channelId) });
 };
+/** What a socket handler of conversation c1 hands the store. */
+const C1 = conversationView('c1');
 /** A deferred decrypt answer, for holding a pass at its first await. */
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -166,7 +171,7 @@ describe('a row that could not be decrypted is tried again when its key arrives'
     useChatStore.setState({ messages: await decryptMessagesForDisplay([dmRow('m1', SID_A), dmRow('m2', SID_B)]) });
     expect(rowById('m1')?.content).toBe(DECRYPT_FAILED_CONTENT);
     const reactions: ReactionGroup[] = [{ emoji: '👍', count: 1, userIds: ['peer'] }];
-    useChatStore.getState().updateMessageReactions('m1', reactions);
+    useChatStore.getState().updateMessageReactions('m1', reactions, C1);
     const closed = rowById('m2');
     expect(decryptMessage).toHaveBeenCalledTimes(2);
 
@@ -237,7 +242,7 @@ describe('a row that could not be decrypted is tried again when its key arrives'
 
     // another session of the conversation does not try it again
     arrive('c1', [SID_B]);
-    useChatStore.getState().addMessage(unrelated());
+    useChatStore.getState().addMessage(unrelated(), C1);
     await redecryptPassesSettled();
     expect(decryptMessage).toHaveBeenCalledTimes(2);
     expect(rowById('m1')).toBe(closed);
@@ -263,10 +268,11 @@ describe('a row that could not be decrypted is tried again when its key arrives'
   it('leaves alone a scope that is not on screen, and holds nothing of it', async () => {
     useChatStore.setState({ messages: await decryptMessagesForDisplay([dmRow('m1', SID_A)]) });
     // a row of another conversation, gated (the socket path), that this view
-    // holds as well: chatStore is shared, and only the scope on screen counts
+    // holds as well (no writer of the store puts one there: its fields name
+    // c2): only the scope on screen counts
     const other = await decryptMessageForDisplay(dmRow('x1', SID_C, { conversationId: 'c2' }));
     expect(other?.content).toBe(DECRYPT_FAILED_CONTENT);
-    useChatStore.getState().addMessage(other!);
+    useChatStore.setState((state) => ({ messages: [...state.messages, other!] }));
     expect(decryptMessage).toHaveBeenCalledTimes(2);
 
     arrive('c2', [SID_C]);
@@ -399,6 +405,51 @@ describe('a row that could not be decrypted is tried again when its key arrives'
     expect(rowById('m1')?.content).toBe(DECRYPT_FAILED_CONTENT);
   });
 
+  it('writes into no view but the one of the scope the row was noted for, whatever the screen shows', async () => {
+    const page = await decryptMessagesForDisplay([dmRow('m1', SID_A)]);
+    useChatStore.setState({ messages: page });
+    const held = deferred<{ text: string; failed?: boolean }>();
+    decryptMessage.mockImplementationOnce(() => held.promise);
+
+    arrive('c1', [SID_A]);
+    await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(2));
+    // the screen still on c1, the store now the view of a channel holding a
+    // refused row of the same id and version
+    const channelsRow = { ...page[0], channelId: 'chX', conversationId: null };
+    useChatStore.setState({ viewScope: channelView('chX'), messages: [channelsRow] });
+    held.resolve({ text: buildE2EPlaintext('text of m1') });
+    await redecryptPassesSettled();
+
+    expect(useChatStore.getState().messages).toEqual([channelsRow]);
+    expect(rowById('m1')).toBe(channelsRow);
+  });
+
+  it('a quote of the opened row is filled in no view but the one of its scope', async () => {
+    sessionsHere.add(SID_B);
+    useChatStore.setState({
+      messages: await decryptMessagesForDisplay([
+        dmRow('m1', SID_A),
+        dmRow('m2', SID_B, { replyTo: { id: 'm1', author: peer, encrypted: true, content: '' } } as Partial<Message>),
+      ]),
+    });
+    const lookup = deferred<string | null>();
+    let lookedUp = false;
+    getCachedPlaintext.mockImplementationOnce(() => {
+      lookedUp = true;
+      return lookup.promise;
+    });
+    arrive('c1', [SID_A]);
+    await vi.waitFor(() => expect(lookedUp).toBe(true));
+    // the store records another view while the lookup runs (a channel whose
+    // id is the conversation's: another scope), over the same row objects
+    useChatStore.setState({ viewScope: channelView('c1') });
+    lookup.resolve(buildE2EPlaintext('text of m1'));
+    await redecryptPassesSettled();
+
+    expect(rowById('m1')?.content).toBe('text of m1');
+    expect(rowById('m2')?.replyTo?.content).toBe('');
+  });
+
   it('an edit or a delete that lands during the pass stands', async () => {
     useChatStore.setState({ messages: await decryptMessagesForDisplay([dmRow('m1', SID_A), dmRow('m2', SID_A)]) });
     const first = deferred<{ text: string; failed?: boolean }>();
@@ -408,7 +459,7 @@ describe('a row that could not be decrypted is tried again when its key arrives'
     await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(3));
     // m1 is edited (its new version decrypted by the socket path) and m2 deleted meanwhile
     const edited = { ...dmRow('m1', SID_A, { editedAt: '2026-11-01T11:00:00.000Z' }), content: 'the edited text' };
-    useChatStore.getState().updateMessage(edited);
+    useChatStore.getState().updateMessage(edited, C1);
     useChatStore.getState().deleteMessage('m2');
     first.resolve({ text: buildE2EPlaintext('the original text') });
     await redecryptPassesSettled();
@@ -434,7 +485,7 @@ describe('a row that could not be decrypted is tried again when its key arrives'
     expect(rowById('m1')).toMatchObject({ content: 'text of m1', editedAt: null });
 
     // the edit reaches the view: it is tried, and opens
-    useChatStore.getState().updateMessage(editShown!);
+    useChatStore.getState().updateMessage(editShown!, C1);
     await redecryptPassesSettled();
     expect(rowById('m1')).toMatchObject({ content: 'text of m1', editedAt });
   });
@@ -473,7 +524,7 @@ describe('what is held follows the view', () => {
     const again = await decryptMessageForDisplay(dmRow('m1', SID_A));
     expect(again?.content).toBe('text of m1');
     // the store keeps the row it has (the id is there already)
-    useChatStore.getState().addMessage(again!);
+    useChatStore.getState().addMessage(again!, C1);
     expect(rowById('m1')?.content).toBe(DECRYPT_FAILED_CONTENT);
 
     await redecryptPassesSettled();
@@ -527,7 +578,7 @@ describe('what is held follows the view', () => {
     const editedAt = '2026-11-01T11:00:00.000Z';
     const v2 = await decryptMessageForDisplay(dmRow('m1', SID_B, { editedAt }));
     expect(v2?.content).toBe(DECRYPT_FAILED_CONTENT);
-    useChatStore.getState().updateMessage(v2!);
+    useChatStore.getState().updateMessage(v2!, C1);
     // the try of v1 then fails
     retryOfV1.resolve({ text: '', failed: true });
     await redecryptPassesSettled();
@@ -543,7 +594,7 @@ describe('what is held follows the view', () => {
     useChatStore.getState().deleteMessage('m1');
     arrive('c1', [SID_A]);
     expect(hasDueRows('c1')).toBe(false);
-    useChatStore.getState().addMessage(unrelated());
+    useChatStore.getState().addMessage(unrelated(), C1);
     await redecryptPassesSettled();
     expect(decryptMessage).toHaveBeenCalledTimes(2);
   });
@@ -598,7 +649,7 @@ describe('a try of a held row', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const changeTheView = async (times: number) => {
       for (let i = 0; i < times; i++) {
-        useChatStore.getState().addMessage(unrelated());
+        useChatStore.getState().addMessage(unrelated(), C1);
         await redecryptPassesSettled();
       }
     };
@@ -690,7 +741,7 @@ describe('once a row opens', () => {
     });
     // the server sends m2 again, its quote now called unencrypted: the gate locks it
     const again = await decryptMessageForDisplay(dmRow('m2', SID_B, { replyTo: quote(false) } as Partial<Message>));
-    useChatStore.getState().updateMessage(again!);
+    useChatStore.getState().updateMessage(again!, C1);
     expect(rowById('m2')?.replyTo).toMatchObject({ content: '', encrypted: true });
 
     arrive('c1', [SID_A]);
@@ -718,7 +769,7 @@ describe('once a row opens', () => {
     arrive('c1', [SID_A]);
     await vi.waitFor(() => expect(lookedUp).toBe(true));
     const again = await decryptMessageForDisplay(dmRow('m2', SID_B, { replyTo: quote(false) } as Partial<Message>));
-    useChatStore.getState().updateMessage(again!);
+    useChatStore.getState().updateMessage(again!, C1);
     lookup.resolve(buildE2EPlaintext('text of m1'));
     await redecryptPassesSettled();
 

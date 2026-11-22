@@ -80,7 +80,7 @@ vi.mock('../../stores/settingsStore', async () => {
 
 import { resetAccountStores } from '../../stores/resetStores';
 import { useServerStore } from '../../stores/serverStore';
-import { useChatStore } from '../../stores/chatStore';
+import { useChatStore, channelView } from '../../stores/chatStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { useSupportStore } from '../../stores/supportStore';
@@ -289,6 +289,38 @@ describe('resetAccountStores (HIGH-14b)', () => {
     noteUndecrypted(row('m-3'), 'conv-1', mark);
     syncWithView('conv-1', [shown('m-3')]);
     expect(hasDueRows('conv-1')).toBe(false);
+  });
+
+  it('drops what the chat view remembered outside the store', () => {
+    const row = (id: string) =>
+      ({ id, content: id, channelId: 'ch-1', author: { id: 'u-prev' }, createdAt: '2026-11-20T10:00:00.000Z', editedAt: null }) as unknown as Message;
+    const ch = channelView('ch-1');
+    useChatStore.setState({ viewScope: ch });
+    useChatStore.getState().updateMessage({ ...row('m-edited'), content: 'edited', editedAt: '2026-11-20T10:05:00.000Z' }, ch);
+
+    resetAccountStores();
+
+    // the view is of nothing: whatever a handler of the leaving account writes lands nowhere
+    expect(useChatStore.getState().viewScope).toBeNull();
+    expect(useChatStore.getState().addMessage(row('m-late'), ch)).toBe(false);
+    // the next account opens the same channel: its view starts with nothing remembered
+    useChatStore.setState({ viewScope: ch });
+    expect(useChatStore.getState().addMessage(row('m-edited'), ch)).toBe(true);
+    expect(useChatStore.getState().messages.find((m) => m.id === 'm-edited')?.content).toBe('m-edited');
+  });
+
+  it('a chat page in flight at logout lands for nobody, the next account opening the same channel included', async () => {
+    let resolve!: (v: unknown) => void;
+    (api.get as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    const pending = useChatStore.getState().fetchMessages('ch-1');
+
+    resetAccountStores();
+    useChatStore.setState({ viewScope: channelView('ch-1') });
+    resolve({ data: { data: [{ id: 'm-prev', content: 'the leaving account\'s', channelId: 'ch-1', createdAt: '2026-11-20T10:00:00.000Z' }], hasMore: false } });
+    await pending;
+
+    expect(useChatStore.getState().messages).toEqual([]);
+    expect(useChatStore.getState().isLoading).toBe(false);
   });
 
   it('drops the floors of the histories the leaving account cleared, which live outside the stores too', async () => {

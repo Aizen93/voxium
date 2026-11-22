@@ -42,7 +42,7 @@ vi.mock('../../services/e2e/channelCrypto', async (importOriginal) => {
   };
 });
 
-import { useChatStore } from '../../stores/chatStore';
+import { useChatStore, channelView, conversationView } from '../../stores/chatStore';
 import { cacheSentPlaintext } from '../../services/e2e/dmCrypto';
 import { cacheSentChannelPlaintext } from '../../services/e2e/channelCrypto';
 
@@ -67,7 +67,8 @@ beforeEach(() => {
   vi.mocked(cacheSentPlaintext).mockClear();
   vi.mocked(cacheSentChannelPlaintext).mockClear();
   channels.length = 0;
-  useChatStore.setState({ messages: [], replyingTo: null });
+  // the conversation's view, as its fetch records it: the own row lands in the view of what it was sent to
+  useChatStore.setState({ messages: [], replyingTo: null, viewScope: conversationView('c1') });
 });
 
 describe('the sender\'s own row', () => {
@@ -119,6 +120,7 @@ describe('the sender\'s own row', () => {
 
   it('secure channel: same rule', async () => {
     channels.push({ id: 'ch1', secure: true });
+    useChatStore.setState({ viewScope: channelView('ch1') });
     apiPost.mockResolvedValue({ data: { data: hostileReply({ channelId: 'ch1' }) } });
 
     await useChatStore.getState().sendMessage('ch1', 'hello');
@@ -132,6 +134,7 @@ describe('the sender\'s own row', () => {
 
   it('secure channel: the quote and the files on the row are this client\'s too', async () => {
     channels.push({ id: 'ch1', secure: true });
+    useChatStore.setState({ viewScope: channelView('ch1') });
     const parent = { id: 'p1', type: 'user', content: 'agenda?', encrypted: true, author: peer } as unknown as Message;
     const mine = { s3Key: 'attachments/ch-ch1/mine', key: 'K', iv: 'I', fileName: 'deck.pdf', fileSize: 5, mimeType: 'application/pdf' };
     useChatStore.setState({ replyingTo: parent });
@@ -161,7 +164,7 @@ describe('the sender\'s own row', () => {
     apiPost.mockResolvedValue({ data: { data: hostileReply({ conversationId: 'c1' }) } });
     await useChatStore.getState().sendDMMessage('c1', 'hello');
 
-    useChatStore.getState().addMessage({ ...hostileReply({ conversationId: 'c1' }), content: '' } as Message);
+    useChatStore.getState().addMessage({ ...hostileReply({ conversationId: 'c1' }), content: '' } as Message, conversationView('c1'));
 
     const rows = useChatStore.getState().messages;
     expect(rows).toHaveLength(1);

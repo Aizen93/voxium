@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { translateServerError } from '../../utils/serverErrors';
 import i18n from '../../i18n';
 import { useServerStore } from '../../stores/serverStore';
-import { useChatStore } from '../../stores/chatStore';
+import { useChatStore, channelView, conversationView } from '../../stores/chatStore';
 import { useVoiceStore, teardownSecureVoice } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useDMStore, isConversationReadOnly } from '../../stores/dmStore';
@@ -181,10 +181,15 @@ export function MainLayout() {
     // ended under it) or someone else is signed in by then: the stores, the
     // unread counts and the notifications belong to the next session.
     const signedInUser = (): string | null => useAuthStore.getState().user?.id ?? null;
+    // Each message handler notes the channel or conversation its event names
+    // when it arrives, and hands it to the chat store with the row it gated:
+    // the store applies nothing for another channel or conversation than the
+    // one its rows belong to (stores/chatStore.ts).
 
     // Store function references so cleanup actually works
     const handlers = {
       messageNew: async (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
+        const scope = channelView(message.channelId);
         if (message.channelId && isSecureChannelMessage(message)) {
           // Decrypt BEFORE the store and BEFORE any notification — ciphertext
           // must never reach the DOM, and a desktop notification showing an
@@ -196,7 +201,7 @@ export function MainLayout() {
           message = { ...shown, serverId: message.serverId, serverName: message.serverName, channelName: message.channelName };
         }
         if (isViewingChannel(message.channelId)) {
-          useChatStore.getState().addMessage(message);
+          useChatStore.getState().addMessage(message, scope);
           // Debounced mark-as-read so lastReadAt stays current while viewing
           // Capture serverId now — channels array may change if user switches servers before timer fires
           const capturedServerId = message.serverId;
@@ -257,6 +262,7 @@ export function MainLayout() {
         }
       },
       messageUpdate: async (message: Message) => {
+        const scope = channelView(message.channelId);
         if (message.channelId && isSecureChannelMessage(message)) {
           // A secure edit is a fresh ciphertext under the same id
           const session = signedInUser();
@@ -266,7 +272,7 @@ export function MainLayout() {
           message = shown;
         }
         if (isViewingChannel(message.channelId)) {
-          useChatStore.getState().updateMessage(message);
+          useChatStore.getState().updateMessage(message, scope);
         }
       },
       messageDelete: ({ messageId, channelId }: { messageId: string; channelId: string }) => {
@@ -384,7 +390,7 @@ export function MainLayout() {
       },
       messageReactionUpdate: ({ messageId, channelId, reactions }: { messageId: string; channelId: string; reactions: ReactionGroup[] }) => {
         if (isViewingChannel(channelId)) {
-          useChatStore.getState().updateMessageReactions(messageId, reactions);
+          useChatStore.getState().updateMessageReactions(messageId, reactions, channelView(channelId));
         }
       },
       unreadInit: ({ unreads }: { unreads: UnreadCount[] }) => {
@@ -406,6 +412,7 @@ export function MainLayout() {
         // since the 2.0 cutover), and skipping the gate on it was the leftover
         // plaintext branch.
         const session = signedInUser();
+        const scope = conversationView(message.conversationId);
         const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
         const shown = await decryptMessageForDisplay(message);
         if (!shown || signedInUser() !== session) return;
@@ -420,7 +427,7 @@ export function MainLayout() {
         // row with its id.
         if (isDeletedMessageRow(message)) {
           if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
-            useChatStore.getState().updateMessage(message);
+            useChatStore.getState().updateMessage(message, scope);
           }
           return;
         }
@@ -453,7 +460,7 @@ export function MainLayout() {
         }
 
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
-          useChatStore.getState().addMessage(message);
+          useChatStore.getState().addMessage(message, scope);
           // Debounced mark-as-read so lastReadAt stays current while viewing
           if (markDMReadTimer) clearTimeout(markDMReadTimer);
           markDMReadTimer = setTimeout(() => {
@@ -480,13 +487,14 @@ export function MainLayout() {
         // (the plaintext cache is versioned by editedAt). Same gate as a new
         // message, whatever the flag says.
         const session = signedInUser();
+        const scope = conversationView(message.conversationId);
         const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
         const shown = await decryptMessageForDisplay(message);
         if (!shown || signedInUser() !== session) return;
         message = shown;
         const activeConvId = useDMStore.getState().activeConversationId;
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
-          useChatStore.getState().updateMessage(message);
+          useChatStore.getState().updateMessage(message, scope);
         }
       },
       dmMessageDelete: ({ messageId, conversationId }: { messageId: string; conversationId: string }) => {
@@ -513,7 +521,7 @@ export function MainLayout() {
       dmReactionUpdate: ({ messageId, conversationId, reactions }: { messageId: string; conversationId: string; reactions: ReactionGroup[] }) => {
         const activeConvId = useDMStore.getState().activeConversationId;
         if (conversationId === activeConvId && !useServerStore.getState().activeServerId) {
-          useChatStore.getState().updateMessageReactions(messageId, reactions);
+          useChatStore.getState().updateMessageReactions(messageId, reactions, conversationView(conversationId));
         }
       },
       dmUnreadInit: ({ unreads }: { unreads: DMUnreadCount[] }) => {

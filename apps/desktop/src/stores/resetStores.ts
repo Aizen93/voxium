@@ -1,5 +1,5 @@
 import { useServerStore, resetMemberLookupState, retireDirectory } from './serverStore';
-import { useChatStore } from './chatStore';
+import { useChatStore, resetChatViewState } from './chatStore';
 import { useDMStore } from './dmStore';
 import { useFriendStore } from './friendStore';
 import { useSupportStore } from './supportStore';
@@ -95,6 +95,9 @@ export function resetAccountStores(): void {
   resetClearedHistory();
   // Media files the leaving account played, held as blobs in memory
   resetMediaCache();
+  // The versions its chat view kept for rows it did not show yet (outside the
+  // slice), and its page in flight (aborted): no page lands after this
+  resetChatViewState();
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).

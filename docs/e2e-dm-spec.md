@@ -825,6 +825,56 @@ did not vouch for:
   nothing. Rows of a scope not on screen are left alone; opening it fetches
   and gates them again. The rows of a read-only conversation, own rows
   included, are never tried again on key arrival.
+- **What the view shows when copies of a row cross.** Each copy of a row (a
+  page, a socket insert, a socket edit) goes through the gate on its own, and
+  the copies reach the view (`stores/chatStore.ts`) in the order their gate
+  calls end, not the order they were sent. The view settles them; it never
+  shows anything the gate did not return for the view's own channel or
+  conversation:
+  1. The view holds the rows of one channel or one conversation, its scope:
+     the one its last fetch asked for, recorded from the fetch's own
+     argument (a channel id or a conversation id, with its kind), never from
+     a field of a row. A fetch of another scope (another channel, another
+     conversation, or a channel after a conversation and back) starts a new
+     view before its request is sent: the rows, the reply being composed, the
+     typing line and the edits kept for the view are dropped, the page still
+     on its way is aborted, and the new page is then taken with nothing to
+     merge with. No row or kept edit of one scope is merged into a page of
+     another, or shown while that page is on its way. Every write names the
+     scope it is for: a send the channel or conversation it was sent to, a
+     socket handler the one its event names.
+     A write for another scope than the recorded one, or while none is
+     recorded (after a clear or a logout, until the next fetch), is dropped
+     and kept nowhere. A fetch of the same scope merges with what the view
+     holds, by the rules that follow.
+  2. A row the view shows is never replaced by a provably older version of
+     itself: the same id and author, edited earlier or not at all
+     (`isNewerVersion`, `undecryptedRows.ts`; times compared as times),
+     whatever the gate made of the older copy, the marker the position
+     check gives it included (rule 2 of "Ratchet positions are bound to one
+     message", below). A newer version replaces it whatever the gate made
+     of that one, the marker included: no plaintext stays over a newer
+     version the gate refused. A copy that proves nothing either way (the
+     same version, another author, an edit time that does not parse) is
+     taken as before: an edit, the newest page and a page around a message
+     replace the row; an older page and a second insert of it do not. The
+     deleted shape the gate returns for the copy being applied stands over
+     any other copy. One the view already holds stands over another copy
+     while the DM store holds the conversation read-only; once it holds it
+     live again, the other copy is taken by the rules above.
+  3. An edit that arrives before its row is on screen is kept; when the
+     row's insert or page lands, the row shows that edit if it is provably
+     newer than what landed (or the deleted shape), and what landed
+     otherwise.
+  4. The sender's own row lands when the channel or conversation it was
+     sent to is the view's scope as its send is answered (that channel
+     cleared and loaded again included: its page may have been read before
+     the message was stored), and never in another scope.
+
+  The edits of 3 are kept for the view on screen only, at most 500 of them
+  and for 5 minutes each, and dropped when the view changes and at logout.
+  A gate call or a page request that outlives them shows its row as it was
+  then, until the next fetch.
 - **Decrypted rows** (`decryptedRow`): text and attachments come out of the
   payload only; the type is pinned to `user` (a notice is never encrypted).
 - **Server-asserted fields** are always dropped (`withoutServerAssertions`):
@@ -855,10 +905,14 @@ did not vouch for:
   A refusal is an ordinary refused row (above) — the server can always
   withhold a message, it must never choose which of an author's past words
   appear when — with a `console.warn` naming ids only; nothing is cached. A
-  refused edit over the socket blanks the row it targets. Rule 2 also
+  refused edit over the socket blanks the row it targets, unless the view
+  shows a provably newer version of that row, which then stays (above,
+  "What the view shows when copies of a row cross"). Rule 2 also
   refuses a position already bound to the same id and version once a newer
   version is recorded: a page fetched before an edit but applied after it
-  shows the marker for that row until the next fetch.
+  gets the marker for that row, and the view keeps instead the newer version
+  it shows or has received for that row (above, "What the view shows when
+  copies of a row cross").
 
   Own messages are read from the cache and never decrypted, so they are
   bound at SEND time: `encryptMessage` / `encryptChannelMessage` read

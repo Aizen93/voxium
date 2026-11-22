@@ -32,6 +32,14 @@ export function DMChatArea() {
   const participantStatuses = useDMStore((s) => s.participantStatuses);
   const fetchDMMessages = useChatStore((s) => s.fetchDMMessages);
   const prevConvRef = useRef<string | null>(null);
+  // The chat store records no view (a clear) or another one than this
+  // conversation's (ChatArea's rule). This view's own fetch records the
+  // conversation as it starts, failed or aborted later or not.
+  const viewElsewhere = useChatStore((s) => {
+    const scope = s.viewScope;
+    if (scope === null) return true;
+    return !!scope && (scope.kind !== 'conversation' || scope.id !== activeConversationId);
+  });
 
   const [showSearch, setShowSearch] = useState(false);
   const dmCallConversationId = useVoiceStore((s) => s.dmCallConversationId);
@@ -71,13 +79,16 @@ export function DMChatArea() {
     [fetchDMMessages]
   );
 
-  // Join DM room and fetch messages when conversation changes
+  // Join DM room and fetch messages when conversation changes, and when the
+  // chat store stops recording this conversation's view while it stays on
+  // screen: loaded again as on a change
   useEffect(() => {
-    if (!activeConversationId || activeConversationId === prevConvRef.current) return;
+    if (!activeConversationId) return;
+    if (activeConversationId === prevConvRef.current && !viewElsewhere) return;
 
     prevConvRef.current = activeConversationId;
     joinAndFetch(activeConversationId);
-  }, [activeConversationId, joinAndFetch]);
+  }, [activeConversationId, viewElsewhere, joinAndFetch]);
 
   // Fetch initial participant status
   useEffect(() => {
