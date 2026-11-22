@@ -92,7 +92,12 @@ vi.mock('../../services/audioAnalyser', () => ({ stopSpeakingDetection: vi.fn() 
 vi.mock('../../services/e2e/secureVoiceKeys', () => ({ handleInboundKey: vi.fn(), handleKeyRequest: vi.fn() }));
 vi.mock('../../services/resume', () => ({ handleAppResume: vi.fn() }));
 vi.mock('../../services/discoverySocketHandlers', () => ({ discoverySocketHandlers: {} }));
-vi.mock('../../services/webhookSocketHandlers', () => ({ handleMessageBulkDeleted: vi.fn() }));
+vi.mock('../../services/webhookSocketHandlers', () => ({
+  handleMessageBulkDeleted: vi.fn(),
+  handleWebhookMessagesDetached: vi.fn(),
+  isPurgedWebhookMessage: vi.fn(() => false),
+  withDetachedWebhookLabel: vi.fn((m: unknown) => m),
+}));
 vi.mock('../../services/dmReadOnly', () => ({
   handleConversationReadOnly: vi.fn(), standsAsDeletedNow: () => false,
   applyReadOnlyConversations: vi.fn(), clearMarksOfLiveConversations: vi.fn(),

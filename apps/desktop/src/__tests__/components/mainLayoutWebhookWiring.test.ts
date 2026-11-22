@@ -55,6 +55,35 @@ describe('MainLayout wires message:bulk_deleted to the guarded handler', () => {
   });
 });
 
+describe('MainLayout wires the webhook delete-without-purge notice and drops a late purged delivery', () => {
+  it('imports the two handlers from services/webhookSocketHandlers', () => {
+    expect(source).toMatch(
+      /import \{[^}]*\bhandleWebhookMessagesDetached\b[^}]*\bisPurgedWebhookMessage\b[^}]*\bwithDetachedWebhookLabel\b[^}]*\} from '\.\.\/\.\.\/services\/webhookSocketHandlers';/,
+    );
+  });
+
+  it('the event table has ONE webhook:messages_detached entry, calling handleWebhookMessagesDetached', () => {
+    const table = eventTable();
+    expect(table.match(/'webhook:messages_detached'/g) ?? []).toHaveLength(1);
+    expect(table).toMatch(/\[\s*'webhook:messages_detached'\s*,\s*handleWebhookMessagesDetached\s*\]/);
+  });
+
+  it('messageNew drops a purged webhook\'s delivery before anything else is read, decrypted, counted or notified', () => {
+    const start = source.indexOf('messageNew: async');
+    const end = source.indexOf('messageUpdate:', start);
+    const handler = source.slice(start, end);
+    const guard = handler.indexOf('if (isPurgedWebhookMessage(message)) return;');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(handler.indexOf('viewNow()'));
+    // the deleted-webhook label is applied to the message before anything reads it
+    const label = handler.indexOf('message = withDetachedWebhookLabel(message);');
+    expect(label).toBeGreaterThan(guard);
+    expect(label).toBeLessThan(handler.indexOf('viewNow()'));
+    expect(guard).toBeLessThan(handler.indexOf('addMessage('));
+    expect(guard).toBeLessThan(handler.indexOf('incrementUnread('));
+  });
+});
+
 describe('MainLayout labels a webhook author in a desktop notification', () => {
   /** The server-channel message handler: from `messageNew:` to the next handler. */
   function messageNewHandler(): string {

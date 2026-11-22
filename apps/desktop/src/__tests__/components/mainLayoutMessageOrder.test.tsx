@@ -76,7 +76,12 @@ vi.mock('../../services/audioAnalyser', () => ({ stopSpeakingDetection: vi.fn() 
 vi.mock('../../services/e2e/secureVoiceKeys', () => ({ handleInboundKey: vi.fn(), handleKeyRequest: vi.fn() }));
 vi.mock('../../services/resume', () => ({ handleAppResume: vi.fn() }));
 vi.mock('../../services/discoverySocketHandlers', () => ({ discoverySocketHandlers: {} }));
-vi.mock('../../services/webhookSocketHandlers', () => ({ handleMessageBulkDeleted: vi.fn() }));
+vi.mock('../../services/webhookSocketHandlers', () => ({
+  handleMessageBulkDeleted: vi.fn(),
+  handleWebhookMessagesDetached: vi.fn(),
+  isPurgedWebhookMessage: vi.fn(() => false),
+  withDetachedWebhookLabel: vi.fn((m: unknown) => m),
+}));
 vi.mock('../../services/dmReadOnly', () => ({ handleConversationReadOnly: vi.fn(), standsAsDeletedNow: () => false }));
 vi.mock('../../services/dmClearedHistory', () => ({ readConversationRemovedNotice: () => null }));
 vi.mock('../../hooks/usePushToTalk', () => ({ usePushToTalk: () => {} }));
@@ -162,6 +167,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useAuthStore } from '../../stores/authStore';
 import { api } from '../../services/api';
+import { isPurgedWebhookMessage, withDetachedWebhookLabel } from '../../services/webhookSocketHandlers';
 import { decryptMessagesForDisplay } from '../../services/e2e/dmCrypto';
 import { deletedMessageRow, refusedRow } from '../../services/e2e/displayGate';
 
@@ -747,4 +753,59 @@ describe('a reaction for the scope on screen is applied', () => {
       expect(shown()[0].reactions).toEqual(reactions);
     });
   }
+});
+
+describe('a delivery of a webhook purged a moment ago', () => {
+  const plain = (id: string, webhookId: string | null): Message => ({
+    id, type: 'user', content: 'late', encrypted: false, channelId: 'ch-1', conversationId: null, serverId: 'srv',
+    author: { id: webhookId ? `webhook:${webhookId}` : 'u-other', username: 'bot', displayName: 'bot', avatarUrl: null, isWebhook: !!webhookId },
+    webhookId, createdAt: at(1), editedAt: null, reactions: [], attachments: [], mentions: [], replyTo: null,
+  } as unknown as Message);
+
+  afterEach(() => { vi.mocked(isPurgedWebhookMessage).mockReturnValue(false); });
+
+  it('is neither shown, counted nor heard: its message:new is dropped before anything reads it; another sender is not', async () => {
+    viewChannel('ch-1');
+    vi.mocked(isPurgedWebhookMessage).mockImplementation((m) => m?.webhookId === 'wh-purged');
+
+    await act(async () => { await fire('message:new', plain('late', 'wh-purged')); });
+    expect(shown()).toEqual([]);
+    expect(H.server.incrementUnread).not.toHaveBeenCalled();
+
+    await act(async () => { await fire('message:new', plain('kept', 'wh-live')); });
+    expect(shown().map((m) => m.id)).toEqual(['kept']);
+  });
+
+  it('in a channel NOT on screen it is not counted as unread either', async () => {
+    navigateToChannel('ch-other');
+    vi.mocked(isPurgedWebhookMessage).mockReturnValue(true);
+    await act(async () => { await fire('message:new', plain('late', 'wh-purged')); });
+    expect(H.server.incrementUnread).not.toHaveBeenCalled();
+
+    vi.mocked(isPurgedWebhookMessage).mockReturnValue(false);
+    await act(async () => { await fire('message:new', plain('live', 'wh-live')); });
+    expect(H.server.incrementUnread).toHaveBeenCalledWith('ch-1', 'srv');
+  });
+});
+
+describe('a delivery of a webhook deleted without purge a moment ago', () => {
+  it('is shown, with the deleted webhook\'s label, as the server serves it at the next fetch', async () => {
+    viewChannel('ch-1');
+    vi.mocked(withDetachedWebhookLabel).mockImplementation(((m: Message) => (m.webhookId === 'wh-gone'
+      ? { ...m, webhookId: null, author: { ...m.author, id: 'webhook:deleted' } }
+      : m)) as never);
+    const row = (id: string, webhookId: string) => ({
+      id, type: 'user', content: 'late', encrypted: false, channelId: 'ch-1', conversationId: null, serverId: 'srv',
+      author: { id: `webhook:${webhookId}`, username: 'bot', displayName: 'bot', avatarUrl: null, isWebhook: true },
+      webhookId, createdAt: at(1), editedAt: null, reactions: [], attachments: [], mentions: [], replyTo: null,
+    }) as unknown as Message;
+
+    await act(async () => { await fire('message:new', row('late', 'wh-gone')); });
+    await act(async () => { await fire('message:new', row('live', 'wh-live')); });
+
+    const byId = (id: string) => shown().find((m) => m.id === id)!;
+    expect(byId('late')).toMatchObject({ webhookId: null, author: { id: 'webhook:deleted' } });
+    expect(byId('live')).toMatchObject({ webhookId: 'wh-live', author: { id: 'webhook:wh-live' } });
+    vi.mocked(withDetachedWebhookLabel).mockImplementation(((m: unknown) => m) as never);
+  });
 });
