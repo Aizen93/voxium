@@ -26,6 +26,13 @@ export const LIMITS = {
   MAX_SERVERS_PER_USER: 5,
   MAX_CHANNELS_PER_SERVER: 20,
   MAX_VOICE_USERS_PER_CHANNEL: 12,
+  /** The most an administrator can set for voice users per channel, on every
+   *  write path (global limit and per-space override). A value stored before
+   *  this bound existed is still served and enforced as stored. */
+  MAX_VOICE_USERS_PER_CHANNEL_ADMIN_MAX: 100,
+  /** The channel size the voice path has been load-tested with
+   *  (scripts/load-test-voice.ts); the admin dashboard warns above it. */
+  VOICE_USERS_PER_CHANNEL_LOAD_TESTED: 25,
   MAX_REACTIONS_PER_MESSAGE: 20,
   MAX_EMOJI_LENGTH: 32,
   CATEGORY_NAME_MIN: 1,

@@ -1107,6 +1107,7 @@ Server resource limits are enforced dynamically via `utils/serverLimits.ts`:
 - **Defaults:** maxChannelsPerServer=20, maxVoiceUsersPerChannel=12, maxCategoriesPerServer=12, maxMembersPerServer=0 (unlimited), maxWebhooksPerServer=10 (0 stops creation), maxSecureChannelsPerServer=5 (0 stops creation; secure channels are not counted in maxChannelsPerServer, which counts non-secure channels only)
 - **Enforcement points:** channel creation, secure-channel creation (the create route in `routes/secureChannels.ts`, counted inside its transaction under a row lock on the server), category creation, voice:join, invite join, webhook creation (the create route in `routes/webhooks.ts`)
 - **Admin API:** `GET/PUT /admin/limits/global`, `GET/PUT/DELETE /admin/limits/servers/:serverId`
+- **Voice users per channel:** the admin API accepts 1 to 100 for `maxVoiceUsersPerChannel`, globally and per space (`LIMITS.MAX_VOICE_USERS_PER_CHANNEL_ADMIN_MAX`); a larger value is clamped on write. A value stored before this bound existed is not rewritten and is enforced as stored. All of a channel's media is handled by one mediasoup worker, so channel sizes beyond what has been load-tested (`LIMITS.VOICE_USERS_PER_CHANNEL_LOAD_TESTED`) are untested, and the admin dashboard warns above that figure.
 - **User API:** `GET /servers/:serverId/limits` (read-only, shown in ServerSettingsModal "Limits" tab)
 
 ### Screen Sharing
