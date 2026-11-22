@@ -72,4 +72,23 @@ describe('stores: storage and fetch failures are logged', () => {
     expect(text()).toContain('Could not load the open ticket');
     expect(text()).toContain('Network Error');
   });
+  it('a failed read of stored text never logs that text', async () => {
+    const marker = 'SECRET-MARKER-123';
+    localStorage.setItem('voxium_settings', 'x' + marker);
+    localStorage.setItem('voxium_dismissed_announcements', 'x' + marker);
+    localStorage.setItem('voxium_pinned_spaces', 'x' + marker);
+    localStorage.setItem('voxium_collapsed_categories', 'x' + marker);
+    await import('../../stores/settingsStore');
+    await import('../../stores/announcementStore');
+    await import('../../stores/serverStore');
+    const { loadCollapsed } = await import('../../utils/collapsedCategories');
+    expect(loadCollapsed().size).toBe(0);
+    const text = warn.mock.calls.map((c: unknown[]) => c.join(' ')).join(' ');
+    expect(text).toContain('Could not read the saved settings');
+    expect(text).toContain('Could not read the dismissed announcements');
+    expect(text).toContain('Could not read the pinned spaces');
+    expect(text).toContain('Could not read the collapsed categories');
+    expect(text).not.toContain(marker);
+    expect(text).toContain('SyntaxError');
+  });
 });

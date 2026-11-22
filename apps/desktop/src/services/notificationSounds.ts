@@ -42,14 +42,14 @@ function isTacticalTheme(): boolean {
   return document.documentElement.getAttribute('data-theme') === 'tactical';
 }
 
-async function routeToOutputDevice(ctx: AudioContext): Promise<AudioNode> {
+async function routeToOutputDevice(ctx: AudioContext, sound: string): Promise<AudioNode> {
   const deviceId = useSettingsStore.getState().audioOutputDeviceId;
   if (deviceId && 'setSinkId' in ctx) {
     try {
       await (ctx as unknown as { setSinkId(id: string): Promise<void> }).setSinkId(deviceId);
     } catch (err) {
       // fall back to the default output
-      reportSoundError('output-device', 'output routing', err);
+      reportSoundError('output-device', sound, err);
     }
   }
   return ctx.destination;
@@ -58,13 +58,14 @@ async function routeToOutputDevice(ctx: AudioContext): Promise<AudioNode> {
 function playTone(
   frequencies: Array<{ freq: number; duration: number }>,
   gain: number,
+  sound: string,
 ): void {
   try {
     const ctx = getAudioContext();
     // Fire-and-forget: resume may reject if user hasn't interacted yet
-    resumeContext(ctx, 'tone');
+    resumeContext(ctx, sound);
 
-    routeToOutputDevice(ctx).then((destination) => {
+    routeToOutputDevice(ctx, sound).then((destination) => {
       const gainNode = ctx.createGain();
       gainNode.connect(destination);
 
@@ -83,9 +84,9 @@ function playTone(
 
       gainNode.gain.setValueAtTime(gain, ctx.currentTime);
       gainNode.gain.linearRampToValueAtTime(0, ctx.currentTime + totalDuration);
-    }).catch((err) => reportSoundError('playback', 'tone', err));
+    }).catch((err) => reportSoundError('playback', sound, err));
   } catch (err) {
-    reportSoundError('playback', 'tone', err);
+    reportSoundError('playback', sound, err);
   }
 }
 
@@ -99,7 +100,7 @@ function playTacticalNoiseBurst(durationMs: number, gain: number): void {
     const ctx = getAudioContext();
     resumeContext(ctx, 'tactical-noise-burst');
 
-    routeToOutputDevice(ctx).then((destination) => {
+    routeToOutputDevice(ctx, 'tactical-noise-burst').then((destination) => {
       const duration = durationMs / 1000;
       const bufferSize = Math.ceil(ctx.sampleRate * duration);
       const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
@@ -139,7 +140,7 @@ function playTacticalMessageSound(): void {
     const ctx = getAudioContext();
     resumeContext(ctx, 'tactical-message');
 
-    routeToOutputDevice(ctx).then((destination) => {
+    routeToOutputDevice(ctx, 'tactical-message').then((destination) => {
       const gainNode = ctx.createGain();
       gainNode.connect(destination);
 
@@ -168,7 +169,7 @@ function playTacticalJoinSound(): void {
     const ctx = getAudioContext();
     resumeContext(ctx, 'tactical-join');
 
-    routeToOutputDevice(ctx).then((destination) => {
+    routeToOutputDevice(ctx, 'tactical-join').then((destination) => {
       const gainNode = ctx.createGain();
       gainNode.connect(destination);
 
@@ -199,7 +200,7 @@ function playTacticalLeaveSound(): void {
     const ctx = getAudioContext();
     resumeContext(ctx, 'tactical-leave');
 
-    routeToOutputDevice(ctx).then((destination) => {
+    routeToOutputDevice(ctx, 'tactical-leave').then((destination) => {
       const gainNode = ctx.createGain();
       gainNode.connect(destination);
 
@@ -229,7 +230,7 @@ function playTacticalMentionSound(): void {
     const ctx = getAudioContext();
     resumeContext(ctx, 'tactical-mention');
 
-    routeToOutputDevice(ctx).then((destination) => {
+    routeToOutputDevice(ctx, 'tactical-mention').then((destination) => {
       const gainNode = ctx.createGain();
       gainNode.connect(destination);
 
@@ -267,7 +268,7 @@ function playTacticalCallChime(): void {
     const ctx = getAudioContext();
     resumeContext(ctx, 'tactical-call-chime');
 
-    routeToOutputDevice(ctx).then((destination) => {
+    routeToOutputDevice(ctx, 'tactical-call-chime').then((destination) => {
       const gainNode = ctx.createGain();
       gainNode.connect(destination);
 
@@ -312,9 +313,7 @@ export function playJoinSound(): void {
     [
       { freq: 440, duration: 0.08 },
       { freq: 587, duration: 0.1 },
-    ],
-    0.3,
-  );
+    ], 0.3, 'join');
 }
 
 /** Descending two-tone: 587Hz → 440Hz (default) | Radio-off sweep (tactical) */
@@ -327,9 +326,7 @@ export function playLeaveSound(): void {
     [
       { freq: 587, duration: 0.08 },
       { freq: 440, duration: 0.1 },
-    ],
-    0.3,
-  );
+    ], 0.3, 'leave');
 }
 
 /** Single chime: 880Hz (default) | Radio click (tactical) */
@@ -338,7 +335,7 @@ export function playMessageSound(): void {
     playTacticalMessageSound();
     return;
   }
-  playTone([{ freq: 880, duration: 0.15 }], 0.2);
+  playTone([{ freq: 880, duration: 0.15 }], 0.2, 'message');
 }
 
 /** Double-chime for @mention (default) | Two rapid priority beeps (tactical) */
@@ -351,9 +348,7 @@ export function playMentionSound(): void {
     [
       { freq: 880, duration: 0.1 },
       { freq: 1047, duration: 0.15 },
-    ],
-    0.35,
-  );
+    ], 0.35, 'mention');
 }
 
 /** Single call chime (used internally by the ringtone loop) */
@@ -367,9 +362,7 @@ function playCallChime(): void {
       { freq: 523, duration: 0.12 },
       { freq: 659, duration: 0.12 },
       { freq: 784, duration: 0.15 },
-    ],
-    0.35,
-  );
+    ], 0.35, 'call');
 }
 
 let callRingtoneInterval: ReturnType<typeof setInterval> | null = null;

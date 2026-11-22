@@ -177,7 +177,7 @@ function loadPersistedSettings(): PersistedSettings {
     }
   } catch (err) {
     // Unreadable storage or a corrupt entry: the defaults below
-    console.warn('[Settings] Could not read the saved settings:', err instanceof Error ? err.message : String(err));
+    console.warn('[Settings] Could not read the saved settings (the stored text is not logged):', err instanceof Error ? err.name : 'Error');
   }
   return {
     theme: 'dark',

@@ -293,7 +293,7 @@ function loadPinnedServers(): string[] {
     }
   } catch (err) {
     // Unreadable storage (private mode, a corrupt entry): no space is pinned
-    console.warn('[ServerStore] Could not read the pinned spaces:', err instanceof Error ? err.message : String(err));
+    console.warn('[ServerStore] Could not read the pinned spaces (the stored text is not logged):', err instanceof Error ? err.name : 'Error');
   }
   return [];
 }

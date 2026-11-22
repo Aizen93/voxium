@@ -45,26 +45,11 @@ import { useServerPermissions } from '../../hooks/useServerPermissions';
 import { hasEffective } from '../../utils/memberActions';
 import type { Channel, Category } from '@voxium/shared';
 import { isSecureVoiceSupported } from '../../services/e2e/voiceFrameTransform';
+import { loadCollapsed, saveCollapsed } from '../../utils/collapsedCategories';
 
-const COLLAPSED_KEY = 'voxium_collapsed_categories';
 const CH_PREFIX = 'ch-';
 const CAT_PREFIX = 'cat-';
 const UNCAT_DROPPABLE = 'uncategorized';
-
-function loadCollapsed(): Set<string> {
-  try {
-    const raw = localStorage.getItem(COLLAPSED_KEY);
-    if (raw) return new Set(JSON.parse(raw));
-  } catch (err) {
-    // Unreadable storage (private mode, a corrupt entry): everything starts expanded
-    console.warn('[ChannelSidebar] Could not read the collapsed categories:', err instanceof Error ? err.message : String(err));
-  }
-  return new Set();
-}
-
-function saveCollapsed(collapsed: Set<string>) {
-  localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]));
-}
 
 // ─── Sortable Channel Item ──────────────────────────────────────────────────
 
