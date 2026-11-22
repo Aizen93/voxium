@@ -188,6 +188,16 @@ describe('a page never puts an older version over the one the view shows (#142)'
     expect(byId('m1')).toBe(shownCopy);
   });
 
+  it('an older page whose copy of a row the view shows is the newer version replaces it in place', async () => {
+    open(CH, [row('m1', { content: 'first edit', editedAt: EDIT_1 }), row('m2', { createdAt: at(1) })]);
+    apiGet.mockResolvedValue(page([row('m0', { createdAt: '2026-11-20T09:59:00.000Z' }), row('m1', { content: 'second edit', editedAt: EDIT_2 })]));
+
+    await state().fetchMessages('ch-1', T0);
+
+    expect(ids()).toEqual(['m0', 'm1', 'm2']);
+    expect(byId('m1')).toMatchObject({ content: 'second edit', editedAt: EDIT_2 });
+  });
+
   it('a page row that is the NEWER version replaces the one shown', async () => {
     open(CH, [row('m1', { content: 'first edit', editedAt: EDIT_1 })]);
     apiGet.mockResolvedValue(page([row('m1', { content: 'second edit', editedAt: EDIT_2 })]));
@@ -238,6 +248,21 @@ describe('a page never puts an older version over the one the view shows (#142)'
 
     await state().fetchDMMessages('c-1');
 
+    expect(byId('m1')).toBe(placeholder);
+  });
+
+  it('a deleted account\'s row stands over the copy shown also where the copy shown would otherwise stay (an older page, a second insert)', async () => {
+    const theirs = dmRow('m1', { author: bob, content: 'their text' });
+    open(DM, [theirs, dmRow('m2', { createdAt: at(1) })]);
+    const placeholder = deletedMessageRow(dmRow('m1'), 'c-1');
+    vi.mocked(decryptMessagesForDisplay).mockImplementation(async () => [placeholder]);
+    apiGet.mockResolvedValue(page([dmRow('m1', { type: 'deleted' as Message['type'] })]));
+
+    await state().fetchDMMessages('c-1', at(1));
+    expect(byId('m1')).toBe(placeholder);
+
+    open(DM, [theirs]);
+    state().addMessage(placeholder, DM);
     expect(byId('m1')).toBe(placeholder);
   });
 
@@ -742,6 +767,14 @@ describe('the newest version of a row is what the view ends up showing', () => {
     state().addMessage(first, DM);
     expect(state().addMessage(dmRow('m1', { content: 'second copy' }), DM)).toBe('held');
     expect(byId('m1')).toBe(first);
+  });
+
+  it('an insert that is provably the newer version of the copy shown replaces it, but is no new row', () => {
+    state().addMessage(dmRow('m1'), DM);
+    const later = dmRow('m1', { content: 'edited', editedAt: EDIT_1 });
+    expect(state().addMessage(later, DM)).toBe('held');
+    expect(byId('m1')).toBe(later);
+    expect(ids()).toEqual(['m1']);
   });
 
   it('an update of the same version replaces the copy shown, as before', () => {
