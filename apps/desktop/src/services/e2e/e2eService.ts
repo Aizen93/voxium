@@ -636,6 +636,18 @@ function errText(err: unknown): string {
 }
 
 /**
+ * Whether `at`, a time this device's clock wrote, lies less than `maxAgeMs`
+ * behind the clock now. An age below zero (the clock was set back since) or
+ * one that is not a finite number never is: what `at` dates counts as
+ * expired, never as fresh until the clock catches up with it.
+ */
+function isYoungerThan(at: number | undefined, maxAgeMs: number): boolean {
+  if (typeof at !== 'number') return false;
+  const age = Date.now() - at;
+  return Number.isFinite(age) && age >= 0 && age < maxAgeMs;
+}
+
+/**
  * The typed reason a restore never left the device: the key failed its own
  * checksum (§15.2). Distinguishing this from "the key did not open the blob"
  * is the entire point of putting a checksum on a recovery key — one is a typo
@@ -2590,14 +2602,16 @@ export class E2EService {
     // onDeviceListChanged: there is no account behind the placeholder. Every
     // path that reaches the server for a peer's list comes through here.
     refuseDeletedParticipant(userId);
-    // `freshness`: false = normal cache, true = force a round trip, or a
-    // max-age in ms. The send path passes a small max-age instead of forcing —
-    // two uncached GETs per message would exhaust the per-user rate limit
-    // during fast typing and start failing sends outright.
+    // `freshness`: false reads through the cache (deviceListCacheMs), true is
+    // never answered from it (the rotation decision forces both of its reads,
+    // ensureGroupSession), a number is a max-age in ms. A read the cache does
+    // not answer joins a request already in flight for the same user. An
+    // entry dated ahead of the clock (set back since) is a miss whatever the
+    // max-age.
     const maxAge =
       freshness === true ? 0 : freshness === false ? this.deviceListCacheMs : freshness;
     const cached = this.deviceListCache.get(userId);
-    if (cached && Date.now() - cached.at < maxAge) return cached.list;
+    if (cached && isYoungerThan(cached.at, maxAge)) return cached.list;
 
     // Coalesce concurrent fetches for the same user (parallel sends, or a send
     // racing the UI refresh) into a single request.
@@ -3540,20 +3554,36 @@ export class E2EService {
     return true;
   }
 
+  /**
+   * Whether a DM session was keyed for exactly these device sets: the
+   * fingerprints recorded at its rotation equal the fresh lists'. Device SET,
+   * not the server-supplied version: a server that adds a device while
+   * replaying the old listVersion must still force a re-key. (Records written
+   * before fingerprints existed have none → one extra rotation.)
+   */
+  private keyedForDeviceSets(
+    record: OutboundGroupSessionRecord,
+    peerUserId: string,
+    peer: E2EPinnedDeviceList,
+    own: E2EPinnedDeviceList
+  ): boolean {
+    const fingerprints = record.deviceListFingerprints ?? {};
+    return (
+      fingerprints[peerUserId] === deviceSetFingerprint(peer.devices) &&
+      fingerprints[this.userId] === deviceSetFingerprint(own.devices)
+    );
+  }
+
   private needsRotation(
     record: OutboundGroupSessionRecord,
     peerUserId: string,
     peer: E2EPinnedDeviceList,
     own: E2EPinnedDeviceList
   ): boolean {
-    // Device SET, not the server-supplied version: a server that adds a device
-    // while replaying the old listVersion must still force a re-key. (Records
-    // written before fingerprints existed have none → one extra rotation.)
-    const fingerprints = record.deviceListFingerprints ?? {};
-    if (fingerprints[peerUserId] !== deviceSetFingerprint(peer.devices)) return true;
-    if (fingerprints[this.userId] !== deviceSetFingerprint(own.devices)) return true;
+    if (!this.keyedForDeviceSets(record, peerUserId, peer, own)) return true;
     if (record.messageCount >= E2E_LIMITS.GROUP_SESSION_MAX_MESSAGES) return true;
-    if (Date.now() - record.createdAt >= E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS) return true;
+    // a session dated ahead of the clock (set back since) rotates now
+    if (!isYoungerThan(record.createdAt, E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS)) return true;
     // NOTE: pendingShareFailures deliberately does NOT rotate — a transient
     // upload failure would then re-key on every single message, burning peer
     // one-time keys and flooding their share inbox. Retries reuse this session
@@ -3627,14 +3657,21 @@ export class E2EService {
    * Re-attempt undelivered shares for the CURRENT session (rate-limited by
    * SHARE_RETRY_BACKOFF_MS). Uses the stored index-0 key, so a device that
    * recovers can still read the whole session — no rotation, no amplification.
+   *
+   * `beforeRotation`: the session is about to be replaced by age or message
+   * count, and the rotation keeps only the new session's undelivered shares,
+   * so this is the last attempt for the old one: the backoff does not hold it
+   * (MAX_SHARE_RETRIES still does). Called once, right before that rotation.
    */
   private async retryPendingShares(
     conversationId: string,
-    entry: { session: EngineGroupSession; record: OutboundGroupSessionRecord }
+    entry: { session: EngineGroupSession; record: OutboundGroupSessionRecord },
+    beforeRotation = false
   ): Promise<void> {
     const { record } = entry;
     if (record.pendingShareFailures.length === 0) return;
-    if (Date.now() - (record.lastShareAttemptAt ?? 0) < SHARE_RETRY_BACKOFF_MS) return;
+    // an attempt dated ahead of the clock (set back since) holds no backoff
+    if (!beforeRotation && isYoungerThan(record.lastShareAttemptAt, SHARE_RETRY_BACKOFF_MS)) return;
     if ((record.shareRetryCount ?? 0) >= MAX_SHARE_RETRIES) return;
 
     // Re-derive the index-0 key from our OWN inbound copy of this session,
@@ -3770,6 +3807,15 @@ export class E2EService {
       await this.retryPendingShares(conversationId, current);
       return current;
     }
+    // A session rotated by age or message count (still keyed for both fresh
+    // device sets) first retries its undelivered shares: the rotation keeps
+    // only the new session's, and every target of this retry is a device both
+    // fresh lists still name. A rotation caused by a changed device set
+    // retries nothing: a target may be a device the fresh lists no longer
+    // name (a revoked one), and the old key must not reach it.
+    if (current && this.keyedForDeviceSets(current.record, peerUserId, peer, own)) {
+      await this.retryPendingShares(conversationId, current, true);
+    }
     return this.rotateGroupSession(conversationId, peerUserId, peer, own, current);
   }
 
@@ -3784,27 +3830,39 @@ export class E2EService {
   //  - member ADDED → the next send creates a fresh session, and the invitee
   //    never receives any earlier session key → no history, by construction.
 
-  private needsChannelRotation(
+  /**
+   * Whether a channel session was keyed for exactly these members and device
+   * sets. The fingerprint map's keys ARE the member set the session was keyed
+   * for (every member gets an entry at rotation, even device-less ones), so
+   * an extra or missing key is a membership change.
+   */
+  private keyedForMembers(
     record: OutboundGroupSessionRecord,
     lists: Map<string, E2EPinnedDeviceList>
   ): boolean {
     const fingerprints = record.deviceListFingerprints ?? {};
-    // Member-set compare: the fingerprint map's keys ARE the member set the
-    // session was keyed for (every member gets an entry at rotation, even
-    // device-less ones). Extra key or missing key → membership changed.
     const recordedMembers = Object.keys(fingerprints).sort();
     const currentMembers = [...lists.keys()].sort();
     if (
       recordedMembers.length !== currentMembers.length ||
       recordedMembers.some((id, i) => id !== currentMembers[i])
     ) {
-      return true;
+      return false;
     }
     for (const [userId, list] of lists) {
-      if (fingerprints[userId] !== deviceSetFingerprint(list.devices)) return true;
+      if (fingerprints[userId] !== deviceSetFingerprint(list.devices)) return false;
     }
+    return true;
+  }
+
+  private needsChannelRotation(
+    record: OutboundGroupSessionRecord,
+    lists: Map<string, E2EPinnedDeviceList>
+  ): boolean {
+    if (!this.keyedForMembers(record, lists)) return true;
     if (record.messageCount >= E2E_LIMITS.GROUP_SESSION_MAX_MESSAGES) return true;
-    if (Date.now() - record.createdAt >= E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS) return true;
+    // a session dated ahead of the clock (set back since) rotates now
+    if (!isYoungerThan(record.createdAt, E2E_LIMITS.GROUP_SESSION_MAX_AGE_MS)) return true;
     return false;
   }
 
@@ -3901,6 +3959,13 @@ export class E2EService {
     if (current && !this.needsChannelRotation(current.record, lists)) {
       await this.retryPendingShares(scope, current);
       return { ...current, notReadyUserIds };
+    }
+    // As in ensureGroupSession: a rotation by age or message count (the same
+    // members with the same device sets) first retries the old session's
+    // undelivered shares; a changed member or device set retries nothing, so
+    // a removed member or a revoked device never receives the old key.
+    if (current && this.keyedForMembers(current.record, lists)) {
+      await this.retryPendingShares(scope, current, true);
     }
     const rotated = await this.rotateChannelGroupSession(scope, lists, current);
     return { ...rotated, notReadyUserIds };
@@ -4704,8 +4769,8 @@ export class E2EService {
   scopePurged(mark: string, scope: string): boolean | Promise<boolean> {
     const loaded = this.purgeMarks.get(mark);
     if (loaded) return loaded.has(scope);
-    const failedAt = this.purgeMarkLoadFailedAt.get(mark);
-    if (failedAt !== undefined && Date.now() - failedAt < PURGE_MARK_RETRY_MS) return false;
+    // a failure dated ahead of the clock (set back since) holds no wait
+    if (isYoungerThan(this.purgeMarkLoadFailedAt.get(mark), PURGE_MARK_RETRY_MS)) return false;
     return this.loadPurgeMarks(mark).then(
       (scopes) => scopes.has(scope),
       () => false,
@@ -4941,9 +5006,9 @@ export class E2EService {
     if (!entry && claimMissing) {
       // The key share may still be sitting in this device's inbox. One drain
       // per unknown session (retried after SHARE_CLAIM_RETRY_MS) — a backlog of
-      // undecryptable messages must not turn into a request storm.
-      const lastAttempt = this.missingSessions.get(sessionId);
-      if (lastAttempt === undefined || Date.now() - lastAttempt >= SHARE_CLAIM_RETRY_MS) {
+      // undecryptable messages must not turn into a request storm. An attempt
+      // dated ahead of the clock (set back since) holds no wait.
+      if (!isYoungerThan(this.missingSessions.get(sessionId), SHARE_CLAIM_RETRY_MS)) {
         this.missingSessions.set(sessionId, Date.now());
         await this.claimKeyShares();
         // The claim may be the one a dispose was waiting for. What it stored

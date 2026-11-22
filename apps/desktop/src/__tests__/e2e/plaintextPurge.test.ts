@@ -350,6 +350,40 @@ describe('E2EService.scopePurged: the marks an earlier session wrote', () => {
       vi.useRealTimers();
     }
   });
+
+  it('a failed read dated ahead of the clock (set back since) holds no wait: the next question reads the marks again', async () => {
+    const { service } = fresh();
+    await seed(service, 'conv-a');
+    await service.purgeCachedPlaintexts(['conv-a'], othersOnly, { mark: 'read-only' });
+    const fresher = new E2EService(ME, { api: {} as never, keyProvider, vaultNamespace: `purge-${n}` });
+    live.push(fresher);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const t0 = new Date('2026-11-18T10:00:00.000Z').getTime();
+      vi.setSystemTime(t0);
+      const list = vi.spyOn(E2EVault.prototype, 'listPurgedScopes')
+        .mockRejectedValueOnce(new Error('store gone'))
+        .mockRejectedValueOnce(new Error('store gone again'));
+      expect(await fresher.scopePurged('read-only', 'conv-a')).toBe(false);
+      expect(list).toHaveBeenCalledTimes(1);
+
+      // set back an hour: the failure lies ahead of the clock, so no wait holds
+      vi.setSystemTime(t0 - 3_600_000);
+      expect(await fresher.scopePurged('read-only', 'conv-a')).toBe(false);
+      expect(list).toHaveBeenCalledTimes(2);
+      // that second failure is dated by the clock now, and its wait holds as before
+      vi.advanceTimersByTime(PURGE_MARK_RETRY_MS - 1);
+      expect(fresher.scopePurged('read-only', 'conv-a')).toBe(false);
+      expect(list).toHaveBeenCalledTimes(2);
+      vi.advanceTimersByTime(1);
+      expect(await fresher.scopePurged('read-only', 'conv-a')).toBe(true);
+      expect(list).toHaveBeenCalledTimes(3);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('E2EService.clearPurgeMarks: a list served the conversation live', () => {
