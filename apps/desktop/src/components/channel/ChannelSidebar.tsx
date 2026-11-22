@@ -55,7 +55,10 @@ function loadCollapsed(): Set<string> {
   try {
     const raw = localStorage.getItem(COLLAPSED_KEY);
     if (raw) return new Set(JSON.parse(raw));
-  } catch { /* ignore */ }
+  } catch (err) {
+    // Unreadable storage (private mode, a corrupt entry): everything starts expanded
+    console.warn('[ChannelSidebar] Could not read the collapsed categories:', err instanceof Error ? err.message : String(err));
+  }
   return new Set();
 }
 

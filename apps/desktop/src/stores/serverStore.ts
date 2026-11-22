@@ -291,7 +291,10 @@ function loadPinnedServers(): string[] {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) return parsed.filter((x): x is string => typeof x === 'string');
     }
-  } catch { /* ignore corrupt storage */ }
+  } catch (err) {
+    // Unreadable storage (private mode, a corrupt entry): no space is pinned
+    console.warn('[ServerStore] Could not read the pinned spaces:', err instanceof Error ? err.message : String(err));
+  }
   return [];
 }
 
@@ -453,7 +456,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
         : [...state.pinnedServerIds, serverId];
       try {
         localStorage.setItem(PINNED_KEY, JSON.stringify(pinnedServerIds));
-      } catch { /* ignore storage errors */ }
+      } catch (err) {
+        // The pin holds for this session only
+        console.warn('[ServerStore] Could not save the pinned spaces:', err instanceof Error ? err.message : String(err));
+      }
       return { pinnedServerIds };
     });
   },

@@ -175,8 +175,9 @@ function loadPersistedSettings(): PersistedSettings {
         spacesStripMode: parsed.spacesStripMode === 'auto' ? 'auto' : 'pinned',
       };
     }
-  } catch {
-    // ignore parse errors
+  } catch (err) {
+    // Unreadable storage or a corrupt entry: the defaults below
+    console.warn('[Settings] Could not read the saved settings:', err instanceof Error ? err.message : String(err));
   }
   return {
     theme: 'dark',
@@ -195,6 +196,8 @@ function loadPersistedSettings(): PersistedSettings {
   };
 }
 
+let saveFailureLogged = false;
+
 function persistSettings(state: PersistedSettings) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -212,8 +215,12 @@ function persistSettings(state: PersistedSettings) {
       enableDesktopNotifications: state.enableDesktopNotifications,
       spacesStripMode: state.spacesStripMode,
     }));
-  } catch {
-    // ignore storage errors
+  } catch (err) {
+    // Sliders save on every change: one warning per session, not one per step
+    if (!saveFailureLogged) {
+      saveFailureLogged = true;
+      console.warn('[Settings] Could not save the settings (further failures are not logged):', err instanceof Error ? err.message : String(err));
+    }
   }
 }
 
