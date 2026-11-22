@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
-import { useChatStore } from './chatStore';
+import { useChatStore, clearConversationView } from './chatStore';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { DELETED_MESSAGE_TYPE, isDeletedParticipantId, isDMSystemNotice } from '@voxium/shared';
@@ -539,6 +539,10 @@ export const useDMStore = create<DMState>((set, get) => ({
       get().markConversationRead(prevConvId);
     }
     if (prevConvId !== conversationId) {
+      // whatever view the store holds, a channel's included: the conversation
+      // view follows (every caller leaves the space view), and its fetch
+      // starts the conversation's view; until then nothing of the previous
+      // channel or conversation is drawn under this conversation
       useChatStore.getState().clearMessages();
     }
     set({ activeConversationId: conversationId });
@@ -551,7 +555,9 @@ export const useDMStore = create<DMState>((set, get) => ({
     if (prevConvId) {
       // Mark as read before leaving (captures messages received while viewing)
       get().markConversationRead(prevConvId);
-      useChatStore.getState().clearMessages();
+      // its view goes with it; a space shown with the conversation kept
+      // behind it keeps its channel's view (nothing would load it again)
+      clearConversationView();
     }
     set({ activeConversationId: null });
   },

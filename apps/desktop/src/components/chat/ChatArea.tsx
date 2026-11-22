@@ -14,6 +14,14 @@ export function ChatArea() {
   const [showSearch, setShowSearch] = useState(false);
   const { fetchMessages, clearMessages } = useChatStore();
   const prevChannelRef = useRef<string | null>(null);
+  // The chat store records no view (a clear: every writer then drops what it
+  // brings) or another one than this channel's. This view's own fetch
+  // records the channel as it starts, failed or aborted later or not.
+  const viewElsewhere = useChatStore((s) => {
+    const scope = s.viewScope;
+    if (scope === null) return true;
+    return !!scope && (scope.kind !== 'channel' || scope.id !== activeChannelId);
+  });
 
   const activeChannel = channels.find((c) => c.id === activeChannelId);
 
@@ -37,7 +45,10 @@ export function ChatArea() {
     [clearMessages, fetchMessages]
   );
 
-  // Join socket channel room and fetch messages when channel changes
+  // Join socket channel room and fetch messages when channel changes, and
+  // when the chat store stops recording this channel's view while it stays
+  // on screen (a clear with the channel unchanged): loaded again as on a
+  // change, or its history would be gone and its live messages dropped
   useEffect(() => {
     if (!activeChannelId) {
       // No channel is open (a space without a text channel, the open channel
@@ -47,7 +58,9 @@ export function ChatArea() {
       prevChannelRef.current = null;
       return;
     }
-    if (activeChannelId === prevChannelRef.current) return;
+    // the open channel, its view recorded: nothing to load (a re-render, the
+    // same channel selected again)
+    if (activeChannelId === prevChannelRef.current && !viewElsewhere) return;
 
     prevChannelRef.current = activeChannelId;
 
@@ -55,7 +68,7 @@ export function ChatArea() {
     // (auto-subscription on connect covers existing channels; this handles
     // channels created after the socket connected)
     joinAndFetch(activeChannelId);
-  }, [activeChannelId, joinAndFetch]);
+  }, [activeChannelId, viewElsewhere, joinAndFetch]);
 
   // On any (re)connection: re-join channel room and re-fetch messages.
   // Uses DUAL mechanism for maximum reliability:

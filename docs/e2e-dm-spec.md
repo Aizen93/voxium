@@ -825,6 +825,128 @@ did not vouch for:
   nothing. Rows of a scope not on screen are left alone; opening it fetches
   and gates them again. The rows of a read-only conversation, own rows
   included, are never tried again on key arrival.
+- **What the view shows when copies of a row cross.** Each copy of a row (a
+  page, a socket insert, a socket edit) goes through the gate on its own, and
+  the copies reach the view (`stores/chatStore.ts`) in the order their gate
+  calls end, not the order they were sent. The view settles them; it never
+  shows anything the gate did not return for the view's own channel or
+  conversation:
+  1. The view holds the rows of one channel or one conversation, its scope:
+     the one its last fetch asked for, recorded from the fetch's own
+     argument (a channel id or a conversation id, with its kind), never from
+     a field of a row. A fetch of another scope (another channel, another
+     conversation, or a channel after a conversation and back) starts a new
+     view before its request is sent: the rows, the reply being composed, the
+     typing line and the edits and deletes kept for the view are dropped,
+     the page still on its way is aborted, and the new page is then taken
+     with nothing to merge with. No row, kept edit or kept delete of one
+     scope is merged into a page of another, or shown while that page is on
+     its way. Every write of a row names the scope it is for: a send the
+     channel or conversation it was sent to, a socket handler the one its
+     event names, a try on key arrival the one the row was noted for. A
+     write for another scope than the recorded one, or while none is
+     recorded (after a clear or a logout), is dropped and kept nowhere. A
+     view on screen whose scope the store does not record (a clear with its
+     channel or conversation unchanged, another scope fetched meanwhile)
+     fetches its own at once, as on a change (`ChatArea`, `DMChatArea`):
+     no channel or conversation stays on screen with no scope recorded, and
+     the page it fetches is read after the event of any write dropped
+     meanwhile. A channel selected in a space while something else fills
+     the chat panel (a screen share shown inline) has no view on screen;
+     while the store does not record it, a message for it is not being
+     viewed: it counts as unread, sounds and notifies like a message of
+     any other channel, marks nothing read, and is fetched when the
+     channel is shown. A few writes name no scope; none adds a row or moves
+     anything of one scope into another: the typing line (set by the
+     handlers for the channel or conversation on screen, holding names and
+     never a row, and dropped at every new view), the local removal of the
+     rows at or below a cleared floor (matched by their conversation), the
+     author name and avatar of the rows an account wrote (the server's
+     profile event), the reply being composed (set from a row the view
+     shows, cleared once a send is answered) and the message a jump was
+     aimed at (cleared once the list shows it). A fetch of the same scope
+     merges with what the view holds, by the rules that follow.
+  2. A row the view shows is never replaced by a provably older version of
+     itself: the same id and author, edited earlier or not at all
+     (`isNewerVersion`, `undecryptedRows.ts`; times compared as times),
+     whatever the gate made of the older copy, the marker the position
+     check gives it included (rule 2 of "Ratchet positions are bound to one
+     message", below). A newer version replaces it whatever the gate made
+     of that one, the marker included: no plaintext stays over a newer
+     version the gate refused. A copy that proves nothing either way (the
+     same version, another author, an edit time that does not parse) is
+     taken as before: an edit, the newest page and a page around a message
+     replace the row; an older page and a second insert of it do not. The
+     deleted shape the gate returns for the copy being applied stands over
+     any other copy. One the view already holds stands over another copy
+     while the DM store holds the conversation read-only; once it holds it
+     live again, the other copy is taken by the rules above.
+  3. An edit that arrives before its row is on screen is kept; when the
+     row's insert or page lands, the row shows that edit if it is provably
+     newer than what landed, and what landed otherwise. A deleted shape
+     follows rule 2: one that lands stands over the kept edit, and one kept
+     stands over what lands only while the DM store holds the conversation
+     read-only.
+  4. A message deleted on the server while its channel or conversation is
+     on screen stays out of the view: no insert, edit or page that began
+     before the delete brings it back, and its late insert plays no sound
+     and marks nothing read.
+  5. Rows stand in the order of the server's `createdAt`, then id, wherever
+     they arrive from.
+  6. A row whose decrypt ends after the view changed lands in none, nor in
+     its own channel or conversation once that is opened again: the view on
+     screen began after the row's event, and so did its fetch, whose newest
+     page holds the message (unless that request failed, or the view is a
+     window around an older message that ends before it). When the view
+     already shows the row, nothing of the late copy is applied, and the
+     row is news as if it had landed (a mention sounds, the view's
+     mark-read follows). The view changes at every fetch of another scope,
+     at every clear and at logout. These clear: a channel opened, reloaded
+     or reconnected; another conversation opened, from a conversation or
+     from a space; the conversation shown reloaded; a space deleted while
+     it is shown; and the conversation on screen left for the friends or
+     support view, the Messages tab, a space's tab or the switcher. A
+     conversation kept open behind a space (a space opened from Explore, an
+     invite, a new space or the voice panel) and left from there (that
+     space's tab or the switcher again, another space, the Messages tab)
+     clears nothing once the store records the space's channel: the
+     channel's view stays as it is, and a space whose load fails leaves
+     the channel shown before live (while the store still records the
+     conversation, in a space with no text channel or one whose channel
+     has not loaded, leaving clears that view). A conversation's
+     reconnect and a jump to the latest messages fetch the same scope with
+     no clear: the view stays, and such a row lands in it.
+  7. The sender's own row lands when the channel or conversation it was
+     sent to is the view's scope as the row is written (as its send is
+     answered; for an encrypted send, once the plaintext-cache write that
+     follows the answer is done), whatever happened to the view meanwhile
+     (that channel cleared and loaded again included: its page may have
+     been read before the message was stored), and never in another scope.
+     A newest page of that channel or conversation that lands after the row
+     and does not hold it drops it (the first case below).
+
+  The edits of 3 and the deletes of 4 are kept for the view on screen
+  only, at most 500 of them together and for 5 minutes each, and dropped
+  when the view changes and at logout. A gate call or a page request that
+  outlives them shows its row as it was then, until the next fetch. Four
+  cases stay as they were:
+  - A newest page (a view's first page, a conversation's reconnect, a jump
+    to the latest messages, the reload after a webhook's purge emptied the
+    channel) and a page around a message (a search result) replace the rows
+    the view holds: a row that landed while such a page was on its way and
+    that the page does not hold (a socket insert, the sender's own row
+    answered before that page) is dropped until the next fetch.
+  - A new message lands after the rows of a window opened around an older
+    message, with the messages between them not loaded.
+  - Versions are ordered by the server's `editedAt`: within one view not
+    cleared, the latest stamp wins, so an edit stamped earlier than the
+    version shown (a server clock stepped back) is not shown, a fetch of
+    the same scope included, until the view is cleared and its first page,
+    with nothing held to compare with, stands as the server sent it.
+  - Rule 4 holds for the view on screen only. The conversation-list
+    preview takes a message deleted while its insert decrypted, and in a
+    channel or conversation not on screen such a message still counts as
+    unread, sounds and notifies.
 - **Decrypted rows** (`decryptedRow`): text and attachments come out of the
   payload only; the type is pinned to `user` (a notice is never encrypted).
 - **Server-asserted fields** are always dropped (`withoutServerAssertions`):
@@ -855,10 +977,14 @@ did not vouch for:
   A refusal is an ordinary refused row (above) — the server can always
   withhold a message, it must never choose which of an author's past words
   appear when — with a `console.warn` naming ids only; nothing is cached. A
-  refused edit over the socket blanks the row it targets. Rule 2 also
+  refused edit over the socket blanks the row it targets, unless the view
+  shows a provably newer version of that row, which then stays (above,
+  "What the view shows when copies of a row cross"). Rule 2 also
   refuses a position already bound to the same id and version once a newer
   version is recorded: a page fetched before an edit but applied after it
-  shows the marker for that row until the next fetch.
+  gets the marker for that row, and the view keeps instead the newer version
+  it shows or has received for that row (above, "What the view shows when
+  copies of a row cross").
 
   Own messages are read from the cache and never decrypted, so they are
   bound at SEND time: `encryptMessage` / `encryptChannelMessage` read
@@ -2074,12 +2200,25 @@ DMs only.
   same number MANAGE_SERVER already reads from the count endpoint, never
   which ones or whose.
 - The client's `message:new`/`message:update` handlers decrypt asynchronously
-  before touching the store — the same shape the DM handlers have always had.
-  The known consequences are inherited unchanged: two near-simultaneous
-  messages can momentarily render out of order when one resolves from the
-  plaintext cache and the other decrypts, and a delete racing a still-
-  decrypting insert can leave the row until the next fetch. Serializing per
-  channel would add a queue for a cosmetic, refetch-corrected artifact.
+  before touching the store — the same shape the DM handlers have — and are
+  not serialised: their decrypts can end in another order than their events
+  arrived. The view settles what they bring by the rules of §9.1 ("What the
+  view shows when copies of a row cross"): rows stand in the order of the
+  server's time, a delete that arrived while an insert or an edit of that
+  message was decrypting keeps it out, and the newest edit received is what
+  the row shows. A handler names the channel its event is about, and the
+  view takes nothing for another channel or conversation than its own, nor
+  anything gated for an earlier view of it (a row that view's page already
+  shows is news as if it had landed, its late copy applied nowhere); a
+  channel on screen whose view the store does not record is fetched again
+  at once. What remains is bounded by what the view remembers (500 deletes
+  and edits at most, 5 minutes each, dropped at every change of view as
+  §9.1 defines it): a decrypt that outlives it shows its row as it was sent
+  until the next fetch. The cases §9.1 lists as unchanged (a row that a
+  newest page or a page around a message replaces while it was on its way,
+  a new message after a window opened around an older one, the order of
+  versions by the server's edit time, a deleted message that still counts,
+  sounds and notifies in a channel not on screen) are not covered either.
 - Message-key backup accepts channel scopes transparently, so a device that
   backed up can restore its own history; there is no cross-member history
   transfer (consistent with no-history-on-join).
