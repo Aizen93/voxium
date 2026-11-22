@@ -445,7 +445,7 @@ describe('Server Routes', () => {
       expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.$transaction.mock.invocationCallOrder[0]);
     });
 
-    it('orders channels and categories by position, then id, in the create read-back and the detail read', async () => {
+    it('orders channels and categories by position, then id, in the create read-back and the detail read (and the roles in the detail read)', async () => {
       // A tie on position must come back in one order whatever the relation
       // load strategy (one joined statement or a query per relation)
       const TIE_BROKEN = { orderBy: [{ position: 'asc' }, { id: 'asc' }] };
@@ -475,7 +475,7 @@ describe('Server Routes', () => {
       const detail = await request(app).get('/api/v1/servers/srv-1').set('Authorization', `Bearer ${makeToken()}`);
       expect(detail.status).toBe(200);
       expect(prismaMock.server.findUnique).toHaveBeenCalledWith(expect.objectContaining({
-        include: expect.objectContaining({ channels: TIE_BROKEN, categories: TIE_BROKEN }),
+        include: expect.objectContaining({ channels: TIE_BROKEN, categories: TIE_BROKEN, roles: TIE_BROKEN }),
       }));
     });
 
@@ -2269,6 +2269,16 @@ describe('Server Routes', () => {
       expect(res.body.data[0].roles[0].name).toBe('Mod');
       expect(prismaMock.serverMember.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { serverId: 'srv-1', userId: { in: ['user-2', 'user-9'] } } }));
       expect(mockRateLimitMemberLookup).toHaveBeenCalled();
+    });
+
+    it('a member row carries its roles in one fixed order: by role id', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.findMany.mockResolvedValue([memberRow('user-2')]);
+
+      expect((await request(app).get('/api/v1/servers/srv-1/members/lookup?ids=user-2').set('Authorization', `Bearer ${makeToken()}`)).status).toBe(200);
+      expect(prismaMock.serverMember.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        include: expect.objectContaining({ memberRoles: { include: { role: true }, orderBy: { roleId: 'asc' } } }),
+      }));
     });
 
     it('refuses an empty list, more than LOOKUP_MAX_IDS ids and an id outside the id charset (400)', async () => {

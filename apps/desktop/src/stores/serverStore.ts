@@ -5,6 +5,7 @@ import { processImage, ASSET_UPLOAD_CONTENT_TYPE } from '../utils/imageProcessin
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { pinSecure, isPinnedSecure, claimDowngradeWarning } from '../utils/securePins';
+import { compareRoles } from '../utils/roleOrder';
 import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST, OPAQUE_ID_RE, ALL_PERMISSIONS, permissionsToString } from '@voxium/shared';
 import type { DiscoveryTier } from '@voxium/shared';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode, CreateRoleRequest, UpdateRoleRequest, SetChannelPermissionOverrideRequest } from '@voxium/shared';
@@ -1120,7 +1121,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     if (get().activeServerId !== serverId) return;
     set((state) => {
       if (state.roles.some((r) => r.id === role.id)) return state;
-      return { roles: [...state.roles, role].sort((a, b) => a.position - b.position) };
+      return { roles: [...state.roles, role].sort(compareRoles) };
     });
   },
 
@@ -1148,7 +1149,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       roles: state.roles.map((r) => {
         const updated = roles.find((u) => u.id === r.id);
         return updated ? { ...r, position: updated.position } : r;
-      }).sort((a, b) => a.position - b.position),
+      }).sort(compareRoles),
     }));
   },
 

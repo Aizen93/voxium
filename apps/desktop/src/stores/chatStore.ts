@@ -9,7 +9,8 @@ import { DMConversationReadOnlyError, isHeldReadOnly } from '../utils/dmParticip
 import { useServerStore } from './serverStore';
 import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
 import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
-import { ownSentRow } from '../services/e2e/displayGate';
+import { isDeletedMessageRow, ownSentRow } from '../services/e2e/displayGate';
+import { isNewerVersion } from '../services/e2e/undecryptedRows';
 import { isSecureChannelId } from '../utils/secureChannelGate';
 import {
   decryptChannelMessagesForDisplay,
@@ -36,8 +37,242 @@ function isSecureChannel(channelId: string): boolean {
 let activeFetchController: AbortController | null = null;
 let lastFetchKey = '';
 
+/**
+ * A channel or a conversation, as the chat view's scope (one list serves
+ * both). The view's own is recorded from the argument of the fetch that
+ * opened it, never from a field of a row it holds (a plaintext row carries
+ * whatever the server wrote); a write names the one it is for: a send the
+ * one it was sent to, a socket handler the one its event names. An empty id
+ * names none.
+ */
+export interface ChatViewScope {
+  readonly kind: 'channel' | 'conversation';
+  readonly id: string;
+}
+
+export function channelView(channelId: string | null | undefined): ChatViewScope {
+  return { kind: 'channel', id: channelId ?? '' };
+}
+
+export function conversationView(conversationId: string | null | undefined): ChatViewScope {
+  return { kind: 'conversation', id: conversationId ?? '' };
+}
+
+/** Whether two scopes name the same channel, or the same conversation (the kind counts: a channel and a conversation of one id are two). */
+export function isSameView(a: ChatViewScope | null, b: ChatViewScope | null): boolean {
+  return !!a && !!b && a.id !== '' && a.kind === b.kind && a.id === b.id;
+}
+
+/**
+ * How long the view remembers a message deleted on the server, or the newest
+ * version of a row it does not show yet (an edit whose insert is still being
+ * decrypted). Neither is ever wrong later (a deleted message never comes
+ * back, an older version stays older), so the bound only caps memory: an
+ * entry serves a gate call or a page request that began before its event and
+ * ends after it, and every change of view drops them all (startView). A
+ * call that outlives it (a long key-share claim, a request on a stalled
+ * network: the API sets no timeout) can show the row as it was then, until
+ * the next fetch.
+ */
+export const RECENT_CHANGE_MAX_AGE_MS = 5 * 60_000;
+/** Such entries at most (deletes and versions together); the oldest goes first beyond. */
+export const RECENT_CHANGES_MAX = 500;
+
+/** By message id, oldest first: `row` null for a delete, else the version not shown yet. */
+const recentChanges = new Map<string, { at: number; row: Message | null }>();
+/** Advanced at every change of view (startView): a clear, a fetch of another scope, a logout. */
+let viewEpoch = 0;
+
+/**
+ * The view now: a socket handler notes it when its event arrives and hands it
+ * to addMessage / updateMessage, which apply nothing gated for an earlier
+ * view (the view on screen began after that event, and so did its own fetch).
+ */
+export function chatViewEpoch(): number {
+  return viewEpoch;
+}
+
+/**
+ * A new view, of `scope` (a fetch of another channel or conversation than the
+ * one recorded) or of none (a clear, a logout): the rows, the reply being
+ * composed, the typing line and everything the last view remembered go, its
+ * page in flight is aborted, and nothing a handler gated for it lands (the
+ * epoch moves on). Synchronous, so a fetch's page is merged with nothing of
+ * another scope, and nothing of another scope is shown while it is on its
+ * way. With no scope recorded, every writer drops what it brings, and the
+ * view on screen fetches its channel or conversation again, which records it
+ * (ChatArea, DMChatArea).
+ */
+function startView(scope: ChatViewScope | null): void {
+  if (activeFetchController) {
+    activeFetchController.abort();
+    activeFetchController = null;
+  }
+  lastFetchKey = '';
+  recentChanges.clear();
+  viewEpoch += 1;
+  typingTimers.forEach((timer) => clearTimeout(timer));
+  typingTimers.clear();
+  useChatStore.setState({
+    messages: [], hasMore: false, hasMoreAfter: false, isLoading: false, typingUsers: new Map(),
+    replyingTo: null, targetMessageId: null, viewScope: scope,
+  });
+}
+
+/** A fetch of `scope`: a change of view first when the view is of another one, or of none. */
+function viewFor(scope: ChatViewScope): void {
+  if (!isSameView(useChatStore.getState().viewScope, scope)) startView(scope);
+}
+
+/** Whether `scope` is the one the view's rows belong to. */
+function isViewOf(scope: ChatViewScope): boolean {
+  return isSameView(useChatStore.getState().viewScope, scope);
+}
+
+/**
+ * Whether the view is of a conversation the DM store holds read-only (the
+ * other side's account was deleted): the deleted shapes it holds stand over
+ * any other copy then. Asked of the recorded scope, never of a row.
+ */
+function viewHeldReadOnly(): boolean {
+  const scope = useChatStore.getState().viewScope;
+  return scope?.kind === 'conversation' && isConversationReadOnly(scope.id);
+}
+
+/**
+ * The conversation on screen is left (dmStore's clearActiveConversation: the
+ * friends or support view, the Messages tab, a space's tab or the switcher):
+ * a new view of none starts only when the view is a conversation's. A
+ * channel's view, or none, is left as it is: a space can be on screen with a
+ * conversation kept open behind it (a space opened from Explore, an invite,
+ * a new space or the voice panel), and leaving that conversation changes
+ * nothing the space shows.
+ */
+export function clearConversationView(): void {
+  if (useChatStore.getState().viewScope?.kind === 'conversation') startView(null);
+}
+
+/**
+ * Logout (resetAccountStores): a page in flight for the leaving account is
+ * aborted and lands for nobody, and nothing its view recorded or remembered
+ * stays.
+ */
+export function resetChatViewState(): void {
+  startView(null);
+}
+
+function rememberChange(messageId: string, row: Message | null): void {
+  recentChanges.delete(messageId);
+  recentChanges.set(messageId, { at: Date.now(), row });
+  for (const oldest of recentChanges.keys()) {
+    if (recentChanges.size <= RECENT_CHANGES_MAX) break;
+    recentChanges.delete(oldest);
+  }
+}
+
+/** What the view remembers of a message: null (deleted), a version it does not show yet, or undefined (nothing). */
+function recentChangeOf(messageId: string): Message | null | undefined {
+  const now = Date.now();
+  // an age below zero (the clock stepped back) keeps an entry: it is never wrong, only old
+  for (const [id, change] of recentChanges) {
+    if (now - change.at < RECENT_CHANGE_MAX_AGE_MS) break;
+    recentChanges.delete(id);
+  }
+  return recentChanges.get(messageId)?.row;
+}
+
+/**
+ * Which of two copies of one message the view shows: the one it `held` (its
+ * row, or a version it did not show yet) or the `incoming` one. A deleted
+ * account's row (the gate's deleted shape) that comes in stands over any
+ * other copy, and one held stands while `readOnly` (the view is of a
+ * conversation held read-only); then a copy that is provably the newer
+ * version (isNewerVersion); then the path's own rule, `onEven`: an insert
+ * keeps the copy held (whichever of the sender's row and the socket echo
+ * lands first owns the id), an edit and a page take the incoming one.
+ */
+function pickVersion(held: Message, incoming: Message, onEven: 'held' | 'incoming', readOnly: boolean): Message {
+  if (isDeletedMessageRow(incoming)) return incoming;
+  if (readOnly && isDeletedMessageRow(held)) return held;
+  if (isNewerVersion(incoming, held)) return incoming;
+  if (isNewerVersion(held, incoming)) return held;
+  return onEven === 'held' ? held : incoming;
+}
+
+/** Whether row `a` comes after row `b`: by the server's `createdAt`, compared as times, then by id. */
+function comesAfter(a: Message, b: Message): boolean {
+  const at = Date.parse(a.createdAt);
+  const bt = Date.parse(b.createdAt);
+  // a time that does not parse is compared with nothing: such a row lands
+  // where it arrives, and no row is moved past it
+  if (at !== bt) return at > bt;
+  return a.id > b.id;
+}
+
+/** `messages` with `row` where its time puts it, scanned from the end (an arrival is nearly always the newest). */
+function placedByTime(messages: readonly Message[], row: Message): Message[] {
+  let at = messages.length;
+  while (at > 0 && comesAfter(messages[at - 1], row)) at -= 1;
+  return [...messages.slice(0, at), row, ...messages.slice(at)];
+}
+
+function replacedAt(messages: readonly Message[], index: number, row: Message): Message[] {
+  const next = messages.slice();
+  next[index] = row;
+  return next;
+}
+
+/**
+ * A fetched page as the view takes it, against the rows it shows (always of
+ * the page's own channel or conversation: a fetch of another one started a
+ * new view first): a message deleted since is left out, and each row is the
+ * copy pickVersion keeps of the page's, a version the view did not show yet
+ * (taken now) and the one it shows (`onEven` for the last). A page asked for
+ * before an edit and answered after it never puts the older version over the
+ * newer one.
+ */
+function resolvePage(page: readonly Message[], shown: readonly Message[], onEven: 'held' | 'incoming'): Message[] {
+  const held = new Map(shown.map((m) => [m.id, m]));
+  const readOnly = viewHeldReadOnly();
+  const out: Message[] = [];
+  for (const row of page) {
+    const change = recentChangeOf(row.id);
+    if (change === null) continue;
+    let kept = row;
+    if (change) {
+      kept = pickVersion(change, kept, 'incoming', readOnly);
+      recentChanges.delete(row.id);
+    }
+    const mine = held.get(row.id);
+    out.push(mine ? pickVersion(mine, kept, onEven, readOnly) : kept);
+  }
+  return out;
+}
+
+/** An older page (`before`) in front of the rows shown; a row both hold keeps the copy shown unless the page's is provably newer. */
+function withOlderPage(page: readonly Message[], shown: readonly Message[]): Message[] {
+  const resolved = resolvePage(page, shown, 'held');
+  const shownIds = new Set(shown.map((m) => m.id));
+  const both = new Map(resolved.filter((m) => shownIds.has(m.id)).map((m) => [m.id, m]));
+  return [...resolved.filter((m) => !shownIds.has(m.id)), ...shown.map((m) => both.get(m.id) ?? m)];
+}
+
+/**
+ * What addMessage did with a row: `added` (a new row of the view), `held`
+ * (the view shows a row of that id already) or `dropped` (it shows none:
+ * another scope's view or none, a message deleted on the server meanwhile,
+ * or an earlier view's row the view on screen does not hold).
+ */
+export type RowLanding = 'added' | 'held' | 'dropped';
+
 interface ChatState {
   messages: Message[];
+  /**
+   * The channel or conversation `messages` belong to, or null (none yet).
+   * Written by the store alone: every fetch records what it asks for (a new
+   * view when it differs), a clear and a logout record none.
+   */
+  viewScope: ChatViewScope | null;
   hasMore: boolean;
   hasMoreAfter: boolean;
   isLoading: boolean;
@@ -61,11 +296,40 @@ interface ChatState {
   editDMMessage: (conversationId: string, messageId: string, content: string) => Promise<void>;
   requestDeleteDMMessage: (conversationId: string, messageId: string) => Promise<void>;
   toggleDMReaction: (conversationId: string, messageId: string, emoji: string) => Promise<void>;
-  addMessage: (message: Message) => void;
-  updateMessage: (message: Message) => void;
-  updateMessageReactions: (messageId: string, reactions: ReactionGroup[]) => void;
-  deleteMessage: (messageId: string) => void;
-  /** Drops every loaded row a webhook posted in a channel (`message:bulk_deleted`, a webhook deleted with purge). */
+  /**
+   * A new row written for `scope` (the channel or conversation the caller
+   * sent to, or the socket event names), where its `createdAt` puts it. It
+   * answers what became of it (RowLanding): `added` as a new row; `held` when
+   * the view shows a row of that id already (kept, unless this copy is
+   * provably newer), also when `view` (chatViewEpoch, noted when the event
+   * arrived) is an earlier view than the one on screen, whose page brought
+   * the row in (nothing of this copy is applied then); `dropped` for another
+   * scope than the view's (or none recorded), a message deleted since, or an
+   * earlier `view` whose row the view on screen does not show. The sender's
+   * own row passes no `view`: it lands in the scope it was sent to whenever
+   * that is the view's.
+   */
+  addMessage: (message: Message, scope: ChatViewScope, view?: number) => RowLanding;
+  /**
+   * A row's new version, written for `scope`; true when the view shows it.
+   * Nothing for another scope (not kept either) or an earlier `view`; a
+   * provably newer version held stands, a deleted message stays out, and a
+   * row the view does not show yet is remembered for its insert or its page.
+   */
+  updateMessage: (message: Message, scope: ChatViewScope, view?: number) => boolean;
+  /** A row's reactions, for `scope` (nothing for another one). */
+  updateMessageReactions: (messageId: string, reactions: ReactionGroup[], scope: ChatViewScope) => void;
+  /**
+   * Removes a row the view holds. `deletedOnServerIn`: the server deleted it
+   * in that channel or conversation (a socket delete): nothing for another
+   * one, and no insert, edit or page still on its way brings it back to this
+   * view. Without it, a local removal (a cleared floor) that remembers nothing.
+   */
+  deleteMessage: (messageId: string, opts?: { deletedOnServerIn: ChatViewScope }) => void;
+  /**
+   * Drops every loaded row a webhook posted in a channel (`message:bulk_deleted`,
+   * a webhook deleted with purge), when the view is of that channel.
+   */
   removeWebhookMessages: (channelId: string, webhookId: string) => void;
   clearMessages: () => void;
   clearTargetMessage: () => void;
@@ -77,6 +341,7 @@ interface ChatState {
 
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
+  viewScope: null,
   hasMore: false,
   hasMoreAfter: false,
   isLoading: false,
@@ -92,6 +357,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clearReplyingTo: () => set({ replyingTo: null }),
 
   fetchMessages: async (channelId: string, before?: string) => {
+    // the view is of this channel from here on: another one's rows, kept
+    // changes and page in flight go first
+    viewFor(channelView(channelId));
     // Deduplicate: skip if same request is already in-flight
     const fetchKey = `${channelId}:${before || 'initial'}`;
     if (fetchKey === lastFetchKey && get().isLoading) return;
@@ -122,18 +390,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (controller.signal.aborted) return;
 
       if (before) {
-        // Prepend older messages, dedup by ID
-        set((state) => {
-          const existingIds = new Set(state.messages.map((m) => m.id));
-          const uniqueNew = newMessages.filter((m: Message) => !existingIds.has(m.id));
-          return {
-            messages: [...uniqueNew, ...state.messages],
-            hasMore: data.hasMore,
-            isLoading: false,
-          };
-        });
+        set({ messages: withOlderPage(newMessages, get().messages), hasMore: data.hasMore, isLoading: false });
       } else {
-        set({ messages: newMessages, hasMore: data.hasMore, hasMoreAfter: false, isLoading: false });
+        set({ messages: resolvePage(newMessages, get().messages, 'incoming'), hasMore: data.hasMore, hasMoreAfter: false, isLoading: false });
       }
     } catch (err) {
       if (axios.isCancel(err)) return;
@@ -148,6 +407,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   fetchMessagesAround: async (channelId: string, messageId: string) => {
+    viewFor(channelView(channelId));
     if (activeFetchController) {
       activeFetchController.abort();
     }
@@ -168,7 +428,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (controller.signal.aborted) return;
 
       set({
-        messages: around,
+        messages: resolvePage(around, get().messages, 'incoming'),
         hasMore: data.hasMore,
         hasMoreAfter: data.hasMoreAfter ?? false,
         targetMessageId: data.targetMessageId ?? messageId,
@@ -192,6 +452,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     attachments?: Omit<Attachment, 'id' | 'expired'>[],
     e2eAttachments?: E2EAttachmentMeta[],
   ) => {
+    // its own row lands when the view is of this channel at the POST's answer
+    // (a reload of the channel meanwhile included: its page may have been
+    // read before the message was), and in no other channel or conversation
+    const sentTo = channelView(channelId);
     try {
       const replyingTo = get().replyingTo;
 
@@ -227,13 +491,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         await cacheSentChannelPlaintext(raw.id, channelId, prepared.plaintext, null, raw.createdAt, prepared.position);
         // Built from what this client knows, not from the server's reply:
         // whichever of this row and the gated socket echo lands first owns
-        // the id (the other is dropped by the dedupe here or in addMessage),
-        // so nothing the server put in the POST response may ride on it
-        const sent = ownSentRow(raw, { content, replyingTo, e2eAttachments });
-        const exists = get().messages.some((m) => m.id === sent.id);
-        if (!exists) {
-          set((state) => ({ messages: [...state.messages, sent] }));
-        }
+        // the id (the other is dropped by addMessage's dedupe), so nothing
+        // the server put in the POST response may ride on it
+        get().addMessage(ownSentRow(raw, { content, replyingTo, e2eAttachments }), sentTo);
       } else {
         const body: Record<string, unknown> = { content };
         if (replyingTo) body.replyToId = replyingTo.id;
@@ -241,10 +501,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         const { data } = await api.post(`/channels/${channelId}/messages`, body);
         // The message will be added via WebSocket, but we also handle it here as fallback
-        const exists = get().messages.some((m) => m.id === data.data.id);
-        if (!exists) {
-          set((state) => ({ messages: [...state.messages, data.data] }));
-        }
+        get().addMessage(data.data, sentTo);
       }
 
       if (replyingTo) set({ replyingTo: null });
@@ -290,6 +547,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   fetchDMMessages: async (conversationId: string, before?: string) => {
+    // the view is of this conversation from here on: a channel's or another
+    // conversation's rows, kept changes and page in flight go first
+    viewFor(conversationView(conversationId));
     const fetchKey = `dm:${conversationId}:${before || 'initial'}`;
     if (fetchKey === lastFetchKey && get().isLoading) return;
 
@@ -316,17 +576,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (controller.signal.aborted) return;
 
       if (before) {
-        set((state) => {
-          const existingIds = new Set(state.messages.map((m) => m.id));
-          const uniqueNew = newMessages.filter((m: Message) => !existingIds.has(m.id));
-          return {
-            messages: [...uniqueNew, ...state.messages],
-            hasMore: data.hasMore,
-            isLoading: false,
-          };
-        });
+        set({ messages: withOlderPage(newMessages, get().messages), hasMore: data.hasMore, isLoading: false });
       } else {
-        set({ messages: newMessages, hasMore: data.hasMore, hasMoreAfter: false, isLoading: false });
+        set({ messages: resolvePage(newMessages, get().messages, 'incoming'), hasMore: data.hasMore, hasMoreAfter: false, isLoading: false });
       }
     } catch (err) {
       if (axios.isCancel(err)) return;
@@ -341,6 +593,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   fetchDMMessagesAround: async (conversationId: string, messageId: string) => {
+    viewFor(conversationView(conversationId));
     if (activeFetchController) {
       activeFetchController.abort();
     }
@@ -359,7 +612,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (controller.signal.aborted) return;
 
       set({
-        messages: decrypted,
+        messages: resolvePage(decrypted, get().messages, 'incoming'),
         hasMore: data.hasMore,
         hasMoreAfter: data.hasMoreAfter ?? false,
         targetMessageId: data.targetMessageId ?? messageId,
@@ -381,6 +634,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // a read-only conversation takes no message: refused before anything is
     // encrypted or sent (no typing signal either)
     if (isConversationReadOnly(conversationId)) throw new DMConversationReadOnlyError(conversationId);
+    // its own row lands when the view is of this conversation at the POST's
+    // answer, and in no other conversation or channel (sendMessage's rule)
+    const sentTo = conversationView(conversationId);
     try {
       const replyingTo = get().replyingTo;
 
@@ -407,11 +663,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await cacheSentPlaintext(raw.id, conversationId, prepared.plaintext, null, raw.createdAt, prepared.position);
       // Built from what this client knows, not from the server's reply (same
       // rule as the secure-channel branch of sendMessage)
-      const sent = ownSentRow(raw, { content, replyingTo, e2eAttachments });
-      const exists = get().messages.some((m) => m.id === sent.id);
-      if (!exists) {
-        set((state) => ({ messages: [...state.messages, sent] }));
-      }
+      get().addMessage(ownSentRow(raw, { content, replyingTo, e2eAttachments }), sentTo);
 
       if (replyingTo) set({ replyingTo: null });
 
@@ -467,20 +719,55 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  addMessage: (message: Message) => {
-    set((state) => {
-      if (state.messages.some((m) => m.id === message.id)) return state;
-      return { messages: [...state.messages, message] };
-    });
+  addMessage: (message: Message, scope: ChatViewScope, view?: number) => {
+    // written for another channel or conversation than the view's rows belong to
+    if (!isViewOf(scope)) return 'dropped';
+    // deleted on the server meanwhile
+    const change = recentChangeOf(message.id);
+    if (change === null) return 'dropped';
+    const { messages } = get();
+    const index = messages.findIndex((m) => m.id === message.id);
+    // gated for an earlier view: nothing of this copy applies, but the view
+    // on screen may show the row already (its page brought it in)
+    if (view !== undefined && view !== viewEpoch) return index === -1 ? 'dropped' : 'held';
+    const readOnly = viewHeldReadOnly();
+    if (index !== -1) {
+      const kept = pickVersion(messages[index], message, 'held', readOnly);
+      if (kept !== messages[index]) set({ messages: replacedAt(messages, index, kept) });
+      return 'held';
+    }
+    let row = message;
+    if (change) {
+      // an edit that arrived before its insert landed
+      row = pickVersion(change, message, 'incoming', readOnly);
+      recentChanges.delete(message.id);
+    }
+    set({ messages: placedByTime(messages, row) });
+    return 'added';
   },
 
-  updateMessage: (message: Message) => {
-    set((state) => ({
-      messages: state.messages.map((m) => (m.id === message.id ? message : m)),
-    }));
+  updateMessage: (message: Message, scope: ChatViewScope, view?: number) => {
+    // another channel's or conversation's edit is neither shown nor kept
+    if (!isViewOf(scope)) return false;
+    if (view !== undefined && view !== viewEpoch) return false;
+    const change = recentChangeOf(message.id);
+    if (change === null) return false;
+    const readOnly = viewHeldReadOnly();
+    const { messages } = get();
+    const index = messages.findIndex((m) => m.id === message.id);
+    if (index === -1) {
+      // not shown yet: its insert, or a page, may still be on its way
+      rememberChange(message.id, change ? pickVersion(change, message, 'incoming', readOnly) : message);
+      return false;
+    }
+    const kept = pickVersion(messages[index], message, 'incoming', readOnly);
+    if (kept === messages[index]) return false;
+    set({ messages: replacedAt(messages, index, kept) });
+    return true;
   },
 
-  updateMessageReactions: (messageId: string, reactions: ReactionGroup[]) => {
+  updateMessageReactions: (messageId: string, reactions: ReactionGroup[], scope: ChatViewScope) => {
+    if (!isViewOf(scope)) return;
     set((state) => ({
       messages: state.messages.map((m) =>
         m.id === messageId ? { ...m, reactions } : m
@@ -488,13 +775,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  deleteMessage: (messageId: string) => {
-    set((state) => ({
-      messages: state.messages.filter((m) => m.id !== messageId),
-    }));
+  deleteMessage: (messageId: string, opts?: { deletedOnServerIn: ChatViewScope }) => {
+    if (opts) {
+      // the server's delete in another channel or conversation: nothing here
+      if (!isViewOf(opts.deletedOnServerIn)) return;
+      rememberChange(messageId, null);
+    }
+    const { messages } = get();
+    if (!messages.some((m) => m.id === messageId)) return;
+    set({ messages: messages.filter((m) => m.id !== messageId) });
   },
 
   removeWebhookMessages: (channelId: string, webhookId: string) => {
+    // the view is of that channel, or holds nothing of it
+    if (!isViewOf(channelView(channelId))) return;
     // BOTH ids must match: chatStore is shared with DMs, and another
     // webhook's rows (or a human's) in the same channel stay
     const quotedAuthorId = WEBHOOK_AUTHOR_ID_PREFIX + webhookId;
@@ -511,18 +805,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   clearMessages: () => {
-    // Abort any in-flight fetch when switching channels
-    if (activeFetchController) {
-      activeFetchController.abort();
-      activeFetchController = null;
-    }
-    lastFetchKey = '';
-
-    // Clear all typing timers
-    typingTimers.forEach((timer) => clearTimeout(timer));
-    typingTimers.clear();
-
-    set({ messages: [], hasMore: false, hasMoreAfter: false, isLoading: false, typingUsers: new Map(), replyingTo: null, targetMessageId: null });
+    // another view, of nothing until a fetch names its channel or conversation:
+    // the fetch in flight is aborted, what this one remembered goes, and
+    // nothing gated for it lands
+    startView(null);
   },
 
   clearTargetMessage: () => set({ targetMessageId: null }),

@@ -1,5 +1,6 @@
 import { Permissions, hasPermission } from '@voxium/shared';
 import type { Role, ServerMember } from '@voxium/shared';
+import { compareRoles } from './roleOrder';
 
 /**
  * Which moderation controls the viewer is shown for another member, decided
@@ -111,7 +112,7 @@ export function memberRules(ctx: ModerationContext): MemberRules {
     assignableRoles: () =>
       ctx.roles
         .filter((r) => !r.isDefault && r.position < ctx.actorPosition)
-        .sort((a, b) => b.position - a.position),
+        .sort((a, b) => compareRoles(b, a)),
     canSetNickname: (t) => holds(ctx, Permissions.MANAGE_NICKNAMES) && mayActOn(ctx, t),
     canChangeOwnNickname: () => holds(ctx, Permissions.CHANGE_NICKNAME),
     canServerMute: (t, channelBits) => holds(ctx, Permissions.MUTE_MEMBERS, channelBits) && mayActOn(ctx, t),

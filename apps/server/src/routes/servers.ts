@@ -208,7 +208,7 @@ serverRouter.get('/:serverId', async (req: Request<{ serverId: string }>, res: R
         // id breaks position ties, as in the create's read-back
         channels: { orderBy: [{ position: 'asc' }, { id: 'asc' }] },
         categories: { orderBy: [{ position: 'asc' }, { id: 'asc' }] },
-        roles: { orderBy: { position: 'asc' } },
+        roles: { orderBy: [{ position: 'asc' }, { id: 'asc' }] },
         _count: { select: { members: true } },
       },
     });
@@ -273,7 +273,10 @@ const memberRowInclude = {
   user: {
     select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true, status: true, role: true, isSupporter: true, supporterTier: true, createdAt: true },
   },
-  memberRoles: { include: { role: true } },
+  // A member's roles in one fixed order: by role id, the last column of
+  // their primary key; a client that shows them ranked orders them by
+  // position itself
+  memberRoles: { include: { role: true }, orderBy: { roleId: 'asc' } },
 } as const;
 
 type MemberRow = Prisma.ServerMemberGetPayload<{ include: typeof memberRowInclude }>;

@@ -18,6 +18,7 @@ import {
   noteQuoteAwaiting,
   quoteAwaits,
   resetUndecryptedRows,
+  isNewerVersion,
 } from '../../services/e2e/undecryptedRows';
 
 /**
@@ -248,5 +249,33 @@ describe('rows held to be decrypted again', () => {
     syncWithView('c1', [shown(m1)]);
     expect(hasDueRows('c1')).toBe(false);
     expect(quoteAwaits(quote, 'c1', 'm1')).toBe(false);
+  });
+});
+
+describe("the order of a message's versions (isNewerVersion)", () => {
+  const v = (over: Partial<Message>) => wire('m1', 'c2lkQQ', over);
+  const EARLY = '2026-11-01T10:00:00.000Z';
+  const LATE = '2026-11-01T10:00:00.500Z';
+
+  it('an edit is newer than the original, a later edit newer than an earlier one, compared as times', () => {
+    expect(isNewerVersion(v({ editedAt: EARLY }), v({ editedAt: null }))).toBe(true);
+    expect(isNewerVersion(v({ editedAt: LATE }), v({ editedAt: EARLY }))).toBe(true);
+    expect(isNewerVersion(v({ editedAt: EARLY }), v({ editedAt: LATE }))).toBe(false);
+    // the same instant written another way is the same edit, not a newer one
+    expect(isNewerVersion(v({ editedAt: '2026-11-01T10:00:00Z' }), v({ editedAt: EARLY }))).toBe(false);
+    expect(isNewerVersion(v({ editedAt: '2026-11-01T11:00:00.000+01:00' }), v({ editedAt: LATE }))).toBe(false);
+  });
+
+  it('the original is never newer, nor the same edit', () => {
+    expect(isNewerVersion(v({ editedAt: null }), v({ editedAt: EARLY }))).toBe(false);
+    expect(isNewerVersion(v({ editedAt: null }), v({ editedAt: null }))).toBe(false);
+    expect(isNewerVersion(v({ editedAt: EARLY }), v({ editedAt: EARLY }))).toBe(false);
+  });
+
+  it('proves nothing across messages, across authors, or with a time that does not parse', () => {
+    expect(isNewerVersion(wire('m2', 'c2lkQQ', { editedAt: LATE }), v({ editedAt: null }))).toBe(false);
+    expect(isNewerVersion(v({ editedAt: LATE, author: { ...peer, id: 'someone-else' } } as Partial<Message>), v({ editedAt: null }))).toBe(false);
+    expect(isNewerVersion(v({ editedAt: 'yesterday' }), v({ editedAt: null }))).toBe(false);
+    expect(isNewerVersion(v({ editedAt: LATE }), v({ editedAt: 'yesterday' }))).toBe(false);
   });
 });

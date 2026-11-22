@@ -62,7 +62,7 @@ import {
 import { watchKeyArrivals, redecryptPassesSettled } from '../../services/e2e/redecryptOnKeyArrival';
 import { RETRY_AFTER_VIEW_CHANGES } from '../../services/e2e/undecryptedRows';
 import { decryptMessageForDisplay, decryptMessagesForDisplay, DECRYPT_FAILED_CONTENT } from '../../services/e2e/dmCrypto';
-import { useChatStore } from '../../stores/chatStore';
+import { useChatStore, conversationView } from '../../stores/chatStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
 import type { Message } from '@voxium/shared';
@@ -7975,6 +7975,8 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
     display.userId = bobId;
     useServerStore.setState({ activeServerId: null, activeChannelId: null });
     useDMStore.setState({ activeConversationId: 'c1' });
+    // the chat store's view of it, as its fetch records it
+    useChatStore.setState({ viewScope: conversationView('c1') });
     const stop = watchKeyArrivals(bobId, bob);
     const realNow = Date.now.bind(Date);
     let later: { mockRestore(): void } | undefined;
@@ -8025,7 +8027,7 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
       warn.mockRestore();
       display.service = null;
       display.userId = null;
-      useChatStore.setState({ messages: [] });
+      useChatStore.setState({ messages: [], viewScope: null });
       useDMStore.setState({ activeConversationId: null });
     }
   });
@@ -8062,6 +8064,8 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
     display.userId = bobId;
     useServerStore.setState({ activeServerId: null, activeChannelId: null });
     useDMStore.setState({ activeConversationId: 'c1' });
+    // the chat store's view of it, as its fetch records it
+    useChatStore.setState({ viewScope: conversationView('c1') });
     const stop = watchKeyArrivals(bobId, bob);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -8096,7 +8100,7 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
 
       // tried again after a few changes of the view, not at each
       for (let change = 1; change <= RETRY_AFTER_VIEW_CHANGES; change++) {
-        useChatStore.getState().addMessage(rowOf(`n${change}`, 'c1', 'a notice of some kind', false));
+        useChatStore.getState().addMessage(rowOf(`n${change}`, 'c1', 'a notice of some kind', false), conversationView('c1'));
         await redecryptPassesSettled();
         if (change < RETRY_AFTER_VIEW_CHANGES) expect(writes).toBe(2);
       }
@@ -8107,7 +8111,7 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
       warn.mockRestore();
       display.service = null;
       display.userId = null;
-      useChatStore.setState({ messages: [] });
+      useChatStore.setState({ messages: [], viewScope: null });
       useDMStore.setState({ activeConversationId: null });
     }
   });

@@ -34,7 +34,7 @@ vi.mock('../../services/e2e/channelCrypto', async (importOriginal) => {
   };
 });
 
-import { useChatStore } from '../../stores/chatStore';
+import { useChatStore, channelView } from '../../stores/chatStore';
 import { prepareOutgoingChannelMessage, decryptChannelMessagesForDisplay } from '../../services/e2e/channelCrypto';
 import { activateSecurePins, deactivateSecurePins, forgetSecurePins, pinSecure } from '../../utils/securePins';
 
@@ -60,6 +60,8 @@ describe('chatStore honours the secure-channel pin', () => {
   it('a pinned channel the server now lists as plaintext still sends encrypted', async () => {
     channels.push({ id: 'ch1', secure: false });
     pinSecure('ch1');
+    // the channel's view, as its fetch records it
+    useChatStore.setState({ viewScope: channelView('ch1') });
     apiPost.mockResolvedValue({ data: { data: sentRow } });
 
     await useChatStore.getState().sendMessage('ch1', 'hello');

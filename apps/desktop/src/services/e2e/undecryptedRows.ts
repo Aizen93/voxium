@@ -86,6 +86,22 @@ export function versionKey(row: Message): string {
   return `${row.id}|${row.editedAt ?? ''}|${row.author?.id ?? ''}`;
 }
 
+/**
+ * Whether `a` is provably a newer version than `b` of the same message: the
+ * same id and author, `a` edited at a time that parses, and `b` the original
+ * (no edit) or edited at a time that parses and is earlier. Times are compared
+ * as times. Anything else (another author, a time that does not parse, the
+ * same edit) proves nothing, and the caller keeps its own rule for it.
+ */
+export function isNewerVersion(a: Message, b: Message): boolean {
+  if (a.id !== b.id || (a.author?.id ?? null) !== (b.author?.id ?? null)) return false;
+  const edited = a.editedAt ? Date.parse(a.editedAt) : Number.NaN;
+  if (!Number.isFinite(edited)) return false;
+  if (!b.editedAt) return true;
+  const before = Date.parse(b.editedAt);
+  return Number.isFinite(before) && before < edited;
+}
+
 /** Whether a row belongs to `scope`: a channel's by its channel, a conversation's by its conversation. */
 export function rowInScope(row: Message, scope: string): boolean {
   const parsed = parseE2EScope(scope);

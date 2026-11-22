@@ -139,6 +139,23 @@ export function violatesForeignKey(err: unknown, constraint: string): boolean {
   return named.some((v) => typeof v === 'string' && v.includes(constraint));
 }
 
+/**
+ * A unique violation (P2002) of the index `index` names (that name exactly,
+ * or any name the predicate accepts), as the driver names the index: the pg
+ * adapter's `meta.driverAdapterError.cause.constraint.index`, or `meta.target`
+ * when it is a string. A violation of any other index is not one.
+ */
+export function violatesUniqueIndex(err: unknown, index: string | ((name: string) => boolean)): boolean {
+  const e = err as {
+    code?: unknown;
+    meta?: { target?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } };
+  } | null;
+  if (e?.code !== 'P2002') return false;
+  const matches = typeof index === 'string' ? (name: string) => name === index : index;
+  const named = [e.meta?.driverAdapterError?.cause?.constraint?.index, e.meta?.target];
+  return named.some((v) => typeof v === 'string' && matches(v));
+}
+
 /** Parse a date string query parameter, throwing BadRequestError if invalid. */
 export function parseDateParam(value: string, name = 'date'): Date {
   const date = new Date(value);

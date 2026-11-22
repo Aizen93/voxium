@@ -1641,6 +1641,7 @@
     "cannotModifyHigherMember": "同じか上位のロールのメンバーのロールは変更できません",
     "cannotReorderHigherRoles": "自分と同等以上のロールは並べ替えられません",
     "cannotSetHigherPosition": "ロールを自分と同じ位置以上に移動することはできません",
+    "cannotCreateRoleTooLow": "ロールの順序で自分のロールが低すぎるため、ロールを作成できません",
     "cannotModifyHigherOverrides": "自分と同等以上のロールの上書き設定は変更できません",
     "cannotSetHigherOverrides": "自分と同等以上のロールには上書き設定を行えません",
     "cannotOverrideUnheldPermissions": "自分が持っていない権限の上書き設定はできません",

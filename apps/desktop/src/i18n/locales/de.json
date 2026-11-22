@@ -1644,6 +1644,7 @@
     "cannotModifyHigherMember": "Die Rollen eines Mitglieds mit gleicher oder höherer Rolle können nicht geändert werden",
     "cannotReorderHigherRoles": "Du kannst keine Rollen neu anordnen, die gleich oder höher als deine eigene sind",
     "cannotSetHigherPosition": "Du kannst keine Rolle auf oder über deine eigene Position setzen",
+    "cannotCreateRoleTooLow": "Deine Rolle steht in der Rollenreihenfolge zu weit unten, um Rollen zu erstellen",
     "cannotModifyHigherOverrides": "Du kannst keine Überschreibungen für Rollen ändern, die gleich oder höher als deine eigene sind",
     "cannotSetHigherOverrides": "Du kannst keine Überschreibungen für Rollen festlegen, die gleich oder höher als deine eigene sind",
     "cannotOverrideUnheldPermissions": "Du kannst keine Überschreibungen für Berechtigungen festlegen, die du nicht hast",

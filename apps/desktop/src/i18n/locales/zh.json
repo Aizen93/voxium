@@ -1641,6 +1641,7 @@
     "cannotModifyHigherMember": "无法更改角色相同或更高的成员的角色",
     "cannotReorderHigherRoles": "无法调整与你同级或更高级别角色的顺序",
     "cannotSetHigherPosition": "无法将角色移动到与你同级或更高的位置",
+    "cannotCreateRoleTooLow": "你的角色在角色顺序中位置太低，无法创建角色",
     "cannotModifyHigherOverrides": "无法更改与你同级或更高级别角色的覆盖设置",
     "cannotSetHigherOverrides": "无法为与你同级或更高级别的角色设置覆盖",
     "cannotOverrideUnheldPermissions": "无法为你没有的权限设置覆盖",

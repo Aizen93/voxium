@@ -8,6 +8,7 @@ import type { ServerMember, MemberRole } from '@voxium/shared';
 import { LIMITS, MEMBER_LIST, MEMBER_DIRECTORY_ROLE_FILTERS, validateBanReason } from '@voxium/shared';
 import { useMemberRules } from '../../hooks/useMemberRules';
 import { getTranslatedError, translateServerError } from '../../utils/serverErrors';
+import { compareRoles } from '../../utils/roleOrder';
 
 /** Module-level constant so a selector for another server's list never allocates. */
 const NO_ROWS: ServerMember[] = [];
@@ -50,7 +51,7 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
   const [roleFilter, setRoleFilter] = useState<string | null>(null);
 
   // Every role can be filtered on; only those below the viewer can be handed out
-  const filterRoles = roles.filter((r) => !r.isDefault).sort((a, b) => b.position - a.position);
+  const filterRoles = roles.filter((r) => !r.isDefault).sort((a, b) => compareRoles(b, a));
   const assignableRoles = rules ? rules.assignableRoles() : [];
 
   // Typing settles before it becomes a request; the filter is immediate
@@ -225,7 +226,7 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
 
                 {/* Role pills (always visible) */}
                 <div className="flex flex-wrap gap-1 shrink-0 max-w-[180px] justify-end">
-                  {member.roles?.map((role) => (
+                  {[...(member.roles ?? [])].sort((a, b) => compareRoles(b, a)).map((role) => (
                     <span
                       key={role.id}
                       className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"

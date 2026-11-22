@@ -17,7 +17,7 @@ vi.mock('../../stores/serverStore', () => ({
   useServerStore: { getState: () => ({ channels: [], members: [], secureChannelMembers: {} }) },
 }));
 
-import { useChatStore } from '../../stores/chatStore';
+import { useChatStore, channelView } from '../../stores/chatStore';
 
 const human = { id: 'u-1', username: 'alice', displayName: 'Alice', avatarUrl: null };
 const hook = (webhookId: string, name = 'Deploy bot') =>
@@ -39,7 +39,8 @@ const fromHookAElsewhere = msg('a-other', { channelId: 'ch-2', author: hook('wh-
 const fromDeletedHook = msg('d1', { author: { ...hook('deleted'), id: 'webhook:deleted' }, webhookId: null, mentions: [] });
 
 beforeEach(() => {
-  useChatStore.setState({ messages: [fromHookA, fromHuman, fromHookB, fromHookA2, fromHookAElsewhere, fromDeletedHook] });
+  // the view of ch-1 (the purge applies to the view of its channel only)
+  useChatStore.setState({ messages: [fromHookA, fromHuman, fromHookB, fromHookA2, fromHookAElsewhere, fromDeletedHook], viewScope: channelView('ch-1') });
 });
 
 describe('chatStore.removeWebhookMessages', () => {
@@ -89,7 +90,7 @@ describe('chatStore.removeWebhookMessages — quotes of the purged rows', () => 
   const replyElsewhere = msg('r-other', { channelId: 'ch-2', replyToId: 'a-other', replyTo: quoteOf(fromHookAElsewhere) });
 
   beforeEach(() => {
-    useChatStore.setState({ messages: [fromHookA, fromHuman, fromHookB, replyToA, replyToB, replyToHuman, replyElsewhere] });
+    useChatStore.setState({ messages: [fromHookA, fromHuman, fromHookB, replyToA, replyToB, replyToHuman, replyElsewhere], viewScope: channelView('ch-1') });
   });
 
   it('a reply quoting the purged webhook loses its quote (replyTo AND replyToId null), the reply itself stays', () => {

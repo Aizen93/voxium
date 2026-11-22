@@ -1644,6 +1644,7 @@
     "cannotModifyHigherMember": "No se pueden cambiar los roles de un miembro con un rol igual o superior",
     "cannotReorderHigherRoles": "No se pueden reordenar roles de igual o mayor posición que el tuyo",
     "cannotSetHigherPosition": "No se puede mover un rol a tu posición o por encima",
+    "cannotCreateRoleTooLow": "Tu rol está demasiado abajo en el orden de roles para crear roles",
     "cannotModifyHigherOverrides": "No se pueden cambiar las excepciones de roles de igual o mayor posición que el tuyo",
     "cannotSetHigherOverrides": "No se pueden establecer excepciones para roles de igual o mayor posición que el tuyo",
     "cannotOverrideUnheldPermissions": "No se pueden establecer excepciones para permisos que no tienes",

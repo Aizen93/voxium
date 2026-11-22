@@ -927,42 +927,34 @@ async function run() {
     fail('Give Moderator MANAGE_ROLES', err);
   }
 
-  // Test 37: user1 tries to create a role at position above their own - should FAIL
+  // Test 37: a role user1 (Moderator, Manage Roles) creates goes strictly below
+  // them: one position below the Moderator role (a role already there shares
+  // it). No existing role moves, and user1 can then delete it
   try {
-    // Get user1's highest position
-    const { data: rolesData } = await axios.get(`${API}/servers/${serverId}/roles`, h(alice.token));
-    const modRole = rolesData.data.find((r: any) => r.id === moderatorRoleId);
+    const { data: beforeData } = await axios.get(`${API}/servers/${serverId}/roles`, h(alice.token));
+    const before: Array<{ id: string; position: number }> = beforeData.data;
+    const expected = before.find((r) => r.id === moderatorRoleId)!.position - 1;
 
-    // Try to create a role - it should be placed below user1's highest role
-    // The server enforces that new roles are created at a position below the actor's highest
-    // So user1 can create roles, but they'll always be below their position.
-    // The hierarchy enforcement is about the resulting position, not what you request.
-    // Let's just verify user1 CAN create a role (it will be below their own position)
-    const perms = Permissions.VIEW_CHANNEL;
     const { data } = await axios.post(
       `${API}/servers/${serverId}/roles`,
-      { name: 'TestRole', permissions: permStr(perms) },
+      { name: 'TestRole', permissions: permStr(Permissions.VIEW_CHANNEL) },
       h(user1.token),
     );
     const newRoleId = data.data.id;
-    const newRolePos = data.data.position;
+    if (data.data.position !== expected) throw new Error(`new role at ${data.data.position}, expected ${expected}`);
 
-    if (newRolePos < modRole.position) {
-      pass('user1 creates a role (position is below their own as enforced by hierarchy)');
-    } else {
-      // This is acceptable too - the server clamps the position
-      pass('user1 creates a role (position clamped by server)');
+    const { data: afterData } = await axios.get(`${API}/servers/${serverId}/roles`, h(alice.token));
+    const after: Array<{ id: string; position: number }> = afterData.data;
+    for (const role of before) {
+      const now = after.find((r) => r.id === role.id)?.position;
+      if (now !== role.position) throw new Error(`role ${role.id} at ${now}, expected ${role.position}`);
     }
 
-    // Clean up the test role
+    // Below them, so theirs to delete
     await axios.delete(`${API}/servers/${serverId}/roles/${newRoleId}`, h(user1.token));
+    pass('user1 creates a role one below their own, no other role moves, and they can delete it');
   } catch (err) {
-    const status = (err as AxiosError)?.response?.status;
-    if (status === 403) {
-      pass('user1 CANNOT create role above own position (403)');
-    } else {
-      fail('Role hierarchy - create above own position', err);
-    }
+    fail('Role creation below the creator', err);
   }
 
   // Test 38: user1 tries to delete a role above their position - should FAIL

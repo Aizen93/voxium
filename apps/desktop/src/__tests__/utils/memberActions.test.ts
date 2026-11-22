@@ -163,6 +163,15 @@ describe('assignableRoles', () => {
     expect(memberRules(ctx).assignableRoles().map((r) => r.id)).toEqual(['high', 'mid', 'low']);
   });
 
+  it('roles that share a position are listed in one order (by id, reversed with the list), whatever the order of the space\'s list', () => {
+    const tieB = role('tie-b', 3);
+    const tieA = role('tie-a', 3);
+    for (const own of [[everyone, tieB, tieA, low, high], [high, low, tieA, everyone, tieB]]) {
+      const ctx = buildModerationContext({ actorId: 'me', actor: ref('me'), ownerId: 'me', bits: ALL_PERMISSIONS, roles: own });
+      expect(memberRules(ctx).assignableRoles().map((r) => r.id)).toEqual(['high', 'tie-b', 'tie-a', 'low']);
+    }
+  });
+
   it('does not reorder the own list of the space', () => {
     const own = [low, high, mid];
     const ctx = buildModerationContext({ actorId: 'me', actor: ref('me'), ownerId: 'me', bits: ALL_PERMISSIONS, roles: own });

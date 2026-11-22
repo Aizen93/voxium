@@ -330,6 +330,7 @@ const ERROR_MAP: Record<string, string> = {
   'Cannot modify roles of a member with an equal or higher role': 'cannotModifyHigherMember',
   'Cannot reorder roles at or above your own position': 'cannotReorderHigherRoles',
   'Cannot set a role position at or above your own': 'cannotSetHigherPosition',
+  'Your role is too low in the role order to create roles': 'cannotCreateRoleTooLow',
   'Cannot modify overrides for roles at or above your own position': 'cannotModifyHigherOverrides',
   'Cannot set overrides for roles at or above your own position': 'cannotSetHigherOverrides',
   'Cannot set overrides for permissions you do not have': 'cannotOverrideUnheldPermissions',

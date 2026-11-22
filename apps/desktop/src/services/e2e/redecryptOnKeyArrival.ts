@@ -22,7 +22,7 @@
 // so its static store imports form no cycle with resetStores.
 import { e2eChannelScope, parseE2EScope } from '@voxium/shared';
 import type { Message } from '@voxium/shared';
-import { useChatStore } from '../../stores/chatStore';
+import { useChatStore, channelView, conversationView, isSameView, type ChatViewScope } from '../../stores/chatStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
 import { decryptMessageForDisplay, quotedTextFromCache, resolveEncryptedPreview } from './dmCrypto';
@@ -88,6 +88,19 @@ async function heldReadOnly(scope: string): Promise<boolean> {
   return typeof marked === 'boolean' ? marked : await marked;
 }
 
+/**
+ * The chat view of an E2E scope: a secure channel's, or a conversation's. A
+ * write here goes only into a view whose recorded scope is the one the row
+ * was noted for (the screen and the view can differ until the view's fetch
+ * records it, and one id can name a channel and a conversation).
+ */
+function chatViewOf(scope: string): ChatViewScope {
+  const parsed = parseE2EScope(scope);
+  if (parsed.kind === 'channel') return channelView(parsed.channelId);
+  // a voice scope names no chat view: it matches none
+  return conversationView(parsed.kind === 'dm' ? parsed.conversationId : '');
+}
+
 /** The same version by the same author: the row a held one was gated as. */
 function sameVersion(a: Message, b: Message): boolean {
   return (a.editedAt ?? null) === (b.editedAt ?? null) && a.author?.id === b.author?.id;
@@ -97,13 +110,16 @@ const errorText = (err: unknown): unknown => (err instanceof Error ? err.message
 
 /**
  * Replace the marker of `heldRow` with what the gate opened, over that row
- * only while it still shows the marker for the same version: an edit, a
- * delete or a reload that landed meanwhile stands. The store's reactions and
- * author profile are kept; the held row's are as the server sent them then.
+ * only while the view is of `scope` (the one the row was noted for) and still
+ * shows the marker for the same version: an edit, a delete or a reload that
+ * landed meanwhile stands. The store's reactions and author profile are
+ * kept; the held row's are as the server sent them then.
  */
-function showOpened(heldRow: Message, opened: Message): boolean {
+function showOpened(scope: string, heldRow: Message, opened: Message): boolean {
   let shown = false;
+  const view = chatViewOf(scope);
   useChatStore.setState((state) => {
+    if (!isSameView(state.viewScope, view)) return state;
     const index = state.messages.findIndex((m) => m.id === heldRow.id);
     if (index === -1) return state;
     const latest = state.messages[index];
@@ -124,6 +140,7 @@ function showOpened(heldRow: Message, opened: Message): boolean {
  */
 async function refreshWhatShowsIt(scope: string, opened: Message, live: () => boolean): Promise<void> {
   const inChannel = parseE2EScope(scope).kind === 'channel';
+  const view = chatViewOf(scope);
   // the quotes of it the view shows that the gate left empty, as those very objects
   const quoting = useChatStore.getState().messages.filter(
     (m) => rowInScope(m, scope) && quoteAwaits(m.replyTo, scope, opened.id),
@@ -141,6 +158,8 @@ async function refreshWhatShowsIt(scope: string, opened: Message, live: () => bo
     if (!live() || scopeOnScreen() !== scope) return;
     if (text === null) continue;
     useChatStore.setState((state) => {
+      // the view of the scope the quote was noted for, nothing else
+      if (!isSameView(state.viewScope, view)) return state;
       const index = state.messages.findIndex((m) => m.id === row.id);
       const latest = index === -1 ? undefined : state.messages[index];
       // only over the quote that waited: a row gated again since shows another
@@ -217,7 +236,7 @@ async function retryDueRows(scope: string, live: () => boolean): Promise<void> {
     // the conversation turned read-only during the try: nothing of it is shown
     if (parseE2EScope(scope).kind !== 'channel' && (await heldReadOnly(scope))) return;
     if (!live() || scopeOnScreen() !== scope) return;
-    if (showOpened(heldRow, opened)) await refreshWhatShowsIt(scope, opened, live);
+    if (showOpened(scope, heldRow, opened)) await refreshWhatShowsIt(scope, opened, live);
   }
 }
 

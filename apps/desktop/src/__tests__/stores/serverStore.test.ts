@@ -1263,3 +1263,29 @@ describe('serverStore.uploadServerIcon — the presign is signed for the process
     expect(mockPatch).not.toHaveBeenCalled();
   });
 });
+
+describe('serverStore — the order of the space\'s roles', () => {
+  const roleAt = (id: string, position: number) =>
+    ({ id, serverId: 'srv-1', name: id, color: null, position, permissions: '0', isDefault: id === 'r-everyone', createdAt: '' });
+  const order = () => useServerStore.getState().roles.map((r) => r.id);
+
+  beforeEach(() => {
+    useServerStore.setState({ activeServerId: 'srv-1', roles: [] });
+  });
+
+  it('role:created: lowest first, a role that shares a position with another by id, whichever arrived first', () => {
+    for (const [held, created] of [['r-b', 'r-a'], ['r-a', 'r-b']] as const) {
+      useServerStore.setState({ roles: [roleAt('r-everyone', 0), roleAt(held, 3)] });
+      useServerStore.getState().handleRoleCreated('srv-1', roleAt(created, 3));
+      expect(order()).toEqual(['r-everyone', 'r-a', 'r-b']);
+    }
+  });
+
+  it('role:reordered: lowest first, a role moved beside another by id, whichever of the two moved', () => {
+    for (const [moved, still] of [['r-a', 'r-b'], ['r-b', 'r-a']] as const) {
+      useServerStore.setState({ roles: [roleAt('r-everyone', 0), roleAt(moved, 1), roleAt(still, 3)] });
+      useServerStore.getState().handleRoleReordered('srv-1', [{ id: moved, position: 3 }]);
+      expect(order()).toEqual(['r-everyone', 'r-a', 'r-b']);
+    }
+  });
+});
