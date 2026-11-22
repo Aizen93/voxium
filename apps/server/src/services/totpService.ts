@@ -7,6 +7,7 @@ import { BadRequestError, UnauthorizedError } from '../utils/errors';
 import { LIMITS } from '@voxium/shared';
 import { getRedis } from '../utils/redis';
 import { readEncryptionKey, ENCRYPTION_KEY_UNUSABLE_MESSAGE } from '../utils/secretBox';
+import { errorLabel } from '../utils/loggableError';
 
 const APP_NAME = 'Voxium';
 const ENCRYPTION_ALGO = 'aes-256-gcm';
@@ -78,11 +79,20 @@ async function hashBackupCodes(codes: string[]): Promise<string> {
   return JSON.stringify(hashed);
 }
 
+/**
+ * The stored backup codes as a list. Codes that cannot be read are lost to
+ * the account, so the loss is logged once per call, by the error's name only
+ * (a parse error's message quotes the stored text, which holds the hashes).
+ */
 function parseBackupCodes(raw: string): string[] {
   try {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.every((c) => typeof c === 'string')) return parsed;
-  } catch { /* malformed */ }
+    console.warn('[TOTP] Stored backup codes are not a list of strings; treating the account as having none');
+  } catch (err) {
+    const name = err instanceof Error ? err.name : typeof err;
+    console.warn(`[TOTP] Stored backup codes could not be parsed (${name}); treating the account as having none`);
+  }
   return [];
 }
 
@@ -230,14 +240,12 @@ function recordLocalUse(replayKey: string): boolean {
   return true;
 }
 
-/** Redis down or refusing the write, once a minute at most: the error's name and message, never the key (it holds the code) nor the account. */
+/** Redis down or refusing the write, once a minute at most: the error's name and string code, never its message (it can name the Redis host and port), the key (it holds the code) nor the account. */
 function warnReplayCheckUnavailable(err: unknown): void {
   const now = Date.now();
   if (now - lastReplayWarnAt < REPLAY_WARN_INTERVAL_MS) return;
   lastReplayWarnAt = now;
-  const name = err instanceof Error ? err.name : typeof err;
-  const message = err instanceof Error ? err.message : 'non-error value thrown';
-  console.warn(`[TOTP] Redis did not record the replay check (${name}: ${message}); codes are checked against this node's memory until it does`);
+  console.warn(`[TOTP] Redis did not record the replay check (${errorLabel(err)}); codes are checked against this node's memory until it does`);
 }
 
 /** Verify TOTP code during login */

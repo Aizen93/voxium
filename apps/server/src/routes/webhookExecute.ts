@@ -22,6 +22,7 @@ import { hashWebhookToken } from '../utils/webhookToken';
 import { openSecret } from '../utils/secretBox';
 import { renderDiscordPayload, type RenderedWebhookMessage } from '../utils/webhooks/discordPayload';
 import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/githubFormatter';
+import { describeCaughtError } from '../utils/loggableError';
 
 /**
  * The PUBLIC incoming-webhook execute route: `POST /api/v1/webhooks/:webhookId/:token`.
@@ -193,7 +194,7 @@ function openGitHubSecret(row: CredentialRow): string {
   } catch (err) {
     console.error('[Webhooks] Could not open a GitHub webhook secret', {
       webhookId: row.id,
-      error: err instanceof Error ? err.message : String(err),
+      error: describeCaughtError(err),
     });
     throw new ServiceUnavailableError('Webhook secret is unavailable');
   }
@@ -396,7 +397,7 @@ async function recordLastUsed(webhookId: string): Promise<void> {
   } catch (err) {
     console.warn('[Webhooks] Could not record lastUsedAt', {
       webhookId,
-      error: err instanceof Error ? err.message : String(err),
+      error: describeCaughtError(err),
     });
   }
 }

@@ -206,6 +206,17 @@ describe('attachmentCleanup — cluster lock', () => {
     expect(redisEval).not.toHaveBeenCalled();
   });
 
+  it('an object-store failure reaches the report and the result by its name and status, never its message', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(deleteMultipleFromS3).mockRejectedValueOnce(
+      Object.assign(new Error('connect ECONNREFUSED store.example:9000 (bucket private-bucket)'), { name: 'ServiceUnavailable', $metadata: { httpStatusCode: 503 } }),
+    );
+    const result = await runAttachmentCleanup();
+    expect(result).toMatchObject({ filesExpired: 0, error: 'The object store call failed (ServiceUnavailable, HTTP 503)' });
+    expect(JSON.stringify(sendCleanupReport.mock.calls)).not.toContain('store.example');
+    expect(sendCleanupReport).toHaveBeenCalledWith('ops@example.test', expect.objectContaining({ error: 'The object store call failed (ServiceUnavailable, HTTP 503)' }));
+  });
+
   it('a node that loses the SET NX race touches nothing and sends NO report', async () => {
     redisSet.mockResolvedValue(null);
     const result = await runAttachmentCleanup();

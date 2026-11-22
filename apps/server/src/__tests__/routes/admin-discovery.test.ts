@@ -394,7 +394,7 @@ describe('DELETE /admin/servers/:serverId', () => {
 
     it('a storage failure still answers 200 and audits', async () => {
       prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
-      mockDeleteMultipleFromS3.mockRejectedValueOnce(new Error('S3 unavailable'));
+      mockDeleteMultipleFromS3.mockRejectedValueOnce(Object.assign(new Error('S3 unavailable'), { name: 'ServiceUnavailable', $metadata: { httpStatusCode: 503 } }));
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         const res = await del('srv-1');
@@ -402,7 +402,7 @@ describe('DELETE /admin/servers/:serverId', () => {
         expect(res.status).toBe(200);
         expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'server.delete', targetId: 'srv-1' }));
         await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
-          '[Admin] Attachment file cleanup failed for space srv-1 (the orphan sweep will reclaim them):', 'S3 unavailable'));
+          '[Admin] Attachment file cleanup failed for space srv-1 (the orphan sweep will reclaim them):', 'ServiceUnavailable, HTTP 503'));
       } finally {
         warn.mockRestore();
       }

@@ -216,20 +216,20 @@ describe('deleteAttachmentBlobs', () => {
   });
 
   it('logs a storage failure with its message and never throws', async () => {
-    deleteMultipleFromS3.mockRejectedValueOnce(new Error('S3 unavailable'));
+    deleteMultipleFromS3.mockRejectedValueOnce(Object.assign(new Error('S3 unavailable'), { name: 'ServiceUnavailable', $metadata: { httpStatusCode: 503 } }));
 
     expect(() => deleteAttachmentBlobs([key(1)], '[T]', 'channel c')).not.toThrow();
 
     await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
-      '[T] Attachment file cleanup failed for channel c (the orphan sweep will reclaim them):', 'S3 unavailable'));
+      '[T] Attachment file cleanup failed for channel c (the orphan sweep will reclaim them):', 'ServiceUnavailable, HTTP 503'));
   });
 
   it('a storage client that throws synchronously is caught the same way', async () => {
-    deleteMultipleFromS3.mockImplementationOnce(() => { throw new Error('no client'); });
+    deleteMultipleFromS3.mockImplementationOnce(() => { throw Object.assign(new Error('no client'), { name: 'NoClient' }); });
 
     expect(() => deleteAttachmentBlobs([key(1)], '[T]', 'channel c')).not.toThrow();
 
     await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
-      '[T] Attachment file cleanup failed for channel c (the orphan sweep will reclaim them):', 'no client'));
+      '[T] Attachment file cleanup failed for channel c (the orphan sweep will reclaim them):', 'NoClient'));
   });
 });

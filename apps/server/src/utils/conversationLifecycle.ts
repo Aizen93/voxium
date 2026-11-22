@@ -16,6 +16,7 @@ import {
   type ConversationView,
   type SideReach,
 } from './conversationVisibility';
+import { describeCaughtError } from './loggableError';
 
 /**
  * The transactions that change one person's side of a direct conversation
@@ -200,7 +201,7 @@ export async function writeConversationMessage<T extends { createdAt: Date }>(
   try {
     await announce(committed.message, audience);
   } catch (err) {
-    console.error(`${LOG_PREFIX} A message was written in conversation ${conversationId}, but announcing it failed:`, err instanceof Error ? err.message : err);
+    console.error(`${LOG_PREFIX} A message was written in conversation ${conversationId}, but announcing it failed:`, describeCaughtError(err));
   }
 
   // The list order (`updatedAt`, both people's lists): the only write to the
@@ -210,7 +211,7 @@ export async function writeConversationMessage<T extends { createdAt: Date }>(
   try {
     await prisma.conversation.updateMany({ where: { id: conversationId }, data: { updatedAt: new Date() } });
   } catch (err) {
-    console.warn(`${LOG_PREFIX} The list order of conversation ${conversationId} was not moved after a new message:`, err instanceof Error ? err.message : err);
+    console.warn(`${LOG_PREFIX} The list order of conversation ${conversationId} was not moved after a new message:`, describeCaughtError(err));
   }
   return committed;
 }

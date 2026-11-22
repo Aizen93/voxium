@@ -4,6 +4,7 @@ import { withClusterLock, wasSkipped, lockToken, releaseLockIfOwned } from './da
 import { refreshTierThresholds, DISCOVERY_TIERS_KEY } from './discoveryTiers';
 import { bumpDiscoveryPageCache } from './discoveryPageCache';
 import { DISCOVERY_SCORE_WEIGHTS, JOIN_REQUEST_DECLINE_COOLDOWN_DAYS, JOIN_REQUEST_PENDING_TTL_DAYS } from '@voxium/shared';
+import { describeCaughtError } from './loggableError';
 
 // The directory's activity figures on a daily cycle
 // (docs/local/server-discovery-plan.html, "Statistics, daily cycle").
@@ -103,7 +104,7 @@ export async function runDiscoveryStatsCycle(): Promise<DiscoveryStatsRun | null
     }
     return result;
   } catch (err) {
-    console.error('[Discovery] Stats cycle failed:', err instanceof Error ? err.message : err);
+    console.error('[Discovery] Stats cycle failed:', describeCaughtError(err));
     return null;
   } finally {
     scheduleNext(nextDelay);
@@ -302,7 +303,7 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
   try {
     tiersMissing = (await getRedis().exists(DISCOVERY_TIERS_KEY)) === 0;
   } catch (err) {
-    console.warn('[Discovery] Could not check the tier cuts (next hour):', err instanceof Error ? err.message : err);
+    console.warn('[Discovery] Could not check the tier cuts (next hour):', describeCaughtError(err));
   }
 
   const claims = await claimHousekeeping();
@@ -316,12 +317,12 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
       console.log(`[Discovery] Tier cuts refreshed over ${cuts.population} active listed server(s)${cuts.thresholds ? '' : ' (below the minimum population: no badges)'}`);
     } catch (err) {
       await releaseLockIfOwned(getRedis(), DISCOVERY_HOUSEKEEPING_HOURLY_KEY, claims.hourly)
-        .catch((e) => console.warn('[Discovery] Hourly claim release failed (it expires on its own):', e instanceof Error ? e.message : e));
+        .catch((e) => console.warn('[Discovery] Hourly claim release failed (it expires on its own):', describeCaughtError(e)));
       // Both claims were taken up front: the daily work never starts now, so
       // its claim must not stay held for 20 h on the strength of a failed hour.
       if (claims.daily) {
         await releaseLockIfOwned(getRedis(), DISCOVERY_HOUSEKEEPING_DAILY_KEY, claims.daily)
-          .catch((e) => console.warn('[Discovery] Daily claim release failed (it expires on its own):', e instanceof Error ? e.message : e));
+          .catch((e) => console.warn('[Discovery] Daily claim release failed (it expires on its own):', describeCaughtError(e)));
       }
       throw err;
     }
@@ -330,7 +331,7 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
     try {
       await refreshTierThresholds();
     } catch (err) {
-      console.warn('[Discovery] Tier cuts refresh failed (badges wait for the next hour):', err instanceof Error ? err.message : err);
+      console.warn('[Discovery] Tier cuts refresh failed (badges wait for the next hour):', describeCaughtError(err));
     }
   }
   if (claims.daily) {
@@ -339,7 +340,7 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
       console.log(`[Discovery] Nightly drift correction: ${fixed.memberCounts} member count(s), ${fixed.listed} listing flag(s)`);
     } catch (err) {
       await releaseLockIfOwned(getRedis(), DISCOVERY_HOUSEKEEPING_DAILY_KEY, claims.daily)
-        .catch((e) => console.warn('[Discovery] Daily claim release failed (it expires on its own):', e instanceof Error ? e.message : e));
+        .catch((e) => console.warn('[Discovery] Daily claim release failed (it expires on its own):', describeCaughtError(e)));
       throw err;
     }
   }

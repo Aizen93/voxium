@@ -3,6 +3,7 @@ import { deleteMultipleFromS3 } from './s3';
 import { sendCleanupReport, describeEmailError } from './email';
 import { LIMITS } from '@voxium/shared';
 import { msUntilDailySlot, withClusterLock, wasSkipped, type ClusterLockSkip } from './dailySchedule';
+import { describeCaughtError, describeCaughtErrorWithStack, storeCall } from './loggableError';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
@@ -59,7 +60,7 @@ async function runCleanup() {
     retrySoon = wasSkipped(result) && result.skipped === 'unavailable';
   } catch (err) {
     // The pass logs its own failures; this only catches the lock plumbing.
-    console.error('[Cleanup] Attachment cleanup run failed:', err instanceof Error ? err.message : err);
+    console.error('[Cleanup] Attachment cleanup run failed:', describeCaughtError(err));
   } finally {
     if (retrySoon) scheduleRetry(); else scheduleNext(true);
   }
@@ -103,7 +104,7 @@ async function expireAttachmentsAndReport(): Promise<AttachmentCleanupResult> {
       if (toExpire.length === 0) break;
 
       // Delete S3 objects first to avoid orphaned storage if DB update succeeds but S3 fails
-      await deleteMultipleFromS3(toExpire.map((a) => a.s3Key));
+      await storeCall(() => deleteMultipleFromS3(toExpire.map((a) => a.s3Key)));
 
       // Mark as expired in DB (keep records for "File expired" UI placeholder)
       await prisma.messageAttachment.updateMany({
@@ -119,9 +120,8 @@ async function expireAttachmentsAndReport(): Promise<AttachmentCleanupResult> {
       console.log(`[Cleanup] Expired ${totalExpired} attachments`);
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    error = msg;
-    console.error('[Cleanup] Attachment cleanup error:', err);
+    error = describeCaughtError(err);
+    console.error('[Cleanup] Attachment cleanup error:', describeCaughtErrorWithStack(err));
   }
 
   // Send report email

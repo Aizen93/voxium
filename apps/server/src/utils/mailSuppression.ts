@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { canonicalizeEmail } from '@voxium/shared';
 import { prisma } from './prisma';
 import { isJwtVerifyError } from './jwtErrors';
+import { describeCaughtError } from './loggableError';
 
 /**
  * The mail suppression list: "Not you? Block Voxium mail to this address".
@@ -113,7 +114,7 @@ export async function isMailSuppressed(email: string): Promise<boolean> {
     });
     return row !== null;
   } catch (err) {
-    console.warn('[MailSuppression] Lookup failed (allowing send):', err instanceof Error ? err.message : err);
+    console.warn('[MailSuppression] Lookup failed (allowing send):', describeCaughtError(err));
     return false;
   }
 }

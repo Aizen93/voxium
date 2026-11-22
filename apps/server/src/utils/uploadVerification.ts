@@ -16,6 +16,7 @@ import crypto from 'crypto';
 import { headS3Object, getS3ObjectRange, deleteFromS3, copyS3Object, setS3ObjectContentType } from './s3';
 import { imageDimensions } from './imageHeader';
 import { BadRequestError } from './errors';
+import { describeStoreError } from './loggableError';
 
 /** Bytes read from the start of an avatar/icon to check its header. */
 export const IMAGE_HEADER_PROBE_BYTES = 64;
@@ -23,7 +24,7 @@ export const IMAGE_HEADER_PROBE_BYTES = 64;
 async function discardUpload(key: string, reason: string): Promise<void> {
   console.warn(`[Uploads] Refusing uploaded object ${key}: ${reason}`);
   await deleteFromS3(key).catch((err) => {
-    console.warn(`[Uploads] Failed to delete refused object ${key}:`, err instanceof Error ? err.message : err);
+    console.warn(`[Uploads] Failed to delete refused object ${key}:`, describeStoreError(err));
   });
 }
 
@@ -138,7 +139,7 @@ export async function adoptImageAssetUpload(
   if (!(await copyS3Object(uploadedKey, adoptedKey))) throw new BadRequestError(errorMessage);
   // From here the uploaded object is never referenced: remove it whatever the verdict
   await deleteFromS3(uploadedKey).catch((err) => {
-    console.warn(`[Uploads] Failed to delete the uploaded original ${uploadedKey}:`, err instanceof Error ? err.message : err);
+    console.warn(`[Uploads] Failed to delete the uploaded original ${uploadedKey}:`, describeStoreError(err));
   });
 
   let check: AdoptedImageCheck;
@@ -160,7 +161,7 @@ export async function adoptImageAssetUpload(
   if (check.storedType !== check.contentType) {
     const contentType = check.contentType;
     await setS3ObjectContentType(adoptedKey, contentType).catch((err) => {
-      console.warn(`[Uploads] Could not set the type of the adopted ${adoptedKey} to ${contentType}:`, err instanceof Error ? err.message : err);
+      console.warn(`[Uploads] Could not set the type of the adopted ${adoptedKey} to ${contentType}:`, describeStoreError(err));
     });
   }
   return adoptedKey;

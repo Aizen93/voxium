@@ -6,6 +6,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { RateLimiterRedis, RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getRedis, getRedisPubSub, getRedisConfigSub } from '../utils/redis';
 import { hasAccessTokenShape } from '../utils/tokenShapes';
+import { describeCaughtError, describeCaughtErrorWithStack } from '../utils/loggableError';
 
 // ─── Rate limit configuration registry ──────────────────────────────────────
 
@@ -385,7 +386,7 @@ export async function loadRateLimitOverrides(): Promise<void> {
       } catch { /* ignore malformed messages */ }
     });
   } catch (err) {
-    console.error('[RateLimit] Failed to subscribe to config channel:', err);
+    console.error('[RateLimit] Failed to subscribe to config channel:', describeCaughtErrorWithStack(err));
   }
 }
 
@@ -518,7 +519,7 @@ function createMiddleware(
         return;
       }
       // Redis error or unexpected — fail open but log for visibility
-      console.warn(`[RateLimit] ${name} limiter error, allowing request:`, err instanceof Error ? err.message : err);
+      console.warn(`[RateLimit] ${name} limiter error, allowing request:`, describeCaughtError(err));
       next();
       return;
     }
@@ -748,7 +749,7 @@ export const chargeRegistrationBudgets = async (req: Request, res: Response, nex
         // inflating the subnet's PoW difficulty for everyone behind it.
         charged.push({ name, key });
       // Redis error or unexpected — fail open but log for visibility
-      } else console.warn(`[RateLimit] ${name} limiter error, allowing request:`, err instanceof Error ? err.message : err);
+      } else console.warn(`[RateLimit] ${name} limiter error, allowing request:`, describeCaughtError(err));
     }
   }
 
@@ -785,7 +786,7 @@ export async function refundRateLimit(name: string, key: string): Promise<void> 
     // An unrefunded point costs the caller one request from that bucket (one
     // signup from that address today, one delivery this minute) — noisy, never
     // a security failure, so it is only worth logging.
-    console.warn(`[RateLimit] ${name} refund failed:`, err instanceof Error ? err.message : err);
+    console.warn(`[RateLimit] ${name} refund failed:`, describeCaughtError(err));
   }
 }
 
@@ -944,7 +945,7 @@ export async function getSubnetRegistrationPressure(req: Request): Promise<numbe
     const res = await getLimiter('registerSubnet').get(bySubnet(req));
     return res?.consumedPoints ?? 0;
   } catch (err) {
-    console.warn('[RateLimit] Subnet pressure read failed (assuming 0):', err instanceof Error ? err.message : err);
+    console.warn('[RateLimit] Subnet pressure read failed (assuming 0):', describeCaughtError(err));
     return 0;
   }
 }
@@ -965,7 +966,7 @@ export async function consumeMailCap(name: 'verifyMail' | 'resetMail', inbox: st
     await getLimiter(name).consume(inbox);
   } catch (err) {
     if (err instanceof RateLimiterRes) overCap = true;
-    else console.warn(`[RateLimit] ${name} cap check failed (allowing send):`, err instanceof Error ? err.message : err);
+    else console.warn(`[RateLimit] ${name} cap check failed (allowing send):`, describeCaughtError(err));
   }
   return !overCap;
 }
@@ -986,7 +987,7 @@ export async function getDomainRegistrationCount(domain: string): Promise<number
     const res = await getLimiter('registerDomain').get(domain);
     return res?.consumedPoints ?? 0;
   } catch (err) {
-    console.warn('[RateLimit] Domain budget read failed (assuming 0):', err instanceof Error ? err.message : err);
+    console.warn('[RateLimit] Domain budget read failed (assuming 0):', describeCaughtError(err));
     return 0;
   }
 }
@@ -1019,7 +1020,7 @@ export async function chargeDomainRegistration(domain: string): Promise<DomainRe
     charged = true;
   } catch (err) {
     if (err instanceof RateLimiterRes) rejection = err;
-    else console.warn('[RateLimit] Domain budget charge failed (allowing the registration):', err instanceof Error ? err.message : err);
+    else console.warn('[RateLimit] Domain budget charge failed (allowing the registration):', describeCaughtError(err));
   }
   if (rejection) {
     await refundRateLimit('registerDomain', domain);
@@ -1175,7 +1176,7 @@ export function rateLimitWebhookSignature(isVerified: (res: Response) => boolean
           refuseFor = err.msBeforeNext;
           break;
         }
-        console.warn(`[RateLimit] ${name} limiter error, allowing request:`, err instanceof Error ? err.message : err);
+        console.warn(`[RateLimit] ${name} limiter error, allowing request:`, describeCaughtError(err));
       }
     }
     const refundAll = () => Promise.all(charged.map((c) => refundRateLimit(c.name, c.key)));

@@ -2,6 +2,7 @@ import { prisma } from './prisma';
 import { getIO } from '../websocket/socketServer';
 import { Permissions, permissionsFromString, hasPermission } from '@voxium/shared';
 import type { ServerToClientEvents } from '@voxium/shared';
+import { describeCaughtError } from './loggableError';
 
 /**
  * Who hears about a server's join requests: the members who can act on them.
@@ -73,6 +74,6 @@ export async function emitToModerators<E extends keyof ServerToClientEvents>(
       io.to(rooms).emit(event, ...args);
     }
   } catch (err) {
-    console.error(`[ModeratorAudience] Failed to emit ${String(event)} for server ${serverId}:`, err instanceof Error ? err.message : err);
+    console.error(`[ModeratorAudience] Failed to emit ${String(event)} for server ${serverId}:`, describeCaughtError(err));
   }
 }

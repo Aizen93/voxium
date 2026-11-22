@@ -216,7 +216,7 @@ describe('secureChannelLifecycle', () => {
       });
       prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: 'attachments/ch-sec-1/x-encrypted.bin' }]);
       prismaMock.channel.delete.mockResolvedValue({});
-      mockDeleteMultipleFromS3.mockRejectedValue(new Error('s3 down'));
+      mockDeleteMultipleFromS3.mockRejectedValue(Object.assign(new Error('s3 down'), { name: 'ServiceUnavailable', $metadata: { httpStatusCode: 503 } }));
 
       const result = await deleteSecureChannel('sec-1');
       // Let the fire-and-forget rejection settle
@@ -224,7 +224,7 @@ describe('secureChannelLifecycle', () => {
 
       expect(result).toBe(true);
       expect(consoleWarn).toHaveBeenCalledWith(
-        '[SecureChannel] Attachment file cleanup failed for deleted channel sec-1 (the orphan sweep will reclaim them):', 's3 down');
+        '[SecureChannel] Attachment file cleanup failed for deleted channel sec-1 (the orphan sweep will reclaim them):', 'ServiceUnavailable, HTTP 503');
       consoleWarn.mockRestore();
     });
   });

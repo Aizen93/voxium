@@ -29,6 +29,7 @@ import {
   removeConversationForUser,
   writeConversationMessage,
 } from '../utils/conversationLifecycle';
+import { describeCaughtError, describeStoreError } from '../utils/loggableError';
 
 /**
  * The early refusal of a write in a conversation whose other side's account
@@ -42,7 +43,7 @@ function refuseReadOnly(view: ConversationView): void {
 
 /** A step after a removal committed failed: logged, never thrown. */
 function logRemovalFanOutFailure(conversationId: string, step: string, err: unknown): void {
-  console.error(`[DM] Conversation ${conversationId} removed, but ${step} failed:`, err instanceof Error ? err.message : err);
+  console.error(`[DM] Conversation ${conversationId} removed, but ${step} failed:`, describeCaughtError(err));
 }
 
 const userRoom = (userId: string) => `user:${userId}`;
@@ -655,7 +656,7 @@ dmRouter.delete('/:conversationId/messages/:messageId', rateLimitInteract, async
 
     // Fire-and-forget S3 cleanup
     if (message.attachments.length > 0) {
-      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete DM attachments:', err));
+      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete DM attachments:', describeStoreError(err)));
     }
 
     // not to a side that cleared the row: it is already gone for them

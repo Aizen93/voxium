@@ -15,6 +15,7 @@ import {
   type PowChallenge,
   type PowSolution,
 } from '@voxium/shared';
+import { describeCaughtErrorWithStack } from './loggableError';
 
 /** Base difficulty: ~65k hashes, a second or two of browser WebCrypto. Free
  *  for a human registering once; real money at bot scale. Dev/test issue a
@@ -94,7 +95,7 @@ export async function verifyRegistrationPow(ip: string, pow: unknown): Promise<v
     const ttlSeconds = Math.ceil((p.expires - Date.now()) / 1000) + 60;
     burned = await getRedis().set(`pow:used:${p.challenge}`, '1', { NX: true, EX: ttlSeconds });
   } catch (err) {
-    console.warn('[Auth] PoW single-use check failed (allowing — HMAC and expiry still verified):', err);
+    console.warn('[Auth] PoW single-use check failed (allowing — HMAC and expiry still verified):', describeCaughtErrorWithStack(err));
   }
   if (burned === null) throw fail(); // already redeemed — a replay
 }

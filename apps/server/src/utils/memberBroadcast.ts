@@ -4,6 +4,7 @@ import { prisma } from './prisma';
 import { filterVisibleChannels } from './permissionCalculator';
 import { visibilityRequestMark, resyncRequestedSince, recheckVisibilityAfterJoin } from './channelVisibilityRooms';
 import type { UserRole, UserStatus, SupporterTier } from '@voxium/shared';
+import { describeCaughtError } from './loggableError';
 
 /**
  * Join a user's active socket(s) to the server room and the `channel:{id}`
@@ -70,7 +71,7 @@ export async function broadcastMemberJoined(userId: string, serverId: string): P
   } catch (err) {
     // The rooms are joined and the broadcast below still goes out: the voice
     // lists catch up on the member's next connect
-    console.warn(`[Members] Voice occupancy replay to new member ${userId} failed:`, err instanceof Error ? err.message : err);
+    console.warn(`[Members] Voice occupancy replay to new member ${userId} failed:`, describeCaughtError(err));
   }
 
   // Fetch only the fields needed for the broadcast (no email)

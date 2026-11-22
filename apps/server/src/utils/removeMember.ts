@@ -16,13 +16,14 @@ import { WS_EVENTS } from '@voxium/shared';
 import { emitWebhookChanged } from './webhookLifecycle';
 import type { PermissionReadClient } from './permissionCalculator';
 import type { Prisma } from '../generated/prisma/client';
+import { describeCaughtError, describeCaughtErrorWithStack } from './loggableError';
 
 /** False only when the space row is certainly gone (a failed read is not "gone"). */
 async function spaceExists(serverId: string): Promise<boolean> {
   try {
     return (await prisma.server.findUnique({ where: { id: serverId }, select: { id: true } })) !== null;
   } catch (err) {
-    console.warn(`[Servers] Could not tell whether space ${serverId} still exists:`, err instanceof Error ? err.message : err);
+    console.warn(`[Servers] Could not tell whether space ${serverId} still exists:`, describeCaughtError(err));
     return true;
   }
 }
@@ -176,7 +177,7 @@ export async function removeMemberFromServer(
       }
     }
   } catch (err) {
-    console.warn('[Servers] Voice eviction on member removal failed (reaper will catch up):', err);
+    console.warn('[Servers] Voice eviction on member removal failed (reaper will catch up):', describeCaughtErrorWithStack(err));
   }
 
   // The files of the secure channels this member created, which the
@@ -279,7 +280,7 @@ export async function removeMemberFromServer(
   try {
     await prisma.channelRead.deleteMany({ where: { userId, channel: { serverId } } });
   } catch (err) {
-    console.warn(`[Servers] Member ${userId} removed from ${serverId}, but their read markers were not deleted:`, err instanceof Error ? err.message : err);
+    console.warn(`[Servers] Member ${userId} removed from ${serverId}, but their read markers were not deleted:`, describeCaughtError(err));
   }
 
   if (secure.deleted.length > 0) deleteAttachmentBlobs(attachmentKeys, '[Servers]', 'the secure channels of a departed member');

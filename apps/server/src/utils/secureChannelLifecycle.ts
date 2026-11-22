@@ -5,6 +5,7 @@ import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs'
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from './transactionRetry';
 import { WS_EVENTS, e2eChannelScope } from '@voxium/shared';
 import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websocket/voiceCluster';
+import { describeCaughtError, describeCaughtErrorWithStack } from './loggableError';
 
 /**
  * Lifecycle helpers for SECURE channels (invite-only, E2E-encrypted).
@@ -69,7 +70,7 @@ export async function undoRoomJoinsOfRemovedMembers(channelId: string, userIds: 
     });
     still = new Set(rows.map((r) => r.userId));
   } catch (err) {
-    console.warn(`[SecureChannel] Could not re-check the members joined to channel:${channelId}; taking every join back:`, err instanceof Error ? err.message : err);
+    console.warn(`[SecureChannel] Could not re-check the members joined to channel:${channelId}; taking every join back:`, describeCaughtError(err));
     still = new Set();
   }
   try {
@@ -78,7 +79,7 @@ export async function undoRoomJoinsOfRemovedMembers(channelId: string, userIds: 
       if (!still.has(uid)) io.in(`user:${uid}`).socketsLeave(`channel:${channelId}`);
     }
   } catch (err) {
-    console.warn(`[SecureChannel] Could not take the joins to channel:${channelId} back:`, err instanceof Error ? err.message : err);
+    console.warn(`[SecureChannel] Could not take the joins to channel:${channelId} back:`, describeCaughtError(err));
   }
   return still;
 }
@@ -224,7 +225,7 @@ export async function announceSecureMembershipsRemoved(removal: SecureMembership
 }
 
 function logRemovedMemberNoticeFailure(channelId: string, step: string, err: unknown): void {
-  console.error(`[SecureChannel] Member removed from ${channelId}, but ${step} failed:`, err instanceof Error ? err.message : err);
+  console.error(`[SecureChannel] Member removed from ${channelId}, but ${step} failed:`, describeCaughtError(err));
 }
 
 /**
@@ -267,7 +268,7 @@ export async function broadcastSecureMembersUpdated(channelId: string, serverId:
       members,
     });
   } catch (err) {
-    console.error('[SecureChannel] Failed to broadcast members update:', err);
+    console.error('[SecureChannel] Failed to broadcast members update:', describeCaughtErrorWithStack(err));
   }
 }
 
@@ -338,7 +339,7 @@ async function announceSecureChannelDeleted(channelId: string, serverId: string,
 
 /** A step after a secure channel's row delete committed failed: logged, never thrown. */
 function logSecureDeleteFanOutFailure(channelId: string, step: string, err: unknown): void {
-  console.error(`[SecureChannel] Channel ${channelId} deleted, but ${step} failed:`, err instanceof Error ? err.message : err);
+  console.error(`[SecureChannel] Channel ${channelId} deleted, but ${step} failed:`, describeCaughtError(err));
 }
 
 /**

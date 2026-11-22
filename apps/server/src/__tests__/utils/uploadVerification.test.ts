@@ -188,10 +188,10 @@ describe('verifyAttachmentUploads', () => {
 
   it('still refuses when the delete of a bad object fails (logged)', async () => {
     s3.headS3Object.mockResolvedValue({ size: 101, contentType: null });
-    s3.deleteFromS3.mockRejectedValue(new Error('delete failed'));
+    s3.deleteFromS3.mockRejectedValue(Object.assign(new Error('delete failed'), { name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }));
 
     await expect(verifyAttachmentUploads([item('attachments/ch-c1/1-a.pdf', 100)])).rejects.toThrow('Invalid attachment size');
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to delete refused object'), 'delete failed');
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to delete refused object'), 'AccessDenied, HTTP 403');
   });
 });
 
@@ -352,10 +352,10 @@ describe('adoptImageAssetUpload', () => {
 
   it('still rethrows the store error when deleting the interrupted copy fails too (logged)', async () => {
     s3.headS3Object.mockRejectedValue(new Error('timeout'));
-    s3.deleteFromS3.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('denied'));
+    s3.deleteFromS3.mockResolvedValueOnce(undefined).mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }));
 
     await expect(adopt()).rejects.toThrow('timeout');
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to delete refused object'), 'denied');
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to delete refused object'), 'AccessDenied, HTTP 403');
   });
 
   it('still adopts when deleting the original upload fails (logged)', async () => {
@@ -417,10 +417,10 @@ describe('adoptImageAssetUpload', () => {
 
     it('a label the store does not set is logged, and the copy is still adopted', async () => {
       serveObject(pngHeader(256, 256));
-      s3.setS3ObjectContentType.mockRejectedValueOnce(new Error('AccessDenied'));
+      s3.setS3ObjectContentType.mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }));
 
       await expect(adopt()).resolves.toMatch(ADOPTED);
-      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Could not set the type of the adopted'), 'AccessDenied');
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Could not set the type of the adopted'), 'AccessDenied, HTTP 403');
       // Only the upload is deleted: the checked copy stays
       expect(s3.deleteFromS3).toHaveBeenCalledTimes(1);
       expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);

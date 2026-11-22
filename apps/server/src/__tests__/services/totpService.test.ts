@@ -371,7 +371,7 @@ describe('totpService — verifyTOTP replay protection (#103)', () => {
       expect(said()).toHaveLength(1);
       const line = said()[0].map(String).join(' ');
       expect(line).toContain('SocketClosedUnexpectedlyError');
-      expect(line).toContain('Socket closed unexpectedly');
+      expect(line).not.toContain('Socket closed unexpectedly');
       expect(line).not.toContain(c);
       expect(line).not.toContain(secret);
       expect(line).not.toContain('user-r4');
@@ -396,7 +396,7 @@ describe('totpService — verifyTOTP replay protection (#103)', () => {
       expect(await verify('user-r10', c)).toBe(false);
       const said = warn.mock.calls.filter((call) => String(call[0]).startsWith('[TOTP]'));
       expect(said).toEqual([[
-        "[TOTP] Redis did not record the replay check (ReplyError: OOM command not allowed when used memory > 'maxmemory'.); codes are checked against this node's memory until it does",
+        "[TOTP] Redis did not record the replay check (ReplyError); codes are checked against this node's memory until it does",
       ]]);
     } finally {
       warn.mockRestore();
@@ -615,5 +615,84 @@ describe('totpService — unencrypted legacy secrets', () => {
 
     const result = await enableTOTP('user-1', validCode);
     expect(result.backupCodes).toHaveLength(8);
+  });
+});
+
+describe('totpService — what the TOTP log lines hold (#170)', () => {
+  const STORED = '["$2a$04$SECRETHASHONE","$2a$04$SECRETHASHTWO"'; // cut off: not JSON
+
+  async function freshService() {
+    vi.resetModules();
+    const { prisma: db } = await import('../../utils/prisma');
+    const { getRedis } = await import('../../utils/redis');
+    const set = vi.fn().mockResolvedValue('OK');
+    vi.mocked(getRedis).mockReturnValue({ set } as never);
+    const service = await import('../../services/totpService');
+    const secret = new OTPAuth.Secret({ size: 20 });
+    const totp = new OTPAuth.TOTP({ issuer: 'Voxium', label: 'testuser', algorithm: 'SHA1', digits: 6, period: 30, secret });
+    delete process.env.TOTP_ENCRYPTION_KEY;
+    return { service, db, set, secret: secret.base32, code: () => totp.generate() };
+  }
+
+  const totpLines = (warn: { mock: { calls: unknown[][] } }, prefix = '[TOTP]') =>
+    warn.mock.calls.filter((call) => String(call[0]).startsWith(prefix));
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('backup codes that do not parse are logged once per call, by the error name, never the stored text', async () => {
+    const { service, db, secret } = await freshService();
+    vi.mocked(db.user.findUnique).mockResolvedValue({ username: 'testuser', totpSecret: secret, totpBackupCodes: STORED } as never);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    expect(await service.verifyTOTP('user-b1', 'zzzzzzzz')).toBe(false);
+    expect(totpLines(warn)).toEqual([
+      ['[TOTP] Stored backup codes could not be parsed (SyntaxError); treating the account as having none'],
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('SECRETHASH');
+
+    expect(await service.verifyTOTP('user-b1', 'zzzzzzzz')).toBe(false);
+    expect(totpLines(warn)).toHaveLength(2); // once per call
+  });
+
+  it('backup codes of the wrong shape are logged by a fixed sentence, not the stored text', async () => {
+    const { service, db, secret } = await freshService();
+    vi.mocked(db.user.findUnique).mockResolvedValue({ username: 'testuser', totpSecret: secret, totpBackupCodes: '{"a":"SECRETHASH"}' } as never);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    expect(await service.verifyTOTP('user-b2', 'zzzzzzzz')).toBe(false);
+    expect(totpLines(warn)).toEqual([
+      ['[TOTP] Stored backup codes are not a list of strings; treating the account as having none'],
+    ]);
+  });
+
+  it('readable backup codes log nothing', async () => {
+    const { service, db, secret } = await freshService();
+    const bcrypt = await import('bcryptjs');
+    const hash = await bcrypt.hash('abcd1234', 4);
+    vi.mocked(db.user.findUnique).mockResolvedValue({ username: 'testuser', totpSecret: secret, totpBackupCodes: JSON.stringify([hash]) } as never);
+    vi.mocked(db.user.updateMany).mockResolvedValue({ count: 1 } as never);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    expect(await service.verifyTOTP('user-b3', 'abcd1234')).toBe(true);
+    expect(totpLines(warn)).toEqual([]);
+  });
+
+  it('the replay check failing open leaves one line with the error name and code, never its message, the code, the account or the key', async () => {
+    const { service, db, set, secret, code } = await freshService();
+    vi.mocked(db.user.findUnique).mockResolvedValue({ username: 'testuser', totpSecret: secret, totpBackupCodes: null } as never);
+    set.mockRejectedValue(Object.assign(new Error('connect ECONNREFUSED redis.internal.example:6379'), { name: 'TimeoutError', code: 'ECONNREFUSED' }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const c = code();
+
+    expect(await service.verifyTOTP('user-secret-id-77', c)).toBe(true);
+    const lines = totpLines(warn, '[TOTP] Redis');
+    expect(lines).toEqual([[expect.stringContaining('(TimeoutError [ECONNREFUSED]); codes are checked')]]);
+    const printed = JSON.stringify(warn.mock.calls);
+    expect(printed).not.toContain('6379');
+    expect(printed).not.toContain('redis.internal.example');
+    expect(printed).not.toContain(c);
+    expect(printed).not.toContain('user-secret-id-77');
+    expect(printed).not.toContain('totp:used');
+    expect(printed).not.toContain(secret);
   });
 });

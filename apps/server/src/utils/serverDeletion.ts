@@ -7,10 +7,11 @@ import { getIO } from '../websocket/socketServer';
 import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
 import { retryOnTransactionConflict } from './transactionRetry';
 import { NotFoundError } from './errors';
+import { describeCaughtError } from './loggableError';
 
 /** A step after the committing write failed: logged, never thrown (the space is gone either way). */
 function logFanOutFailure(logPrefix: string, step: string, serverId: string, err: unknown): void {
-  console.error(`${logPrefix} Space ${serverId} deleted, but ${step} failed:`, err instanceof Error ? err.message : err);
+  console.error(`${logPrefix} Space ${serverId} deleted, but ${step} failed:`, describeCaughtError(err));
 }
 
 /**
@@ -99,7 +100,7 @@ export async function deleteServerAndAnnounce(
 
   if (server.iconUrl) {
     deleteFromS3(server.iconUrl).catch((err) =>
-      console.warn(`${opts.logPrefix} Server icon cleanup failed (the orphan sweep will reclaim it):`, err instanceof Error ? err.message : err));
+      console.warn(`${opts.logPrefix} Server icon cleanup failed (the orphan sweep will reclaim it):`, describeCaughtError(err)));
   }
   deleteAttachmentBlobs(attachmentKeys, opts.logPrefix, `space ${serverId}`);
 
