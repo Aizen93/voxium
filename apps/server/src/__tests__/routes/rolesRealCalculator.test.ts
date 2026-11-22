@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import { Permissions, DEFAULT_EVERYONE_PERMISSIONS, permissionsToString } from '@voxium/shared';
+import { Permissions, ALL_PERMISSIONS, DEFAULT_EVERYONE_PERMISSIONS, permissionsToString } from '@voxium/shared';
+import {
+  SECURE_CREATOR_PERMISSIONS,
+  SECURE_MEMBER_PERMISSIONS,
+  SECURE_VOICE_MEMBER_PERMISSIONS,
+} from '../../utils/permissionCalculator';
 
 /**
  * The role routes with the REAL permission calculator, over a small in-memory
@@ -195,5 +200,151 @@ describe('an override write whose space is deleted while it waits for the role r
   it.each([['PUT', put], ['DELETE', del]] as const)('%s: nothing deleted meanwhile: the write goes through', async (_route, send) => {
     expect((await answer(send())).status).toBe(200);
     expect(mockEmit).toHaveBeenCalled();
+  });
+});
+
+// ─── The effective permissions of a channel ────────────────────────────────
+
+/**
+ * With a channelId, a channel the CALLER cannot view answers exactly what an
+ * id that names no channel of the space answers, for the same target; a
+ * secure channel is decided by membership before any fast path, for the
+ * caller and for the target. Every answer for a channel the caller views is
+ * the channel calculation of the target, as before.
+ *
+ * The space: `owner`; `mod` (Manage Roles, rank 5); `member` (no role);
+ * `staffer` (the Staff role, which the hidden channel lets in). Channels:
+ * ch1 (everyone views it), ch-hidden (@everyone denied VIEW_CHANNEL, Staff
+ * allowed), ch-sec (secure text, `member` its creator), ch-sec-voice (secure
+ * voice, `member`), ch-sec-mod (secure text, `mod` its creator and
+ * `member`), ch-elsewhere (another space's), ch-none (no channel).
+ */
+describe('GET /permissions/effective with a channel', () => {
+  const MOD_BITS = DEFAULT_EVERYONE_PERMISSIONS | Permissions.MANAGE_ROLES;
+  const EVERYONE_WITHOUT_VIEW = DEFAULT_EVERYONE_PERMISSIONS & ~Permissions.VIEW_CHANNEL;
+
+  function effectiveWorld(): World {
+    const w = space();
+    w.members.push({ userId: 'member', serverId: 'srv1' }, { userId: 'staffer', serverId: 'srv1' });
+    w.roles.push({ id: 'r-staff', serverId: 'srv1', name: 'Staff', position: 1, isDefault: false, permissions: '0' });
+    w.memberRoles.push({ userId: 'staffer', serverId: 'srv1', roleId: 'r-staff' });
+    w.channels['ch-hidden'] = { serverId: 'srv1', secure: false, type: 'text' };
+    w.channels['ch-sec'] = { serverId: 'srv1', secure: true, type: 'text' };
+    w.channels['ch-sec-voice'] = { serverId: 'srv1', secure: true, type: 'voice' };
+    w.channels['ch-sec-mod'] = { serverId: 'srv1', secure: true, type: 'text' };
+    w.servers.srv2 = { ownerId: 'owner' };
+    w.channels['ch-elsewhere'] = { serverId: 'srv2', secure: false, type: 'text' };
+    w.overrides.push(
+      { channelId: 'ch-hidden', roleId: 'r-everyone', allow: '0', deny: s(Permissions.VIEW_CHANNEL) },
+      { channelId: 'ch-hidden', roleId: 'r-staff', allow: s(Permissions.VIEW_CHANNEL), deny: '0' },
+    );
+    w.channelMembers.push(
+      { channelId: 'ch-sec', userId: 'member', isCreator: true },
+      { channelId: 'ch-sec-voice', userId: 'member', isCreator: false },
+      { channelId: 'ch-sec-mod', userId: 'mod', isCreator: true },
+      { channelId: 'ch-sec-mod', userId: 'member', isCreator: false },
+    );
+    return w;
+  }
+
+  beforeEach(() => {
+    shared = effectiveWorld();
+    inTransaction = shared;
+  });
+
+  async function effective(asker: string, target: string, channelId: string) {
+    caller = asker;
+    const query = target === asker ? `channelId=${channelId}` : `channelId=${channelId}&userId=${target}`;
+    const res = await request(app).get(`/api/v1/servers/srv1/roles/permissions/effective?${query}`);
+    expect(res.status).toBe(200);
+    return res.body.data as { permissions: string; source: string };
+  }
+
+  const NONE = { permissions: '0', source: 'computed' };
+  const bits = (value: bigint, source = 'computed') => ({ permissions: s(value), source });
+  const OWNER_ALL = bits(ALL_PERMISSIONS, 'owner');
+
+  // caller, target, channel, the answer
+  const table: Array<[string, string, string, { permissions: string; source: string }]> = [
+    // a member about themselves
+    ['member', 'member', 'ch1', bits(DEFAULT_EVERYONE_PERMISSIONS)],
+    ['member', 'member', 'ch-hidden', NONE],
+    ['member', 'member', 'ch-none', NONE],
+    ['member', 'member', 'ch-elsewhere', NONE],
+    ['member', 'member', 'ch-sec', bits(SECURE_CREATOR_PERMISSIONS)],
+    ['member', 'member', 'ch-sec-voice', bits(SECURE_VOICE_MEMBER_PERMISSIONS)],
+    ['member', 'member', 'ch-sec-mod', bits(SECURE_MEMBER_PERMISSIONS)],
+    // a manager about themselves
+    ['mod', 'mod', 'ch1', bits(MOD_BITS)],
+    ['mod', 'mod', 'ch-hidden', NONE],
+    ['mod', 'mod', 'ch-sec', NONE],
+    ['mod', 'mod', 'ch-sec-mod', bits(SECURE_CREATOR_PERMISSIONS)],
+    // a manager about another member, in channels the manager cannot view
+    ['mod', 'staffer', 'ch-hidden', NONE],
+    ['mod', 'member', 'ch-hidden', NONE],
+    ['mod', 'member', 'ch-sec', NONE],
+    ['mod', 'member', 'ch-sec-voice', NONE],
+    ['mod', 'member', 'ch-elsewhere', NONE],
+    ['mod', 'member', 'ch-none', NONE],
+    // ... and in channels the manager views
+    ['mod', 'staffer', 'ch1', bits(DEFAULT_EVERYONE_PERMISSIONS)],
+    ['mod', 'member', 'ch1', bits(DEFAULT_EVERYONE_PERMISSIONS)],
+    ['mod', 'member', 'ch-sec-mod', bits(SECURE_MEMBER_PERMISSIONS)],
+    ['mod', 'staffer', 'ch-sec-mod', NONE],
+    // a manager about the owner
+    ['mod', 'owner', 'ch1', OWNER_ALL],
+    ['mod', 'owner', 'ch-hidden', NONE],
+    ['mod', 'owner', 'ch-sec', NONE],
+    ['mod', 'owner', 'ch-sec-mod', NONE],
+    ['mod', 'owner', 'ch-none', NONE],
+    // the owner about themselves
+    ['owner', 'owner', 'ch1', OWNER_ALL],
+    ['owner', 'owner', 'ch-hidden', OWNER_ALL],
+    ['owner', 'owner', 'ch-sec', NONE],
+    ['owner', 'owner', 'ch-none', NONE],
+    ['owner', 'owner', 'ch-elsewhere', NONE],
+    // the owner about others: every plaintext channel is the owner's to view
+    ['owner', 'member', 'ch-hidden', bits(EVERYONE_WITHOUT_VIEW)],
+    ['owner', 'staffer', 'ch-hidden', bits(DEFAULT_EVERYONE_PERMISSIONS)],
+    ['owner', 'member', 'ch-sec', NONE],
+    ['owner', 'member', 'ch-none', NONE],
+  ];
+
+  it.each(table)('%s asking about %s in %s', async (asker, target, channelId, expected) => {
+    expect(await effective(asker, target, channelId)).toEqual(expected);
+  });
+
+  /** The channels each caller views (the rest it cannot). */
+  const VIEWS: Record<string, string[]> = {
+    member: ['ch1', 'ch-sec', 'ch-sec-voice', 'ch-sec-mod'],
+    mod: ['ch1', 'ch-sec-mod'],
+    owner: ['ch1', 'ch-hidden'],
+  };
+
+  it.each([
+    ['member', 'member'], ['mod', 'mod'], ['mod', 'member'], ['mod', 'staffer'], ['mod', 'owner'], ['owner', 'owner'], ['owner', 'member'],
+  ])('%s about %s: every channel the caller cannot view answers what an unknown id answers', async (asker, target) => {
+    const unknown = await effective(asker, target, 'ch-none');
+    for (const channelId of ['ch-hidden', 'ch-sec', 'ch-sec-voice', 'ch-sec-mod', 'ch-elsewhere']) {
+      if (VIEWS[asker].includes(channelId)) continue;
+      expect({ channelId, answer: await effective(asker, target, channelId) }).toEqual({ channelId, answer: unknown });
+    }
+  });
+
+  it('a channel the caller cannot view reads nothing of the target in it', async () => {
+    await effective('mod', 'member', 'ch-sec');
+
+    // the secure membership was asked of the caller only
+    const asked = sharedClient.channelMember.findUnique.mock.calls.map(([arg]: any[]) => arg.where.channelId_userId.userId);
+    expect(asked).toEqual(['mod']);
+  });
+
+  it('without a channel: the server-level answer, unchanged (the owner holds every bit)', async () => {
+    caller = 'mod';
+    const owner = await request(app).get('/api/v1/servers/srv1/roles/permissions/effective?userId=owner');
+    const member = await request(app).get('/api/v1/servers/srv1/roles/permissions/effective?userId=member');
+
+    expect(owner.body.data).toEqual(OWNER_ALL);
+    expect(member.body.data).toEqual(bits(DEFAULT_EVERYONE_PERMISSIONS));
   });
 });

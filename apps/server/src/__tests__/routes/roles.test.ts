@@ -71,6 +71,7 @@ vi.mock('../../utils/permissionCalculator', () => ({
   hasChannelPermission: (...args: any[]) => mockHasChannelPermission(...args),
   getHighestRolePosition: (...args: any[]) => mockGetHighestRolePosition(...args),
   getEffectivePermissions: (...args: any[]) => mockGetEffectivePermissions(...args),
+  NO_CHANNEL_EFFECTIVE_PERMISSIONS: { permissions: '0', source: 'computed' },
 }));
 
 // Auth middleware — sets req.user on every request
@@ -1909,6 +1910,32 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(200);
       expect(mockGetEffectivePermissions).toHaveBeenCalledWith('user1', 'srv1', 'ch1');
+      // the caller's own view of the channel is asked first
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL);
+    });
+
+    it('a channel the caller cannot view: the answer of an unknown channel, the target never read', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user1', serverId: 'srv1' });
+      mockHasServerPermission.mockResolvedValue(true);
+      mockHasChannelPermission.mockResolvedValue(false);
+
+      const self = await request(app).get('/api/v1/servers/srv1/roles/permissions/effective?channelId=ch-hidden');
+      const other = await request(app).get('/api/v1/servers/srv1/roles/permissions/effective?channelId=ch-hidden&userId=other-user');
+
+      for (const res of [self, other]) {
+        expect({ status: res.status, body: res.body }).toEqual({ status: 200, body: { success: true, data: { permissions: '0', source: 'computed' } } });
+      }
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch-hidden', 'srv1', Permissions.VIEW_CHANNEL);
+      expect(mockGetEffectivePermissions).not.toHaveBeenCalled();
+    });
+
+    it('no channel: the caller\'s view of a channel is not asked', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user1', serverId: 'srv1' });
+      mockHasServerPermission.mockResolvedValue(false);
+      mockGetEffectivePermissions.mockResolvedValue({ permissions: '0', source: 'computed' });
+
+      expect((await request(app).get('/api/v1/servers/srv1/roles/permissions/effective')).status).toBe(200);
+      expect(mockHasChannelPermission).not.toHaveBeenCalled();
     });
 
     it('returns 404 for non-member', async () => {

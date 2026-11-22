@@ -35,6 +35,7 @@ import {
   hasChannelPermission,
   getHighestRolePosition,
   getEffectivePermissions,
+  NO_CHANNEL_EFFECTIVE_PERMISSIONS,
   filterVisibleChannels,
   filterChannelsWithPermissions,
   filterVisibleChannelsMulti,
@@ -1044,6 +1045,56 @@ describe('permissionCalculator', () => {
       const perms = BigInt(result.permissions);
       expect(perms & Permissions.SEND_MESSAGES).toBe(0n);
       expect(perms & Permissions.VIEW_CHANNEL).toBe(Permissions.VIEW_CHANNEL);
+    });
+
+    describe('with a channel, the channel calculation alone (a secure channel is decided by membership before the owner)', () => {
+      it('the owner in a plaintext channel of the space: every bit, source "owner"', async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'owner1' });
+
+        expect(await getEffectivePermissions('owner1', 'srv1', 'ch1')).toEqual({ permissions: permissionsToString(ALL_PERMISSIONS), source: 'owner' });
+      });
+
+      it('the owner in a secure channel they are not a member of: the answer of a channel that does not exist', async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'owner1' });
+        prismaMock.channel.findUnique.mockResolvedValueOnce({ secure: true, type: 'text', serverId: 'srv1', server: { ownerId: 'owner1' } });
+
+        const result = await getEffectivePermissions('owner1', 'srv1', 'ch-sec');
+
+        expect(result).toEqual({ permissions: '0', source: 'computed' });
+        expect(result).toEqual(NO_CHANNEL_EFFECTIVE_PERMISSIONS);
+      });
+
+      it('the owner as a member of a secure channel: what membership gives, source "computed"', async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'owner1' });
+        prismaMock.channel.findUnique.mockResolvedValueOnce({ secure: true, type: 'text', serverId: 'srv1', server: { ownerId: 'owner1' } });
+        prismaMock.channelMember.findUnique.mockResolvedValueOnce({ isCreator: false });
+
+        expect(await getEffectivePermissions('owner1', 'srv1', 'ch-sec')).toEqual({ permissions: permissionsToString(SECURE_MEMBER_PERMISSIONS), source: 'computed' });
+      });
+
+      it('an id that names no channel of the space: the same answer for the owner and for a member', async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'owner1' });
+        prismaMock.channel.findUnique.mockResolvedValue(null);
+
+        expect(await getEffectivePermissions('owner1', 'srv1', 'ch-none')).toEqual(NO_CHANNEL_EFFECTIVE_PERMISSIONS);
+        expect(await getEffectivePermissions('user1', 'srv1', 'ch-none')).toEqual(NO_CHANNEL_EFFECTIVE_PERMISSIONS);
+      });
+
+      it('another space\'s channel: the same answer, for the owner too', async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'owner1' });
+        prismaMock.channel.findUnique.mockResolvedValue({ secure: false, type: 'text', serverId: 'srv2', server: { ownerId: 'owner1' } });
+
+        expect(await getEffectivePermissions('owner1', 'srv1', 'ch-elsewhere')).toEqual(NO_CHANNEL_EFFECTIVE_PERMISSIONS);
+      });
+
+      it('an ADMINISTRATOR who is not the owner: every bit, source "computed"', async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'owner1' });
+        prismaMock.role.findFirst.mockResolvedValueOnce({ id: 'everyone-role-id', permissions: '0' });
+        prismaMock.memberRole.findMany.mockResolvedValueOnce([{ roleId: 'r-admin', role: { permissions: permissionsToString(Permissions.ADMINISTRATOR) } }]);
+        prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
+
+        expect(await getEffectivePermissions('user1', 'srv1', 'ch1')).toEqual({ permissions: permissionsToString(ALL_PERMISSIONS), source: 'computed' });
+      });
     });
   });
 });

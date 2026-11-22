@@ -24,6 +24,7 @@ import {
   hasChannelPermission,
   getHighestRolePosition,
   getEffectivePermissions,
+  NO_CHANNEL_EFFECTIVE_PERMISSIONS,
   type PermissionReadClient,
   type ChannelPermissionReadClient,
 } from '../utils/permissionCalculator';
@@ -860,6 +861,16 @@ roleRouter.get(
           where: { userId_serverId: { userId: targetUserId, serverId } },
         });
         if (!targetMember) throw new NotFoundError('Member');
+      }
+
+      // A channel the caller cannot view (another space's, a secure channel
+      // they are not a member of, one their overrides hide) answers exactly as
+      // an id that names no channel of the space, whoever the target: nothing
+      // of it is read for the target. The caller's view is decided by the
+      // channel calculation, membership first for a secure channel.
+      if (channelId && !await hasChannelPermission(req.user!.userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
+        res.json({ success: true, data: NO_CHANNEL_EFFECTIVE_PERMISSIONS });
+        return;
       }
 
       const result = await getEffectivePermissions(targetUserId, serverId, channelId);

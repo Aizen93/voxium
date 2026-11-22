@@ -250,7 +250,24 @@ export async function getHighestRolePosition(
 }
 
 /**
- * Get formatted effective permissions for API response.
+ * What getEffectivePermissions answers for a channel id that names no
+ * channel of the space, for every user (the owner included). The effective
+ * permissions route answers the same for a channel its caller cannot view.
+ */
+export const NO_CHANNEL_EFFECTIVE_PERMISSIONS: { permissions: string; source: 'owner' | 'computed' } = Object.freeze({
+  permissions: permissionsToString(0n),
+  source: 'computed',
+});
+
+/**
+ * Get formatted effective permissions for API response. Without a channel:
+ * the server-level permissions, every bit for the owner (`source: 'owner'`).
+ * With one: the channel calculation alone, so a secure channel is decided by
+ * membership before the owner's fast path (the owner who is not a member
+ * holds nothing there), an id that names no channel of the space answers
+ * NO_CHANNEL_EFFECTIVE_PERMISSIONS for everyone, and `source` is 'owner'
+ * only where the owner's fast path answered (a plaintext channel of the
+ * space).
  */
 export async function getEffectivePermissions(
   userId: string,
@@ -261,16 +278,16 @@ export async function getEffectivePermissions(
     where: { id: serverId },
     select: { ownerId: true },
   });
+  const isOwner = server !== null && server.ownerId === userId;
 
-  if (server?.ownerId === userId) {
-    return { permissions: permissionsToString(ALL_PERMISSIONS), source: 'owner' };
+  if (!channelId) {
+    if (isOwner) return { permissions: permissionsToString(ALL_PERMISSIONS), source: 'owner' };
+    return { permissions: permissionsToString(await computeServerPermissions(userId, serverId)), source: 'computed' };
   }
 
-  const perms = channelId
-    ? await computeUserChannelPermissions(userId, channelId, serverId)
-    : await computeServerPermissions(userId, serverId);
-
-  return { permissions: permissionsToString(perms), source: 'computed' };
+  const perms = await computeUserChannelPermissions(userId, channelId, serverId);
+  if (perms === 0n) return { ...NO_CHANNEL_EFFECTIVE_PERMISSIONS };
+  return { permissions: permissionsToString(perms), source: isOwner && perms === ALL_PERMISSIONS ? 'owner' : 'computed' };
 }
 
 /**
