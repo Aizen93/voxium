@@ -1,7 +1,7 @@
 import type { Server as SocketServer } from 'socket.io';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { getRedis, getRedisPubSub, getRedisConfigSub, NODE_ID, isNodeAlive } from '../utils/redis';
-import { reapDeadOwnerChannelMirror } from '../utils/voiceMirror';
+import { reapDeadOwnerChannelMirror, announceReapedDepartures } from '../utils/voiceMirror';
 import { cleanupServerVoice, cleanupChannelVoice, evictUserFromChannelVoice, reapOrphanedRemoteParticipants } from './voiceHandler';
 
 type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
@@ -134,10 +134,7 @@ export async function reapDeadNodeVoiceState(io: IO): Promise<void> {
     // over between our liveness check and now, its fresh mirror is untouched.
     const occupants = await reapDeadOwnerChannelMirror(channelId, owner);
     if (occupants === null) continue; // ownership changed under us — hands off
-    for (const { userId, epoch } of occupants) {
-      // With the epoch the ghost's session announced (secure voice), as a live leave carries it
-      io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId, ...(epoch && { epoch }) });
-    }
+    announceReapedDepartures(io, channelId, occupants);
     console.warn(`[VoiceCluster] Reaped voice channel ${channelId} owned by dead node ${owner ?? '(none)'} — ${occupants.length} ghost user(s)`);
   }
 }

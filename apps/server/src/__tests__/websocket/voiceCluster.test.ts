@@ -24,7 +24,9 @@ vi.mock('../../utils/redis', () => ({
   isNodeAlive: mockIsNodeAlive,
 }));
 
-vi.mock('../../utils/voiceMirror', () => ({
+// The reaps are mocked; the departure announcement is the real one
+vi.mock('../../utils/voiceMirror', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/voiceMirror')>()),
   reapVoiceChannelMirror: vi.fn().mockResolvedValue([]),
   reapDeadOwnerChannelMirror: mockGuardedReap,
 }));

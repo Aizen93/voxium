@@ -1,7 +1,7 @@
 import type { Server as SocketServer } from 'socket.io';
 import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared';
 import { getRedis, getRedisPubSub, getRedisConfigSub, NODE_ID, isNodeAlive } from '../utils/redis';
-import { reapVoiceChannelMirror } from '../utils/voiceMirror';
+import { reapVoiceChannelMirror, announceReapedDepartures } from '../utils/voiceMirror';
 import type { VoiceSocket } from './voiceHandler';
 
 type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
@@ -118,8 +118,19 @@ export function dropShim(socketId: string): void {
  * Resolve which node owns a channel's mediasoup Router, claiming ownership for
  * THIS node when the channel is unowned — or taking over when the recorded
  * owner has no live heartbeat (crashed peer; its mirror is reaped first).
+ *
+ * The node that wins a takeover announces the departure of every occupant the
+ * reap removed (their sessions ended with the dead node, and the dead-node
+ * reaper leaves a channel a live node owns alone), before it returns, so the
+ * departures go out ahead of the join that follows. `holdsSessionHere` names a
+ * user who holds a session in the channel on THIS node already: that user has
+ * not left, and nothing is announced for them.
  */
-export async function resolveOrClaimChannelOwner(channelId: string): Promise<string> {
+export async function resolveOrClaimChannelOwner(
+  io: Pick<IO, 'to'>,
+  channelId: string,
+  holdsSessionHere: (userId: string) => boolean,
+): Promise<string> {
   const redis = getRedis();
   const key = `voice:channel:node:${channelId}`;
 
@@ -141,7 +152,13 @@ export async function resolveOrClaimChannelOwner(channelId: string): Promise<str
     if (takeover === 1) {
       console.warn(`[VoiceRelay] Took over channel ${channelId} from dead node ${existing}`);
       // Reap the dead node's stale mirror — preserving the node key we just claimed
-      await reapVoiceChannelMirror(channelId, { preserveNodeKey: true });
+      const occupants = await reapVoiceChannelMirror(channelId, { preserveNodeKey: true });
+      // The claim is won whatever the announcement does
+      try {
+        announceReapedDepartures(io, channelId, occupants.filter(({ userId }) => !holdsSessionHere(userId)));
+      } catch (err) {
+        console.warn(`[VoiceRelay] Announcing the departures from channel ${channelId} failed:`, err instanceof Error ? err.message : err);
+      }
       return NODE_ID();
     }
     // Lost the takeover race — use whatever the winner recorded.
