@@ -1078,6 +1078,10 @@
     "loadingImage": "加载图片中...",
     "loadingVideo": "加载视频中...",
     "loadingAudio": "加载音频中...",
+    "play": "播放 {{name}}",
+    "loadFailed": "无法加载此文件。",
+    "loadFailedRetry": "无法加载 {{name}}。请重试。",
+    "retry": "重试",
     "downloadedName": "已下载“{{name}}”",
     "image": "图片"
   },

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Download, FileText, Image as ImageIcon, Film, Music, Lock } from 'lucide-react';
 import { api } from '../../services/api';
+import { DeferredMedia } from './DeferredMedia';
 import type { E2EAttachmentMeta } from '@voxium/shared';
 
 // Renders an E2E attachment (docs/e2e-dm-spec.md §13): the server only holds
@@ -26,7 +27,45 @@ interface Props {
   meta: E2EAttachmentMeta;
 }
 
+/** Fetch the ciphertext through the authenticated proxy and decrypt it in the
+ *  engine; the plaintext is made into a Blob of the real type. */
+async function fetchAndDecrypt(meta: E2EAttachmentMeta): Promise<Blob> {
+  const [{ data }, engine] = await Promise.all([
+    api.get(`/uploads/${meta.s3Key}`, { responseType: 'arraybuffer' }),
+    import('../../services/e2e/engine'),
+  ]);
+  await engine.initEngine();
+  const plaintext = engine.decryptAttachment(new Uint8Array(data as ArrayBuffer), meta.key, meta.iv);
+  return new Blob([plaintext as BlobPart], { type: meta.mimeType });
+}
+
 export function E2EAttachmentDisplay({ meta }: Props) {
+  const { t } = useTranslation();
+  const isVideo = meta.mimeType.startsWith('video/');
+  // Video and audio are fetched and decrypted only when the person plays them.
+  // The decrypted bytes are never cached: a remount decrypts again.
+  if (isVideo || meta.mimeType.startsWith('audio/')) {
+    return (
+      <DeferredMedia
+        key={meta.s3Key}
+        kind={isVideo ? 'video' : 'audio'}
+        load={() => fetchAndDecrypt(meta)}
+        fileName={meta.fileName}
+        fileSize={meta.fileSize}
+        mimeType={meta.mimeType}
+        fallback={
+          <div className="mt-1 flex max-w-md items-center gap-2 rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm italic text-vox-text-muted">
+            <Lock size={14} />
+            {t('e2e.attachmentFailed')}
+          </div>
+        }
+      />
+    );
+  }
+  return <EagerE2EAttachment meta={meta} />;
+}
+
+function EagerE2EAttachment({ meta }: Props) {
   const { t } = useTranslation();
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -37,19 +76,14 @@ export function E2EAttachmentDisplay({ meta }: Props) {
 
     (async () => {
       try {
-        const [{ data }, engine] = await Promise.all([
-          api.get(`/uploads/${meta.s3Key}`, { responseType: 'arraybuffer' }),
-          import('../../services/e2e/engine'),
-        ]);
-        await engine.initEngine();
-        const plaintext = engine.decryptAttachment(new Uint8Array(data as ArrayBuffer), meta.key, meta.iv);
+        const blob = await fetchAndDecrypt(meta);
         if (revoked) return;
-        url = URL.createObjectURL(new Blob([plaintext as BlobPart], { type: meta.mimeType }));
+        url = URL.createObjectURL(blob);
         setBlobUrl(url);
       } catch (err) {
         // GCM authentication failure = swapped/corrupted blob; network errors
         // land here too — either way the honest state is "can't show this"
-        console.warn(`e2e: attachment ${meta.s3Key} failed to load/decrypt:`, err instanceof Error ? err.message : err);
+        console.warn('e2e: attachment failed to load/decrypt:', err instanceof Error ? err.message : 'unknown error');
         if (!revoked) setFailed(true);
       }
     })();
@@ -92,14 +126,6 @@ export function E2EAttachmentDisplay({ meta }: Props) {
         />
       </a>
     );
-  }
-
-  if (meta.mimeType.startsWith('video/')) {
-    return <video src={blobUrl} controls className="mt-1 max-h-80 max-w-md rounded-lg" />;
-  }
-
-  if (meta.mimeType.startsWith('audio/')) {
-    return <audio src={blobUrl} controls className="mt-1 w-full max-w-md" />;
   }
 
   return (
