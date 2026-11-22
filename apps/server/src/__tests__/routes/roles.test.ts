@@ -116,6 +116,9 @@ function createApp() {
 
 describe('Role Routes', () => {
   let app: express.Express;
+  /** What the space row lock (a creation's first statement) and the role row lock answer. */
+  let spaceRow: unknown[];
+  let lockedRoleRow: unknown[];
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -125,8 +128,13 @@ describe('Role Routes', () => {
     // and in rolePermissionWrites.test.ts)
     prismaMock.$transaction.mockImplementation(async (fn: (client: unknown) => unknown) => fn(prismaMock));
     prismaMock.channelPermissionOverride.findUnique.mockResolvedValue(null);
-    // No role row to lock unless a test names one (lockedRole)
-    prismaMock.$queryRaw.mockResolvedValue([]);
+    // The raw statements, answered by their text: the space row a creation
+    // locks is there unless a test deletes it (spaceRow); no role row to lock
+    // unless a test names one (lockedRole)
+    spaceRow = [{ id: 'srv1' }];
+    lockedRoleRow = [];
+    prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) =>
+      (strings.join('?').startsWith('SELECT id FROM servers') ? spaceRow : lockedRoleRow));
     mockComputeServerPermissions.mockReset();
     // The actor sees the channel unless a test says otherwise (clearAllMocks
     // keeps the last test's answer)
@@ -136,8 +144,9 @@ describe('Role Routes', () => {
   });
 
   /** The role row the transaction locks: what its SELECT … FOR NO KEY UPDATE answers. */
-  const lockedRole = (row: { permissions?: string; position: number; isDefault?: boolean }) =>
-    prismaMock.$queryRaw.mockResolvedValue([{ permissions: row.permissions ?? '0', position: row.position, is_default: row.isDefault ?? false }]);
+  const lockedRole = (row: { permissions?: string; position: number; isDefault?: boolean }) => {
+    lockedRoleRow = [{ permissions: row.permissions ?? '0', position: row.position, is_default: row.isDefault ?? false }];
+  };
 
   // ── GET /api/v1/servers/:serverId/roles ────────────────────────────────
 
@@ -177,7 +186,7 @@ describe('Role Routes', () => {
       mockHasServerPermission.mockResolvedValue(true);
       mockGetHighestRolePosition.mockResolvedValue(Infinity); // owner
       prismaMock.role.count.mockResolvedValue(2);
-      prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
+      prismaMock.role.aggregate.mockResolvedValue({ _count: { _all: 2 }, _max: { position: 1 } });
       prismaMock.role.create.mockResolvedValue({
         id: 'role-new',
         name: 'Moderator',
@@ -264,7 +273,7 @@ describe('Role Routes', () => {
       mockHasServerPermission.mockResolvedValue(true);
       mockGetHighestRolePosition.mockResolvedValue(Infinity);
       prismaMock.role.count.mockResolvedValue(1);
-      prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 0 } });
+      prismaMock.role.aggregate.mockResolvedValue({ _count: { _all: 2 }, _max: { position: 0 } });
       const perms = Permissions.MANAGE_CHANNELS | Permissions.KICK_MEMBERS;
       prismaMock.role.create.mockResolvedValue({
         id: 'role-new',
@@ -325,7 +334,7 @@ describe('Role Routes', () => {
       mockGetHighestRolePosition.mockResolvedValue(Infinity);
       prismaMock.role.findFirst.mockResolvedValueOnce(null);
       prismaMock.role.count.mockResolvedValue(2);
-      prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
+      prismaMock.role.aggregate.mockResolvedValue({ _count: { _all: 2 }, _max: { position: 1 } });
       prismaMock.role.create.mockResolvedValue(created);
 
       const res = await request(app).post('/api/v1/servers/srv1/roles').send({ name: `Mod${ZWSP}era${RLO}tor` });
@@ -393,7 +402,7 @@ describe('Role Routes', () => {
       mockHasServerPermission.mockResolvedValue(true);
       mockGetHighestRolePosition.mockResolvedValue(Infinity);
       prismaMock.role.count.mockResolvedValue(2);
-      prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
+      prismaMock.role.aggregate.mockResolvedValue({ _count: { _all: 2 }, _max: { position: 1 } });
       errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
       warnLog = vi.spyOn(console, 'warn').mockImplementation(() => {});
     });

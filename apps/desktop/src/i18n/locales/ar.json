@@ -1656,6 +1656,7 @@
     "cannotModifyHigherMember": "لا يمكن تغيير أدوار عضو بدور مساوٍ أو أعلى",
     "cannotReorderHigherRoles": "لا يمكن إعادة ترتيب أدوار بنفس مستوى دورك أو أعلى منه",
     "cannotSetHigherPosition": "لا يمكن نقل دور إلى مستوى دورك أو أعلى",
+    "cannotCreateRoleTooLow": "دورك منخفض جدًا في ترتيب الأدوار لإنشاء أدوار",
     "cannotModifyHigherOverrides": "لا يمكن تغيير التجاوزات لأدوار بنفس مستوى دورك أو أعلى منه",
     "cannotSetHigherOverrides": "لا يمكن تعيين تجاوزات لأدوار بنفس مستوى دورك أو أعلى منه",
     "cannotOverrideUnheldPermissions": "لا يمكن تعيين تجاوزات لصلاحيات لا تملكها",

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import { Permissions, ALL_PERMISSIONS, LEGACY_CLIENT_KNOWN_PERMISSIONS, WS_EVENTS, permissionsToString } from '@voxium/shared';
+import { Permissions, ALL_PERMISSIONS, LEGACY_CLIENT_KNOWN_PERMISSIONS, LIMITS, WS_EVENTS, permissionsToString } from '@voxium/shared';
 import { lazyStatement } from '../helpers/lazyStatement';
+import { MAX_SORT_POSITION } from '../../utils/sortPosition';
 
 /**
  * Role and channel-override writes MERGE into the stored bitmask (#75): the
@@ -28,7 +29,7 @@ let order: string[] = [];
 const tx = {
   $queryRaw: vi.fn(),
   server: { findUnique: vi.fn() },
-  role: { update: vi.fn() },
+  role: { update: vi.fn(), aggregate: vi.fn(), create: vi.fn() },
   channel: { findFirst: vi.fn() },
   channelPermissionOverride: { findUnique: vi.fn(), findMany: vi.fn(), upsert: vi.fn(), deleteMany: vi.fn() },
 };
@@ -580,12 +581,12 @@ describe('a knownPermissions that is not a permission bitmask string is a 400 on
     actorIs(OWNER);
     prismaMock.role.findFirst.mockResolvedValue(null);
     prismaMock.role.count.mockResolvedValue(0);
-    prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
 
     const res = await createRole({ name: 'Helpers', permissions: s(Permissions.VIEW_CHANNEL), knownPermissions: value });
 
     expect(res.status).toBe(400);
-    expect(prismaMock.role.create).not.toHaveBeenCalled();
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(tx.role.create).not.toHaveBeenCalled();
   });
 
   it('forty digits is the longest accepted', async () => {
@@ -600,14 +601,32 @@ describe('a knownPermissions that is not a permission bitmask string is a 400 on
 
 // ─── The role creation ──────────────────────────────────────────────────────
 
+/**
+ * The space as a creation finds it: the roles counted on the shared client
+ * (the early answer) and, under the space row lock, the count and the
+ * highest position read on the transaction's client. The space row lock is
+ * the one raw statement a creation sends: any other is refused as
+ * unexpected, so a creation that locked a role row would fail.
+ */
+function creatable(space: { count?: number; inTx?: { count?: number; max?: number | null }; gone?: boolean } = {}) {
+  prismaMock.role.findFirst.mockResolvedValue(null);
+  prismaMock.role.count.mockImplementation(async () => { order.push('count'); return space.count ?? 0; });
+  tx.$queryRaw.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join('?');
+    if (!sql.startsWith('SELECT id FROM servers')) throw new Error(`unexpected statement: ${sql}`);
+    return lazyStatement(order, `tx:${sql} [${values.join(',')}]`, space.gone ? [] : [{ id: 'srv1' }]);
+  });
+  tx.role.aggregate.mockImplementation(async () => {
+    order.push('tx:count+highest');
+    return { _count: { _all: space.inTx?.count ?? space.count ?? 0 }, _max: { position: space.inTx?.max === undefined ? 6 : space.inTx.max } };
+  });
+  tx.role.create.mockImplementation(async ({ data }: any) => { order.push('tx:role.create'); return { id: 'role-new', ...data }; });
+}
+/** What the creation inserted. */
+const createdRow = () => (tx.role.create.mock.calls[0][0] as any).data;
+
 describe('POST /roles — a creation stores the bits its client knows from what it sent', () => {
-  function creatable() {
-    prismaMock.role.findFirst.mockResolvedValue(null);
-    prismaMock.role.count.mockResolvedValue(0);
-    prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
-    prismaMock.role.create.mockImplementation(async ({ data }: any) => ({ id: 'role-new', ...data }));
-  }
-  const created = () => BigInt((prismaMock.role.create.mock.calls[0][0] as any).data.permissions);
+  const created = () => BigInt(createdRow().permissions);
 
   it('the bits outside a narrow knownPermissions are not stored', async () => {
     actorIs(OWNER);
@@ -642,7 +661,8 @@ describe('POST /roles — a creation stores the bits its client knows from what 
 
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('Cannot grant permissions you do not have');
-    expect(prismaMock.role.create).not.toHaveBeenCalled();
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(tx.role.create).not.toHaveBeenCalled();
   });
 
   it('a bit the actor lacks but the client says it does not know is dropped, not refused', async () => {
@@ -657,6 +677,235 @@ describe('POST /roles — a creation stores the bits its client knows from what 
 
     expect(res.status).toBe(201);
     expect(created()).toBe(Permissions.SEND_MESSAGES);
+  });
+});
+
+/**
+ * A creation counts, places and inserts under the space row lock, every
+ * check made again on the transaction's client, and moves no existing role.
+ * A new role goes one position below its creator's highest role (a role
+ * already there shares it; the owner's goes on top, at most
+ * MAX_SORT_POSITION); a creator whose highest position is 0 is refused.
+ */
+describe('POST /roles — one transaction under the space row, the new role below its creator', () => {
+  const TOO_LOW = 'Your role is too low in the role order to create roles';
+  /** The socket events of the creation, in the order they went out. */
+  const emitted = () => mockEmit.mock.calls.map(([event]) => event);
+
+  it('the space row FIRST (FOR UPDATE), then every check on the transaction\'s client, then the insert, with the long budget; no statement locks or writes an existing role', async () => {
+    actorIs(MODERATOR);
+    creatable({ count: 3 });
+
+    const res = await createRole({ name: 'Helpers', permissions: s(Permissions.SEND_MESSAGES), knownPermissions: s(ALL_PERMISSIONS) });
+
+    expect(res.status).toBe(201);
+    expect(order).toEqual([
+      // the early answer, on the shared client
+      'may-manage',
+      'count',
+      'rank',
+      'holds',
+      `txn ${JSON.stringify({ timeout: 60_000, maxWait: 10_000 })}`,
+      'tx:SELECT id FROM servers WHERE id = ? FOR UPDATE [srv1]',
+      'tx:may-manage',
+      'tx:count+highest',
+      'tx:rank',
+      'tx:holds',
+      'tx:role.create',
+    ]);
+    expect(tx.role.aggregate).toHaveBeenCalledWith({ where: { serverId: 'srv1', isDefault: false }, _count: { _all: true }, _max: { position: true } });
+    // the space row lock is the one raw statement, and no role row is updated
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(tx.role.update).not.toHaveBeenCalled();
+    expect(prismaMock.role.update).not.toHaveBeenCalled();
+    expect(prismaMock.role.create).not.toHaveBeenCalled();
+    expect(prismaMock.role.aggregate).not.toHaveBeenCalled();
+    expect(createdRow().position).toBe(4);
+  });
+
+  it.each([['a moderator', MODERATOR], ['the owner', OWNER]] as const)('%s\'s creation announces the new role alone (role:created, never role:reordered) and re-syncs no rooms', async (_who, actor) => {
+    actorIs(actor);
+    creatable();
+
+    expect((await createRole({ name: 'Helpers' })).status).toBe(201);
+
+    expect(emitted()).toEqual([WS_EVENTS.ROLE_CREATED]);
+    expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.ROLE_CREATED, { serverId: 'srv1', role: expect.objectContaining({ id: 'role-new', position: createdRow().position }) });
+    expect(mockTo.mock.calls).toEqual([['server:srv1']]);
+    // positions do not enter the permission calculation
+    expect(mockSync).not.toHaveBeenCalled();
+  });
+
+  it('a non-owner\'s role goes one position below their highest role, as the transaction reads it', async () => {
+    actorIs(MODERATOR);
+    creatable();
+    expect((await createRole({ name: 'Helpers' })).body.data.position).toBe(MODERATOR.rank - 1);
+
+    vi.clearAllMocks();
+    // ranked up meanwhile: placed below the rank read under the lock
+    actorIs(MODERATOR, { rank: 8 });
+    creatable();
+    expect((await createRole({ name: 'Helpers' })).status).toBe(201);
+    expect(createdRow().position).toBe(7);
+  });
+
+  it('a creator whose highest role is at 1: the role goes to 0, below them', async () => {
+    actorIs({ rank: 1, holds: MODERATOR.holds });
+    creatable();
+
+    expect((await createRole({ name: 'Helpers' })).status).toBe(201);
+    expect(createdRow().position).toBe(0);
+  });
+
+  it('the owner\'s role goes on top, one above the highest, at most MAX_SORT_POSITION, whatever their rank', async () => {
+    for (const [max, expected] of [
+      [6, 7],
+      [null, 1],
+      [MAX_SORT_POSITION - 1, MAX_SORT_POSITION],
+      // at the bound it shares the top position
+      [MAX_SORT_POSITION, MAX_SORT_POSITION],
+      // a position stored above the bound before the reorder had one
+      [MAX_SORT_POSITION + 5, MAX_SORT_POSITION],
+    ] as const) {
+      vi.clearAllMocks();
+      actorIs(OWNER);
+      creatable({ inTx: { max } });
+      expect((await createRole({ name: 'Helpers' })).status).toBe(201);
+      expect(createdRow().position).toBe(expected);
+    }
+    // nothing the owner holds is read
+    expect(mockComputeServerPermissions).not.toHaveBeenCalled();
+  });
+
+  it('a creator whose highest position is 0 (no role of their own, or only roles at 0): 403, before any transaction', async () => {
+    actorIs({ rank: 0, holds: MODERATOR.holds });
+    creatable();
+
+    const res = await createRole({ name: 'Helpers' });
+
+    expect({ status: res.status, error: res.body.error }).toEqual({ status: 403, error: TOO_LOW });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('a creator ranked down to 0 by the time the space row is theirs: 403 inside, nothing created', async () => {
+    actorIs(MODERATOR, { rank: 0 });
+    creatable();
+
+    const res = await createRole({ name: 'Helpers' });
+
+    expect({ status: res.status, error: res.body.error }).toEqual({ status: 403, error: TOO_LOW });
+    expect(tx.role.create).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('the cap is counted under the lock: a role committed meanwhile makes the space full, 400, nothing created', async () => {
+    actorIs(OWNER);
+    creatable({ count: LIMITS.MAX_ROLES_PER_SERVER - 1, inTx: { count: LIMITS.MAX_ROLES_PER_SERVER } });
+
+    const res = await createRole({ name: 'Helpers' });
+
+    expect({ status: res.status, error: res.body.error }).toEqual({ status: 400, error: `Server can have at most ${LIMITS.MAX_ROLES_PER_SERVER} roles` });
+    expect(tx.role.create).not.toHaveBeenCalled();
+  });
+
+  it('Manage Roles lost by the time the space row is theirs: 403, nothing created', async () => {
+    actorIs(MODERATOR, { mayManage: false });
+    creatable();
+
+    const res = await createRole({ name: 'Helpers' });
+
+    expect({ status: res.status, error: res.body.error }).toEqual({ status: 403, error: 'You do not have permission to manage roles' });
+    expect(tx.role.create).not.toHaveBeenCalled();
+  });
+
+  it('a bit the creator lost by the time the space row is theirs: 403, nothing created', async () => {
+    actorIs(MODERATOR, { holds: Permissions.VIEW_CHANNEL | Permissions.MANAGE_ROLES });
+    creatable();
+
+    const res = await createRole({ name: 'Helpers', permissions: s(Permissions.SEND_MESSAGES), knownPermissions: s(ALL_PERMISSIONS) });
+
+    expect({ status: res.status, error: res.body.error }).toEqual({ status: 403, error: 'Cannot grant permissions you do not have' });
+    expect(tx.role.create).not.toHaveBeenCalled();
+  });
+
+  it('a creation with no permission bit reads nothing the creator holds', async () => {
+    actorIs(MODERATOR);
+    creatable();
+
+    expect((await createRole({ name: 'Helpers' })).status).toBe(201);
+    expect(order).not.toContain('tx:holds');
+    expect(order).not.toContain('holds');
+  });
+
+  it.each([['the owner', OWNER], ['a moderator', MODERATOR]] as const)('%s, the space deleted since the early answer: 404 Server, nothing counted, created or announced', async (_who, actor) => {
+    actorIs(actor);
+    creatable({ gone: true });
+
+    const res = await createRole({ name: 'Helpers' });
+
+    expect({ status: res.status, error: res.body.error }).toEqual({ status: 404, error: 'Server not found' });
+    expect(tx.role.aggregate).not.toHaveBeenCalled();
+    expect(tx.role.create).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('a transaction PostgreSQL aborted to break a deadlock runs again whole, the lock included', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    actorIs(OWNER);
+    creatable();
+    const real = prismaMock.$transaction.getMockImplementation()!;
+    prismaMock.$transaction
+      .mockImplementationOnce(async () => { throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }); })
+      .mockImplementation(real);
+    try {
+      expect((await createRole({ name: 'Helpers' })).status).toBe(201);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+      expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(tx.role.create).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a deadlock at the insert: the whole transaction runs again (lock, checks, insert), and the role is announced once', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    actorIs(MODERATOR);
+    creatable();
+    tx.role.create.mockImplementationOnce(async () => {
+      order.push('tx:role.create (aborted)');
+      throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+    });
+    try {
+      expect((await createRole({ name: 'Helpers' })).status).toBe(201);
+      const starts = order.flatMap((statement, i) => (statement.startsWith('txn ') ? [i] : []));
+      expect(starts).toHaveLength(2);
+      const ATTEMPT = [
+        'tx:SELECT id FROM servers WHERE id = ? FOR UPDATE [srv1]',
+        'tx:may-manage',
+        'tx:count+highest',
+        'tx:rank',
+      ];
+      expect(order.slice(starts[0] + 1, starts[1])).toEqual([...ATTEMPT, 'tx:role.create (aborted)']);
+      expect(order.slice(starts[1] + 1)).toEqual([...ATTEMPT, 'tx:role.create']);
+      expect(emitted()).toEqual([WS_EVENTS.ROLE_CREATED]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a name taken by a creation that committed first: the 409, after one attempt, nothing announced', async () => {
+    actorIs(OWNER);
+    creatable();
+    tx.role.create.mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed'), {
+      code: 'P2002', meta: { driverAdapterError: { cause: { constraint: { index: 'roles_server_id_name_key' } } } },
+    }));
+
+    const res = await createRole({ name: 'Helpers' });
+
+    expect({ status: res.status, error: res.body.error }).toEqual({ status: 409, error: 'A role with this name already exists' });
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(mockEmit).not.toHaveBeenCalled();
   });
 });
 
@@ -1238,13 +1487,12 @@ describe('a permission value that is present but not a permission bitmask string
     actorIs(OWNER);
     prismaMock.role.findFirst.mockResolvedValue(null);
     prismaMock.role.count.mockResolvedValue(0);
-    prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
 
     const res = await createRole({ name: 'Helpers', permissions: value });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe(message('permissions'));
-    expect(prismaMock.role.create).not.toHaveBeenCalled();
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
   });
 
   it.each(unparseable)('PUT allow %j: 400, nothing written', async (value) => {

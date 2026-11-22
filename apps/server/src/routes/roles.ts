@@ -50,6 +50,27 @@ const ROLE_NAME_TAKEN_MESSAGE = 'A role with this name already exists';
 /** The unique index on a role's name within its space (`@@unique([serverId, name])`). */
 const ROLE_NAME_INDEX = 'roles_server_id_name_key';
 
+/** A creation by a member whose highest position is 0, @everyone's. */
+const ROLE_TOO_LOW_MESSAGE = 'Your role is too low in the role order to create roles';
+
+/**
+ * Where a new role goes, given its creator's highest position
+ * (getHighestRolePosition: Infinity for the owner) and the highest position
+ * of the space's roles. A creation moves no existing role. The owner's goes
+ * on top, one above the highest role, at most MAX_SORT_POSITION (the bound of
+ * the role reorder: a role already there shares it). Anyone else's
+ * goes one position below their own highest role, so that it is below them
+ * by the rule every later edit, assignment, override and delete of it is
+ * judged by (a role at or above the actor is refused); a role already at
+ * that position shares it, and every rank comparison treats the two as
+ * equal. Null when no position below the creator's exists: their highest is
+ * 0, @everyone's (no role of their own, or only roles at 0).
+ */
+function newRolePosition(creatorHighest: number, highestRolePosition: number | null): number | null {
+  if (creatorHighest === Infinity) return Math.min((highestRolePosition ?? 0) + 1, MAX_SORT_POSITION);
+  return creatorHighest >= 1 ? creatorHighest - 1 : null;
+}
+
 /**
  * Run a write that sets a role's name. The duplicate check before it is the
  * early answer only: a creation or rename of the same name committed between
@@ -246,17 +267,12 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
       color = req.body.color;
     }
 
-    // New roles are created at position just below the actor's highest role
-    const actorHighest = await getHighestRolePosition(req.user!.userId, serverId);
-    // Insert at position 1 (above @everyone which is 0), shift others up if needed
-    const highestPosition = await prisma.role.aggregate({
-      where: { serverId, isDefault: false },
-      _max: { position: true },
-    });
-    const newPosition = Math.min(
-      (highestPosition._max.position ?? 0) + 1,
-      actorHighest === Infinity ? 999 : actorHighest,
-    );
+    // A new role goes strictly below its creator's highest role (the owner's
+    // on top): a creator whose highest position is 0 has no position below
+    // their own (newRolePosition)
+    const actorId = req.user!.userId;
+    const actorHighest = await getHighestRolePosition(actorId, serverId);
+    if (newRolePosition(actorHighest, null) === null) throw new ForbiddenError(ROLE_TOO_LOW_MESSAGE);
 
     // Parse permissions from request (default to 0). A creation stores the
     // bits its client knows from what it sent (see utils/permissionWrites.ts;
@@ -269,7 +285,7 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
       // Cannot grant permissions the actor doesn't have (except owner): every
       // bit a creation stores is one it turns on
       if (actorHighest !== Infinity) {
-        const actorPerms = await getEffectivePermissions(req.user!.userId, serverId);
+        const actorPerms = await getEffectivePermissions(actorId, serverId);
         const actorPermBits = permissionsFromString(actorPerms.permissions);
         if ((permissions & ~actorPermBits) !== 0n) {
           throw new ForbiddenError('Cannot grant permissions you do not have');
@@ -277,15 +293,55 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
       }
     }
 
-    const role = await withUniqueRoleName(() => prisma.role.create({
-      data: {
-        serverId,
-        name,
-        color,
-        position: newPosition,
-        permissions: permissionsToString(permissions),
-      },
-    }));
+    // Everything above is the early answer. Then one transaction whose first
+    // statement locks the space row (FOR UPDATE, as a channel or category
+    // creation takes it): concurrent creations in one space run one after the
+    // other, each counting and placing against every creation committed
+    // before it. Inside it, on the transaction's client and in the order of
+    // the early answer: Manage Roles, the cap and the highest position (one
+    // aggregate), the creator's rank and the position it gives
+    // (newRolePosition), every bit turned on held; then the insert. The space
+    // row is the only existing row it locks, and it writes no existing role.
+    // A role reorder, a role assignment or a role delete by someone else takes
+    // no space row: one that commits between the rank read and the insert can
+    // still leave the new role at or above its creator, and the only
+    // consequence is a role its creator cannot manage (no one gains a power).
+    // Run again whole when PostgreSQL aborts it to break a deadlock; the long
+    // budget (LOCK_WAIT_TRANSACTION_OPTIONS): a space delete holds the space
+    // row through its cascade. A name taken meanwhile is answered once the
+    // retries are done (withUniqueRoleName).
+    const role = await withUniqueRoleName(() => retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      if (space.length === 0) throw new NotFoundError('Server');
+      const mayManage = await hasServerPermission(actorId, serverId, Permissions.MANAGE_ROLES, tx);
+      if (!mayManage) throw new ForbiddenError('You do not have permission to manage roles');
+      const { _count, _max } = await tx.role.aggregate({
+        where: { serverId, isDefault: false },
+        _count: { _all: true },
+        _max: { position: true },
+      });
+      if (_count._all >= LIMITS.MAX_ROLES_PER_SERVER) {
+        throw new BadRequestError(`Server can have at most ${LIMITS.MAX_ROLES_PER_SERVER} roles`);
+      }
+      const highest = await getHighestRolePosition(actorId, serverId, tx);
+      const position = newRolePosition(highest, _max.position);
+      if (position === null) throw new ForbiddenError(ROLE_TOO_LOW_MESSAGE);
+      if (highest !== Infinity && permissions !== 0n) {
+        const actorBits = await computeServerPermissions(actorId, serverId, tx);
+        if ((permissions & ~actorBits) !== 0n) {
+          throw new ForbiddenError('Cannot grant permissions you do not have');
+        }
+      }
+      return tx.role.create({
+        data: {
+          serverId,
+          name,
+          color,
+          position,
+          permissions: permissionsToString(permissions),
+        },
+      });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] A role creation in ${serverId}`));
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_CREATED, {
       serverId,
