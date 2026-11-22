@@ -69,6 +69,26 @@ interface UserMediaState {
   /** E2E media-session epoch announced on join — peers echo it inside sealed
    *  keys so a dead session's key cannot be installed later. Opaque here. */
   e2eEpoch?: string;
+  /** The latest speaking state this session's client sent. "Speaking" is
+   *  broadcast only while the session holds a microphone producer, so one sent
+   *  before the producer was stored is broadcast when it is (voice:produce). */
+  speakingRequested?: boolean;
+}
+
+/** Whether a producer is a MICROPHONE: audio whose appData.type, set by the
+ *  server, is 'audio' (screen audio is not a microphone). */
+function isMicProducer(producer: Producer): boolean {
+  return producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio';
+}
+
+/** Whether the session holds an OPEN microphone producer. A paused one counts:
+ *  the silence gate pauses it, and mediasoup clears `paused` only after a
+ *  resume request returns, so a state applied meanwhile still reads paused. */
+function holdsMicProducer(media: UserMediaState): boolean {
+  for (const producer of media.producers.values()) {
+    if (!producer.closed && isMicProducer(producer)) return true;
+  }
+  return false;
 }
 
 /** The E2E announcement fields mirrored/broadcast alongside voice state. */
@@ -319,6 +339,17 @@ export function createVoiceHandlers(
   const on = (event: string, handler: VoiceEventHandler): void => {
     handlers[event] = handler;
   };
+
+  /** Whether `media` is still this user's session in `channelId` (a leave, or
+   *  a rejoin that made a new UserMediaState, ends it). */
+  const isCurrentSession = (channelId: string, media: UserMediaState | undefined): boolean =>
+    socket.data.voiceChannelId === channelId && voiceChannelUsers.get(channelId)?.get(userId) === media;
+
+  /** THE gate of a "speaking" broadcast, for the state applied at event time
+   *  and for the replay at voice:produce: the session is current, not
+   *  server-muted, and holds an open microphone producer. */
+  const mayShowSpeaking = (channelId: string, media: UserMediaState): boolean =>
+    isCurrentSession(channelId, media) && !media.serverMuted && holdsMicProducer(media);
 
   // ── voice:join ────────────────────────────────────────────────────────
   on('voice:join', async (channelId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string; epoch?: string }) => {
@@ -748,6 +779,13 @@ export function createVoiceHandlers(
         producer.pause();
       }
 
+      // A "speaking" the client sent before its microphone producer existed
+      // was not broadcast (voice:speaking): broadcast it now that it does, for
+      // the session that is still in the channel
+      if (producerType === 'audio' && userMedia.speakingRequested === true && mayShowSpeaking(channelId, userMedia)) {
+        io.to(`channel:${channelId}`).emit('voice:speaking', { channelId, userId, speaking: true });
+      }
+
       producer.on('transportclose', () => {
         userMedia.producers.delete(producer.id);
       });
@@ -881,7 +919,7 @@ export function createVoiceHandlers(
    *  system audio must keep flowing for muted/PTT sharers. */
   function pauseUserAudio(media: UserMediaState) {
     for (const producer of media.producers.values()) {
-      if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
+      if (isMicProducer(producer)) {
         producer.pause();
       }
     }
@@ -891,7 +929,7 @@ export function createVoiceHandlers(
   function resumeUserAudioIfAllowed(media: UserMediaState) {
     if (media.selfMute || media.serverMuted) return;
     for (const producer of media.producers.values()) {
-      if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
+      if (isMicProducer(producer)) {
         producer.resume();
       }
     }
@@ -960,17 +998,17 @@ export function createVoiceHandlers(
     if (!channelId) return;
 
     const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
+    if (userMedia) userMedia.speakingRequested = speaking;
     // A held state belongs to the session it was sent in: a leave, or a
     // rejoin (a new UserMediaState), drops it
-    const sameSession = () =>
-      socket.data.voiceChannelId === channelId && voiceChannelUsers.get(channelId)?.get(userId) === userMedia;
+    const sameSession = () => isCurrentSession(channelId, userMedia);
 
     applyLatestState(socket, 'voice:speaking:producer', SPEAKING_EVENTS_PER_MINUTE, () => {
       // Only control producers if not self-muted AND not server-muted (read
       // when applied: a held state can run after a mute)
       if (!userMedia || !sameSession() || userMedia.selfMute || userMedia.serverMuted) return;
       for (const producer of userMedia.producers.values()) {
-        if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
+        if (isMicProducer(producer)) {
           if (speaking) runProducerOp(() => producer.resume(), 'resume');
           else runProducerOp(() => producer.pause(), 'pause');
         }
@@ -978,9 +1016,13 @@ export function createVoiceHandlers(
     });
 
     applyLatestState(socket, 'voice:speaking', SPEAKING_INDICATOR_EVENTS_PER_MINUTE, () => {
-      if (!sameSession()) return;
-      // Don't broadcast speaking indicator if server-muted (prevents UI deception by modified clients)
-      if (userMedia?.serverMuted) return;
+      if (!userMedia || !sameSession()) return;
+      // "Speaking" only for a session that can be heard: one holding a
+      // microphone producer (a member without SPEAK holds none) and not
+      // server-muted. Read when applied: a held state can run after the
+      // producer closed or a mute. "Not speaking" always goes out, or a ring
+      // shown earlier would stay on.
+      if (speaking && !mayShowSpeaking(channelId, userMedia)) return;
       // Channel visibility room — private voice channels must not leak activity server-wide
       io.to(`channel:${channelId}`).emit('voice:speaking', { channelId, userId, speaking });
     });
@@ -1021,6 +1063,12 @@ export function createVoiceHandlers(
 
     if (muted) {
       pauseUserAudio(targetMedia);
+      // The ring of a target shown speaking goes off now, not at its next
+      // state change. No notice on un-mute: the gate lets its next "speaking"
+      // through.
+      if (targetMedia.speakingRequested === true) {
+        io.to(`channel:${channelId}`).emit('voice:speaking', { channelId, userId: targetId, speaking: false });
+      }
     } else {
       resumeUserAudioIfAllowed(targetMedia);
     }
@@ -1075,6 +1123,12 @@ export function createVoiceHandlers(
       targetMedia.serverMuted = true;
       setServerMutePersist(serverId, targetId, true);
       pauseUserAudio(targetMedia);
+    }
+
+    // Deafen implies mute: the ring of a target shown speaking goes off now.
+    // No notice on un-deafen: the gate lets its next "speaking" through.
+    if (deafened && targetMedia.speakingRequested === true) {
+      io.to(`channel:${channelId}`).emit('voice:speaking', { channelId, userId: targetId, speaking: false });
     }
 
     mirrorVoiceStateUpdate(channelId, targetId, targetMedia.selfMute, targetMedia.selfDeaf, targetMedia.serverMuted, targetMedia.serverDeafened, targetMedia);

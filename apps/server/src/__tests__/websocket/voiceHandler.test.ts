@@ -191,6 +191,7 @@ vi.mock('../../utils/serverLimits', () => ({
 }));
 
 import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent, handleWorkerDeath, getVoiceDiagnostics, cleanupChannelVoice, cleanupServerVoice, evictUserFromChannelVoice, getVoiceStateForServers, replayVoiceState, VOICE_SESSION_TAKEN_OVER } from '../../websocket/voiceHandler';
+import { VOICE_SPEAK_REFUSED_MESSAGE } from '@voxium/shared';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -1153,6 +1154,229 @@ describe('voiceHandler — SPEAK bypass via client appData (HIGH-4)', () => {
   });
 });
 
+describe('voiceHandler — "speaking" is broadcast only for a session holding a microphone producer', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+    mockVoiceRedis.get.mockResolvedValue(null);
+  });
+
+  const speakingBroadcasts = (io: ReturnType<typeof createMockIO>) =>
+    io._emit.mock.calls.filter(([event]) => event === 'voice:speaking').map(([, payload]) => payload);
+
+  async function joined(id: string) {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket(id, `sock-${id}`);
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!(`ch-${id}`);
+    return { io, socket, handlers };
+  }
+
+  it('a member refused the microphone (no SPEAK) never has "speaking" broadcast, and "not speaking" still goes out', async () => {
+    const { io, handlers } = await joined('nomic-1');
+    vi.mocked(hasChannelPermission).mockResolvedValueOnce(false); // SPEAK, for the produce
+    const ack = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, ack);
+    expect(ack).toHaveBeenCalledWith({ error: VOICE_SPEAK_REFUSED_MESSAGE });
+    io._emit.mockClear();
+
+    handlers.get('voice:speaking')!(true);
+    expect(speakingBroadcasts(io)).toEqual([]);
+    handlers.get('voice:speaking')!(false);
+    expect(speakingBroadcasts(io)).toEqual([{ channelId: 'ch-nomic-1', userId: 'nomic-1', speaking: false }]);
+  });
+
+  it('screen audio alone is not a microphone: a sharer without one has no "speaking" broadcast', async () => {
+    const { io, handlers } = await joined('nomic-2');
+    handlers.get('voice:screen_share:start')!(vi.fn());
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio' } }, vi.fn());
+    io._emit.mockClear();
+
+    handlers.get('voice:speaking')!(true);
+    expect(speakingBroadcasts(io)).toEqual([]);
+  });
+
+  it('once the microphone producer is closed, "speaking" is no longer broadcast but "not speaking" is', async () => {
+    const { io, handlers } = await joined('nomic-3');
+    const ack = vi.fn();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, ack);
+    io._emit.mockClear();
+    handlers.get('voice:speaking')!(true);
+    expect(speakingBroadcasts(io)).toEqual([{ channelId: 'ch-nomic-3', userId: 'nomic-3', speaking: true }]);
+
+    handlers.get('voice:producer:close')!({ producerId: ack.mock.calls[0][0].producerId });
+    io._emit.mockClear();
+    handlers.get('voice:speaking')!(true);
+    expect(speakingBroadcasts(io)).toEqual([]);
+    handlers.get('voice:speaking')!(false);
+    expect(speakingBroadcasts(io)).toEqual([{ channelId: 'ch-nomic-3', userId: 'nomic-3', speaking: false }]);
+  });
+
+  it('a microphone producer closed under the session (still in its map) counts as none', async () => {
+    const { io, handlers } = await joined('nomic-4');
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    const transports = await getCreatedTransports();
+    const mic = await transports[transports.length - 2].produce.mock.results[0].value;
+    mic.closed = true;
+    io._emit.mockClear();
+
+    handlers.get('voice:speaking')!(true);
+    expect(speakingBroadcasts(io)).toEqual([]);
+  });
+
+  it('a "speaking" sent before the microphone producer existed is broadcast when the producer is stored', async () => {
+    const { io, handlers } = await joined('nomic-5');
+    io._emit.mockClear();
+    handlers.get('voice:speaking')!(true);
+    expect(speakingBroadcasts(io)).toEqual([]);
+
+    io.to.mockClear();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    expect(speakingBroadcasts(io)).toEqual([{ channelId: 'ch-nomic-5', userId: 'nomic-5', speaking: true }]);
+    // The replay goes to the channel's room and nowhere else
+    expect(io.to.mock.calls.map(([room]) => room)).toEqual(['channel:ch-nomic-5']);
+  });
+
+  it('a session ended while the produce waits for its permission check gets no replay', async () => {
+    const { io, handlers } = await joined('nomic-5b');
+    handlers.get('voice:speaking')!(true);
+    let allow!: (value: boolean) => void;
+    vi.mocked(hasChannelPermission).mockImplementationOnce(() => new Promise<boolean>((resolve) => { allow = resolve; }));
+    const producing = handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    await handlers.get('voice:leave')!();
+    io._emit.mockClear();
+    allow(true);
+    await producing;
+    expect(speakingBroadcasts(io)).toEqual([]);
+  });
+
+  it('a PAUSED microphone producer still counts as held: mediasoup clears `paused` only after resume returns', async () => {
+    const { io, handlers } = await joined('nomic-5c');
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    const transports = await getCreatedTransports();
+    const mic = await transports[transports.length - 2].produce.mock.results[0].value;
+    handlers.get('voice:speaking')!(false); // the silence gate pauses it
+    // The resume request has not returned yet: `paused` stays true meanwhile
+    mic.resume.mockImplementation(() => Promise.resolve());
+    mic.paused = true;
+    io._emit.mockClear();
+
+    handlers.get('voice:speaking')!(true);
+    expect(speakingBroadcasts(io)).toEqual([{ channelId: 'ch-nomic-5c', userId: 'nomic-5c', speaking: true }]);
+  });
+
+  it('nothing is broadcast at the producer when the latest state was "not speaking", or for screen audio', async () => {
+    const { io, handlers } = await joined('nomic-6');
+    handlers.get('voice:speaking')!(true);
+    handlers.get('voice:speaking')!(false);
+    io._emit.mockClear();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    expect(speakingBroadcasts(io)).toEqual([]);
+
+    handlers.get('voice:speaking')!(true);
+    handlers.get('voice:screen_share:start')!(vi.fn());
+    io._emit.mockClear();
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {}, appData: { type: 'screen-audio' } }, vi.fn());
+    expect(speakingBroadcasts(io)).toEqual([]);
+  });
+
+  it('a server-muted participant never has "speaking" broadcast, at the event or at the producer, and "not speaking" goes out', async () => {
+    // Server-muted before the join (persisted moderation state)
+    mockVoiceRedis.get.mockImplementation((key: string) =>
+      Promise.resolve(key === 'voice:server_muted:s1:nomic-7' ? '1' : null));
+    const { io, handlers } = await joined('nomic-7');
+    io._emit.mockClear();
+    handlers.get('voice:speaking')!(true);
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    handlers.get('voice:speaking')!(true);
+    expect(speakingBroadcasts(io)).toEqual([]);
+    handlers.get('voice:speaking')!(false);
+    expect(speakingBroadcasts(io)).toEqual([{ channelId: 'ch-nomic-7', userId: 'nomic-7', speaking: false }]);
+  });
+
+  it('a ring shown before a moderator\'s server-mute is turned off by the next "not speaking"', async () => {
+    const { io, handlers } = await joined('nomic-8');
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    handlers.get('voice:speaking')!(true);
+    const moderator = createMockSocket('mod-nomic-8', 'sock-mod-nomic-8');
+    handleVoiceEvents(io as any, moderator.socket as any);
+    await moderator.handlers.get('voice:join')!('ch-nomic-8');
+    await moderator.handlers.get('voice:server_mute')!({ userId: 'nomic-8', muted: true });
+    io._emit.mockClear();
+
+    handlers.get('voice:speaking')!(false);
+    expect(speakingBroadcasts(io)).toEqual([{ channelId: 'ch-nomic-8', userId: 'nomic-8', speaking: false }]);
+  });
+
+  describe('a moderator server mute or deafen turns the ring off at once', () => {
+    async function speakerAndModerator(id: string) {
+      const { io, handlers } = await joined(id);
+      await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+      const moderator = createMockSocket(`mod-${id}`, `sock-mod-${id}`);
+      handleVoiceEvents(io as any, moderator.socket as any);
+      await moderator.handlers.get('voice:join')!(`ch-${id}`);
+      return { io, handlers, moderator: moderator.handlers };
+    }
+    const off = (id: string) => ({ channelId: `ch-${id}`, userId: id, speaking: false });
+
+    it('server mute while shown speaking emits one "not speaking", to the channel room only', async () => {
+      const { io, handlers, moderator } = await speakerAndModerator('nomic-m1');
+      handlers.get('voice:speaking')!(true);
+      io._emit.mockClear();
+      io.to.mockClear();
+      await moderator.get('voice:server_mute')!({ userId: 'nomic-m1', muted: true });
+      expect(speakingBroadcasts(io)).toEqual([off('nomic-m1')]);
+      expect(new Set(io.to.mock.calls.map(([room]) => room))).toEqual(new Set(['channel:ch-nomic-m1']));
+    });
+
+    it('server mute while not speaking emits none', async () => {
+      const { io, handlers, moderator } = await speakerAndModerator('nomic-m2');
+      handlers.get('voice:speaking')!(true);
+      handlers.get('voice:speaking')!(false);
+      io._emit.mockClear();
+      await moderator.get('voice:server_mute')!({ userId: 'nomic-m2', muted: true });
+      expect(speakingBroadcasts(io)).toEqual([]);
+    });
+
+    it('server deafen while shown speaking emits one "not speaking"', async () => {
+      const { io, handlers, moderator } = await speakerAndModerator('nomic-m3');
+      handlers.get('voice:speaking')!(true);
+      io._emit.mockClear();
+      await moderator.get('voice:server_deafen')!({ userId: 'nomic-m3', deafened: true });
+      expect(speakingBroadcasts(io)).toEqual([off('nomic-m3')]);
+    });
+
+    it('un-mute and un-deafen emit none, and the next "speaking" is let through', async () => {
+      const { io, handlers, moderator } = await speakerAndModerator('nomic-m4');
+      handlers.get('voice:speaking')!(true);
+      await moderator.get('voice:server_deafen')!({ userId: 'nomic-m4', deafened: true });
+      io._emit.mockClear();
+      await moderator.get('voice:server_deafen')!({ userId: 'nomic-m4', deafened: false });
+      await moderator.get('voice:server_mute')!({ userId: 'nomic-m4', muted: false });
+      expect(speakingBroadcasts(io)).toEqual([]);
+      handlers.get('voice:speaking')!(true);
+      expect(speakingBroadcasts(io)).toEqual([{ channelId: 'ch-nomic-m4', userId: 'nomic-m4', speaking: true }]);
+    });
+  });
+
+  it('on the owner node, a relayed participant behind a shim follows the same rule', async () => {
+    const io = createMockIO();
+    const shim = { id: 'shim-nomic-9', data: { userId: 'nomic-9' }, emit: vi.fn(), join: vi.fn(), leave: vi.fn() };
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:join', ['ch-nomic-9', null], vi.fn());
+    io._emit.mockClear();
+
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:speaking', [true]);
+    expect(speakingBroadcasts(io)).toEqual([]);
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:produce', [{ kind: 'audio', rtpParameters: {} }], vi.fn());
+    expect(speakingBroadcasts(io)).toEqual([{ channelId: 'ch-nomic-9', userId: 'nomic-9', speaking: true }]);
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:speaking', [false]);
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:speaking', [true]);
+    expect(speakingBroadcasts(io).map((p) => p.speaking)).toEqual([true, false, true]);
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:leave', []);
+  });
+});
+
 describe('voiceHandler — screen share slot protocol (HIGH-1)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1467,6 +1691,7 @@ describe('voiceHandler — private channel broadcasts (HIGH-8)', () => {
     const { socket, handlers } = createMockSocket('h8-3', 'sock-h8-3');
     handleVoiceEvents(io as any, socket as any);
     await handlers.get('voice:join')!('ch-h8-3');
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
     io.to.mockClear();
     io._emit.mockClear();
 
@@ -2874,6 +3099,26 @@ describe('voiceHandler — voice:speaking keeps the latest state over the rate l
     io._emit.mockClear();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(speakingBroadcasts(io)).toEqual([]);
+  });
+
+  it('a held "speaking" applied after the microphone producer closed is not broadcast', async () => {
+    const { io, handlers, mic } = await joinedSpeaker('sp-7b');
+    toggles((s) => handlers.get('voice:speaking')!(s), 360); // the indicator budget is spent, ends on false
+    handlers.get('voice:speaking')!(true); // held
+    handlers.get('voice:producer:close')!({ producerId: mic.id });
+    io._emit.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(speakingBroadcasts(io)).toEqual([]);
+  });
+
+  it('a held "not speaking" is broadcast even after the microphone producer closed (the ring goes off)', async () => {
+    const { io, handlers, mic } = await joinedSpeaker('sp-7c');
+    toggles((s) => handlers.get('voice:speaking')!(s), 361); // the 361st (true) is held
+    handlers.get('voice:speaking')!(false); // replaces it
+    handlers.get('voice:producer:close')!({ producerId: mic.id });
+    io._emit.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(speakingBroadcasts(io)).toEqual([false]);
   });
 
   it('a producer that refuses the pause or the resume is logged, never thrown', async () => {
