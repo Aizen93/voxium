@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   apiDelete: vi.fn(),
   resolveEncryptedPreview: vi.fn(),
   purge: vi.fn(),
+  applyReadOnly: vi.fn(),
   chat: { messages: [] as Message[], deleteMessage: vi.fn(), clearMessages: vi.fn(), fetchDMMessages: vi.fn() },
   voice: { dmCallConversationId: null as string | null, incomingCall: null as unknown, handleDMCallEnded: vi.fn(), setIncomingCall: vi.fn() },
 }));
@@ -24,7 +25,7 @@ vi.mock('../../services/api', () => ({ api: { get: h.apiGet, post: h.apiPost, pa
 vi.mock('../../stores/toastStore', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
 vi.mock('../../services/e2e/dmCrypto', () => ({ resolveEncryptedPreview: h.resolveEncryptedPreview }));
 vi.mock('../../stores/chatStore', () => ({ useChatStore: { getState: () => h.chat } }));
-vi.mock('../../services/dmReadOnly', () => ({ applyReadOnlyConversations: vi.fn(), clearMarksOfLiveConversations: vi.fn() }));
+vi.mock('../../services/dmReadOnly', () => ({ applyReadOnlyConversations: h.applyReadOnly, clearMarksOfLiveConversations: vi.fn() }));
 vi.mock('../../stores/voiceStore', () => ({ useVoiceStore: { getState: () => h.voice } }));
 // what dmClearedHistory loads when a walk runs: a purge spy, an E2E service already started
 vi.mock('../../services/e2e/e2eService', () => ({
@@ -65,7 +66,7 @@ let errorLog: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   registerE2ESessionUser(() => ME);
-  for (const fn of [h.apiGet, h.apiPost, h.apiDelete, h.resolveEncryptedPreview, h.purge, h.chat.deleteMessage, h.chat.clearMessages, h.voice.handleDMCallEnded, h.voice.setIncomingCall]) fn.mockReset();
+  for (const fn of [h.apiGet, h.apiPost, h.apiDelete, h.resolveEncryptedPreview, h.purge, h.applyReadOnly, h.chat.deleteMessage, h.chat.clearMessages, h.voice.handleDMCallEnded, h.voice.setIncomingCall]) fn.mockReset();
   h.purge.mockImplementation(async (scopes: string[]) => ({ removed: 0, marked: scopes }));
   h.chat.messages = [];
   h.chat.deleteMessage.mockImplementation((id: string) => {
@@ -81,6 +82,8 @@ beforeEach(() => {
     participantStatuses: {},
     removedAt: {},
     removalSeq: 0,
+    openedAt: {},
+    openSeq: 0,
   });
   errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -469,5 +472,157 @@ describe('a list that began before a removal does not bring the conversation bac
     expect(wasRemovedSince('c2', mark)).toBe(false);
     useDMStore.getState().forgetRemoval('c1');
     expect(wasRemovedSince('c1', mark)).toBe(false);
+  });
+});
+
+describe('a list that began before a local open does not replace the local entry', () => {
+  function heldList() {
+    let answer!: (data: unknown) => void;
+    h.apiGet.mockImplementationOnce(() => new Promise((resolve) => { answer = (data) => resolve({ data }); }));
+    const fetching = useDMStore.getState().fetchConversations();
+    return { fetching, answer: (conversations: Conversation[]) => answer({ data: conversations }) };
+  }
+  const ids = () => useDMStore.getState().conversations.map((c) => c.id);
+
+  it('a conversation opened while the list was on its way stays when the list lacks it', async () => {
+    const list = heldList();
+    h.apiPost.mockResolvedValueOnce({ data: { data: conversation({ id: 'c9' }) } });
+    await useDMStore.getState().openDM('u9');
+    list.answer([conversation({ id: 'c1' }), conversation({ id: 'c2' })]);
+    await list.fetching;
+
+    expect(ids()).toEqual(['c9', 'c1', 'c2']);
+  });
+
+  it('one added by addConversation while the list was on its way stays too', async () => {
+    const list = heldList();
+    useDMStore.getState().addConversation(conversation({ id: 'c8' }));
+    list.answer([conversation({ id: 'c1' })]);
+    await list.fetching;
+
+    expect(ids()).toEqual(['c8', 'c1']);
+  });
+
+  it('reopened after a removal: the list row stands, once, and nothing is added beside it', async () => {
+    const list = heldList();
+    useDMStore.getState().applyConversationRemoval('c1', undefined, 'dm:conversation:deleted');
+    h.apiPost.mockResolvedValueOnce({ data: { data: conversation({ id: 'c1', lastMessage: null }) } });
+    await useDMStore.getState().openDM('u2');
+    const older = { id: 'old', content: '', encrypted: false, type: 'user' as const, createdAt: at(-1), authorId: 'u2' };
+    list.answer([conversation({ id: 'c1', lastMessage: older }), conversation({ id: 'c2' })]);
+    await list.fetching;
+
+    const c1 = useDMStore.getState().conversations.find((c) => c.id === 'c1');
+    expect(c1?.lastMessage?.id).toBe('old');
+    expect(ids().filter((id) => id === 'c1')).toHaveLength(1);
+  });
+
+  it('a conversation the list also serves: the list row (its preview and participant status) is what the store holds, once', async () => {
+    const list = heldList();
+    // POST /dm answers lastMessage null even for a conversation with history
+    h.apiPost.mockResolvedValueOnce({ data: { data: conversation({ id: 'c9', lastMessage: null }) } });
+    await useDMStore.getState().openDM('u9');
+    const preview = { id: 'm-9', content: 'hello', encrypted: false, type: 'user' as const, createdAt: at(3), authorId: 'u9' };
+    const served = conversation({ id: 'c9', lastMessage: preview, participant: { id: 'u9', username: 'n', displayName: 'N', avatarUrl: null, status: 'online' } as never });
+    list.answer([served, conversation({ id: 'c1' })]);
+    await list.fetching;
+
+    expect(ids().filter((id) => id === 'c9')).toHaveLength(1);
+    expect(useDMStore.getState().conversations.find((c) => c.id === 'c9')?.lastMessage?.id).toBe('m-9');
+    expect(useDMStore.getState().participantStatuses.u9).toBe('online');
+  });
+
+  it('(pins the removal handling, which already held) opened, then removed while the list was on its way: it is not brought back', async () => {
+    const list = heldList();
+    h.apiPost.mockResolvedValueOnce({ data: { data: conversation({ id: 'c9' }) } });
+    await useDMStore.getState().openDM('u9');
+    useDMStore.getState().applyConversationRemoval('c9', undefined, 'dm:conversation:deleted');
+    list.answer([conversation({ id: 'c1' }), conversation({ id: 'c9' })]);
+    await list.fetching;
+
+    expect(ids()).toEqual(['c1']);
+  });
+
+  it('a list begun after the open is the server word again: its row replaces the entry, and a conversation it lacks is gone', async () => {
+    h.apiPost.mockResolvedValueOnce({ data: { data: conversation({ id: 'c9' }) } });
+    await useDMStore.getState().openDM('u9');
+    h.apiGet.mockResolvedValueOnce({ data: { data: [conversation({ id: 'c1' })] } });
+    await useDMStore.getState().fetchConversations();
+
+    expect(ids()).toEqual(['c1']);
+  });
+
+  it('an older list answering after a newer one has applied is dropped', async () => {
+    const older = heldList();
+    const newer = heldList();
+    newer.answer([conversation({ id: 'c5' })]);
+    await newer.fetching;
+    older.answer([conversation({ id: 'c6' })]);
+    await older.fetching;
+
+    expect(ids()).toEqual(['c5']);
+    expect(useDMStore.getState().isLoading).toBe(false);
+  });
+
+  it('an older list answering BEFORE the newer one still applies (the newer has not landed)', async () => {
+    const older = heldList();
+    const newer = heldList();
+    older.answer([conversation({ id: 'c6' })]);
+    await older.fetching;
+    expect(ids()).toEqual(['c6']);
+    newer.answer([conversation({ id: 'c5' })]);
+    await newer.fetching;
+    expect(ids()).toEqual(['c5']);
+  });
+
+  it('opening a conversation the store already holds records no mark: a list begun before it applies the server row', async () => {
+    const list = heldList();
+    h.apiPost.mockResolvedValueOnce({ data: { data: conversation({ id: 'c1' }) } });
+    await useDMStore.getState().openDM('u2');
+    expect(useDMStore.getState().openedAt).toEqual({});
+    expect(useDMStore.getState().openSeq).toBe(0);
+    const newer = { id: 'm-new', content: 'hi', encrypted: false, type: 'user' as const, createdAt: at(5), authorId: 'u2' };
+    list.answer([conversation({ id: 'c1', lastMessage: newer })]);
+    await list.fetching;
+
+    expect(useDMStore.getState().conversations.find((c) => c.id === 'c1')?.lastMessage?.id).toBe('m-new');
+  });
+
+  it('a row the list serves read-only is what the store holds after an open meanwhile: the flag, the confirmation, the id set and the purge agree', async () => {
+    const list = heldList();
+    h.apiPost.mockResolvedValueOnce({ data: { data: conversation({ id: 'c9' }) } });
+    await useDMStore.getState().openDM('u9');
+    list.answer([conversation({ id: 'c9', participantDeleted: true, participant: { id: 'deleted:c9', username: '', displayName: '', avatarUrl: null } })]);
+    await list.fetching;
+    await vi.waitFor(() => expect(h.applyReadOnly).toHaveBeenCalled());
+
+    const c9 = useDMStore.getState().conversations.find((c) => c.id === 'c9');
+    expect(c9?.participantDeleted).toBe(true);
+    expect(useDMStore.getState().readOnlyConfirmed.c9).toBe(true);
+    expect(h.applyReadOnly.mock.calls[0][1]).toEqual(['c9']);
+  });
+
+  it('the floor a list row carries is applied to that row: a preview at or below it is blanked', async () => {
+    const list = heldList();
+    const old = { id: 'm-old', content: '', encrypted: true, type: 'user' as const, createdAt: at(-1000), authorId: 'u2' };
+    h.apiPost.mockResolvedValueOnce({ data: { data: conversation({ id: 'c9' }) } });
+    await useDMStore.getState().openDM('u9');
+    list.answer([conversation({ id: 'c9', clearedUntil: FLOOR, lastMessage: old })]);
+    await list.fetching;
+
+    expect(clearedFloorOf(ME, 'c9')).toBe(FLOOR_MS);
+    expect(useDMStore.getState().conversations.find((c) => c.id === 'c9')?.lastMessage ?? null).toBeNull();
+  });
+
+  it('an answer landing after another account signed in applies nothing and clears the loading flag', async () => {
+    const list = heldList();
+    expect(useDMStore.getState().isLoading).toBe(true);
+    const before = useDMStore.getState().conversations;
+    registerE2ESessionUser(() => 'someone-else');
+    list.answer([conversation({ id: 'c7' })]);
+    await list.fetching;
+
+    expect(useDMStore.getState().conversations).toBe(before);
+    expect(useDMStore.getState().isLoading).toBe(false);
   });
 });
