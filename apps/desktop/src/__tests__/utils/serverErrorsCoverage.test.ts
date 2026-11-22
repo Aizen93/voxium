@@ -10,7 +10,10 @@ import {
   SESSION_NOT_FOUND_MESSAGE, SESSION_REVOKE_CURRENT_MESSAGE, TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE, REMEMBER_ME_INVALID_MESSAGE,
   SIGNED_OUT_ELSEWHERE_REASON, SESSION_ENDED_REASON,
 } from '@voxium/shared';
+import * as shared from '@voxium/shared';
 import { translateServerError, ALL_ERROR_KEYS, SESSION_ERROR_KEYS } from '../../utils/serverErrors';
+import { scanServerSentences, type ServerSentence, type ServerSentenceScan } from '../helpers/serverSentences';
+import { ENGLISH_ON_PURPOSE } from '../helpers/englishOnPurpose';
 
 /**
  * Every English sentence a normal user can receive from the server is shown in
@@ -55,6 +58,35 @@ function written(message: string, src?: string): boolean {
 type Row = { msg: string; key: string; vars?: Record<string, number>; src?: string };
 
 const EXACT: Row[] = [
+  // The send path, the search filter, the encrypted-message services
+  { msg: 'Invalid attachment', key: 'attachmentInvalid' },
+  { msg: 'Invalid attachment size', key: 'attachmentSizeInvalid' },
+  { msg: 'Attachment does not belong to this channel', key: 'attachmentWrongChannel' },
+  { msg: 'Attachment does not belong to this conversation', key: 'attachmentWrongConversation' },
+  { msg: 'Invalid channel', key: 'searchChannelInvalid' },
+  { msg: 'No conversation with this user', key: 'e2eNoSharedContext' },
+  { msg: 'E2E device not found', key: 'e2eDeviceNotFound', src: "NotFoundError('E2E device')" },
+  { msg: 'No keys available for this device', key: 'e2eNoKeysAvailable' },
+  { msg: 'Unknown device', key: 'e2eUnknownDevice' },
+  { msg: 'No E2E device registered', key: 'e2eNoDevice' },
+  { msg: 'Unknown recipient device', key: 'e2eUnknownRecipientDevice' },
+  { msg: 'Recipient is not a participant of this conversation', key: 'e2eRecipientNotParticipant' },
+  // The shared theme validators
+  { msg: 'Pattern must be an object', key: 'themePatternNotObject' },
+  { msg: 'Pattern color must be a valid hex color (#RRGGBB)', key: 'themePatternColor' },
+  { msg: 'Pattern opacity must be a number between 0 and 1', key: 'themePatternOpacity' },
+  { msg: 'Pattern size must be a number between 4 and 400', key: 'themePatternSize' },
+  { msg: 'Pattern angle must be a number between -180 and 180', key: 'themePatternAngle' },
+  { msg: 'Custom SVG pattern requires svgData', key: 'themePatternSvgRequired' },
+  // The label rule's refusals and the other sentences the new check found
+  { msg: 'Invalid search text', key: 'searchTextInvalid' },
+  { msg: 'Internal server error', key: 'internalServerError' },
+  { msg: 'Storage is unavailable', key: 'storageUnavailable' },
+  { msg: 'Not part of this friendship', key: 'notPartOfFriendship' },
+  { msg: 'Display name contains unsupported characters', key: 'displayNameUnsupportedChars' },
+  { msg: 'Nickname contains unsupported characters', key: 'nicknameUnsupportedChars' },
+  { msg: 'Role name contains unsupported characters', key: 'roleNameUnsupportedChars' },
+  { msg: 'Category name contains unsupported characters', key: 'categoryNameUnsupportedChars' },
   // ─── Session & account ───
   { msg: 'Email not verified', key: 'emailNotVerified' },
   { msg: 'Invalid or expired token', key: 'invalidOrExpiredToken' },
@@ -260,6 +292,26 @@ const PATTERNS: Array<{ msg: string; key: string; vars: Record<string, number>; 
   { msg: 'Search query must be at most 200 characters', key: 'searchQueryTooLong', vars: { max: 200 }, src: 'Search query must be at most ${LIMITS.SEARCH_QUERY_MAX} characters' },
 ];
 
+/** Sentences carrying a plain value (a layer, a colour key, a list, a reason): sample, key, variables, source template. */
+const TEXT_PATTERNS: Array<{ msg: string; key: string; vars: Record<string, string | number>; src: string }> = [
+  { msg: 'Colors must have exactly 3 keys', key: 'themeColorCount', vars: { max: 3 }, src: 'Colors must have exactly ${expected.length} keys' },
+  { msg: 'Missing color key: bg-hover', key: 'themeColorMissing', vars: { key: 'bg-hover' }, src: 'Missing color key: ${key}' },
+  { msg: 'Color value for "chat" must be a string', key: 'themeColorNotString', vars: { key: 'chat' }, src: 'Color value for "${key}" must be a string' },
+  { msg: 'Invalid color value for "border": must be hex (#RRGGBB) or rgba()', key: 'themeColorInvalidAlpha', vars: { key: 'border' }, src: 'Invalid color value for "${key}": must be hex (#RRGGBB) or rgba()' },
+  { msg: 'Invalid color value for "chat": must be hex (#RRGGBB)', key: 'themeColorInvalid', vars: { key: 'chat' }, src: 'Invalid color value for "${key}": must be hex (#RRGGBB)' },
+  { msg: 'Unknown pattern area: "footer"', key: 'themePatternArea', vars: { key: 'footer' }, src: 'Unknown pattern area: "${key}"' },
+  { msg: 'Invalid pattern type: must be one of none, dots, custom-svg', key: 'themePatternType', vars: { types: 'none, dots, custom-svg' }, src: 'Invalid pattern type: must be one of ${THEME_PATTERN_TYPES.join(' },
+  { msg: 'Pattern "sidebar": Pattern size must be a number between 4 and 400', key: 'themePatternDetail', vars: { key: 'sidebar', detail: 'serverErrors.themePatternSize|{"defaultValue":"Pattern size must be a number between 4 and 400"}' }, src: 'Pattern "${key}": ${err}' },
+  { msg: 'Account banned: spam', key: 'accountBannedReason', vars: { reason: 'spam' }, src: 'Account banned: ${user.banReason}' },
+  // a reason of several lines is carried whole
+  {
+    msg: ['Account banned: spam', 'second line'].join(String.fromCharCode(10)),
+    key: 'accountBannedReason',
+    vars: { reason: ['spam', 'second line'].join(String.fromCharCode(10)) },
+    src: 'Account banned: ${user.banReason}',
+  },
+];
+
 describe('translateServerError — every sentence a member can receive', () => {
   it.each(EXACT)('maps "$msg" → serverErrors.$key', ({ msg, key, vars }) => {
     expect(translateServerError(msg, t)).toBe(`serverErrors.${key}|${JSON.stringify({ defaultValue: msg, ...vars })}`);
@@ -271,6 +323,24 @@ describe('translateServerError — every sentence a member can receive', () => {
 
   it.each(PATTERNS)('matches "$msg" by pattern and carries the number', ({ msg, key, vars }) => {
     expect(translateServerError(msg, t)).toBe(`serverErrors.${key}|${JSON.stringify({ defaultValue: msg, ...vars })}`);
+  });
+
+  it.each(TEXT_PATTERNS)('matches "$msg" by pattern and carries the value as text', ({ msg, key, vars }) => {
+    expect(translateServerError(msg, t)).toBe(`serverErrors.${key}|${JSON.stringify({ defaultValue: msg, ...vars })}`);
+  });
+
+  it.each(TEXT_PATTERNS)('the template behind "$msg" is the one the server writes', ({ src }) => {
+    expect(SOURCE_TEXT.includes(src), src).toBe(true);
+  });
+
+  it('a pattern refusal inside a pattern is translated before it is placed', () => {
+    const inner = 'Pattern color must be a valid hex color (#RRGGBB)';
+    const detail = translateServerError(inner, t);
+    expect(translateServerError(`Pattern "sidebar": ${inner}`, t)).toBe(
+      `serverErrors.themePatternDetail|${JSON.stringify({ defaultValue: `Pattern "sidebar": ${inner}`, key: 'sidebar', detail })}`,
+    );
+    // an unknown inner sentence stays as the server wrote it
+    expect(translateServerError('Pattern "chat": something new', t)).toContain('"detail":"something new"');
   });
 
   it.each(PATTERNS)('the template behind "$msg" is the one the server writes', ({ src }) => {
@@ -330,10 +400,189 @@ describe('the serverErrors.* keys exist in all 11 locales', () => {
   });
 
   it('every key whose English text needs a number is given one by its mapping', () => {
-    const withVars = new Set([...EXACT, ...PATTERNS].filter((r) => r.vars).map((r) => r.key));
+    const withVars = new Set([...EXACT, ...PATTERNS, ...TEXT_PATTERNS].filter((r) => r.vars).map((r) => r.key));
     const needy = ALL_ERROR_KEYS.filter((k) => placeholders(en[k]).length > 0);
     expect(needy.filter((k) => !withVars.has(k))).toEqual([]);
-    // and only {{max}} / {{min}} ever travel
-    expect([...new Set(needy.flatMap((k) => placeholders(en[k])))].sort()).toEqual(['max', 'min']);
+    // and only these ever travel: the numbers, and the plain values the text patterns carry
+    expect([...new Set(needy.flatMap((k) => placeholders(en[k])))].sort()).toEqual(['detail', 'key', 'max', 'min', 'reason', 'types']);
+  });
+});
+
+/**
+ * The other direction: every sentence the SERVER can answer is either
+ * translated or listed (helpers/englishOnPurpose.ts, each group with its
+ * reason). The sentences are READ from the server sources, never imported.
+ *
+ * What the scan sees: the message of `new <X>Error(…)` (a literal, a `+` chain,
+ * a template, or a named top-level string constant of the server or shared),
+ * `error: '…'` fields, `voice:error` messages and the `return '…';` sentences of
+ * the shared validators. What it cannot see (counted by `scan.unseen`): a
+ * message held in a variable or built by a call (`new BadRequestError(msg)`),
+ * a sentence a library or the framework answers, and a sentence a route builds
+ * in an object it assembles away from an `error:` key. A template is read with
+ * its `${LIMITS.X}` and other shared names resolved and any other expression
+ * as 1, then tried against the mapping like a real answer.
+ */
+const SCAN = scanServerSentences(ROOT);
+
+function resolveTemplate(text: string): string {
+  return text.replace(/\$\{([^}]*)\}/g, (_m, expr: string) => {
+    let value: unknown = shared;
+    for (const part of expr.trim().split('.')) value = (value as Record<string, unknown> | undefined)?.[part];
+    return typeof value === 'number' || typeof value === 'string' ? String(value) : '1';
+  });
+}
+
+function isTranslated(sentence: string): boolean {
+  const probe = resolveTemplate(sentence);
+  return translateServerError(probe, t) !== probe;
+}
+
+function isListed(s: ServerSentence): boolean {
+  return ENGLISH_ON_PURPOSE.some(
+    (g) =>
+      (g.files && s.files.every((f) => g.files!.includes(f))) ||
+      g.sentences?.includes(s.text) ||
+      g.patterns?.some((p) => p.re.test(s.text)),
+  );
+}
+
+/** Every file that writes the sentence is listed as a whole. */
+function inListedFile(s: ServerSentence): boolean {
+  return ENGLISH_ON_PURPOSE.some((g) => g.files && s.files.every((f) => g.files!.includes(f)));
+}
+
+/** The sentences that are neither translated nor listed. */
+function unclassified(scan: ServerSentenceScan): string[] {
+  return scan.sentences.filter((s) => !isTranslated(s.text) && !isListed(s)).map((s) => `${s.text}  (${s.files.join(', ')})`);
+}
+
+/**
+ * The sites of a read shape whose sentence the scan cannot read, per file. When
+ * this fails: open the site, and either (a) map the sentence it can answer in
+ * utils/serverErrors.ts, (b) list it in helpers/englishOnPurpose.ts with a
+ * reason, or (c) when the scan truly cannot read it (a variable, a call, a
+ * longer conditional) and it is neither, change the number here.
+ */
+const UNSEEN_SITES: Record<string, number> = {
+  'apps/server/src/app.ts': 2,
+  'apps/server/src/middleware/errorHandler.ts': 2,
+  'apps/server/src/middleware/requireFeature.ts': 1,
+  'apps/server/src/routes/auth.ts': 2,
+  'apps/server/src/routes/categories.ts': 2,
+  'apps/server/src/routes/channels.ts': 1,
+  'apps/server/src/routes/discovery.ts': 2,
+  'apps/server/src/routes/dm.ts': 1,
+  'apps/server/src/routes/messages.ts': 3,
+  'apps/server/src/routes/roles.ts': 6,
+  'apps/server/src/routes/search.ts': 1,
+  'apps/server/src/routes/secureChannels.ts': 2,
+  'apps/server/src/routes/servers.ts': 7,
+  'apps/server/src/routes/themes.ts': 10,
+  'apps/server/src/routes/users.ts': 2,
+  'apps/server/src/routes/webhookExecute.ts': 4,
+  'apps/server/src/routes/webhooks.ts': 2,
+  'apps/server/src/services/authService.ts': 3,
+  'apps/server/src/services/sessionService.ts': 2,
+  'apps/server/src/services/signupService.ts': 5,
+  'apps/server/src/utils/attachmentCleanup.ts': 1,
+  'apps/server/src/utils/errors.ts': 1,
+  'apps/server/src/utils/permissionWrites.ts': 2,
+  'apps/server/src/utils/s3.ts': 5,
+  'apps/server/src/utils/uploadVerification.ts': 2,
+  'apps/server/src/utils/webhooks/discordPayload.ts': 1,
+  'apps/server/src/utils/webhooks/githubFormatter.ts': 1,
+  'apps/server/src/websocket/annotationHandler.ts': 1,
+  'apps/server/src/websocket/voiceHandler.ts': 2,
+  'apps/server/src/websocket/voiceRelay.ts': 2,
+  'packages/shared/src/constants.ts': 1,
+  'packages/shared/src/validators.ts': 1,
+};
+
+describe('every server sentence is translated or listed as English on purpose', () => {
+  it('reads the sentences it is meant to read', () => {
+    const texts = new Set(SCAN.sentences.map((s) => s.text));
+    // new NotFoundError('Server'), a template, a shared constant, a voice:error message, a validator's return,
+    // a conditional's two sentences, an error class that writes its own, a constructor default
+    for (const known of [
+      'Server not found',
+      'Email not verified',
+      USERNAME_TAKEN_MESSAGE,
+      CONVERSATION_READ_ONLY_MESSAGE,
+      'Voice channel is full',
+      'Invalid search text',
+      'Username can only contain letters, numbers, underscores, dots, and hyphens',
+      'Username must be at least ${LIMITS.USERNAME_MIN} characters',
+      'Account banned: ${user.banReason}',
+      'Your account has been banned',
+      'Invalid color value for "${key}": must be hex (#RRGGBB)',
+      'Session not found',
+      'Transfer or delete the servers you own before deleting your account',
+      'Forbidden',
+      'Request body too large',
+      'Internal server error',
+    ]) {
+      expect(texts.has(known), known).toBe(true);
+    }
+    expect(SCAN.sentences.length).toBeGreaterThan(500);
+  });
+
+  it('no sentence is neither mapped nor listed (map it in utils/serverErrors.ts, or list it with a reason)', () => {
+    expect(unclassified(SCAN)).toEqual([]);
+  });
+
+  it('the classifier refuses a new sentence and accepts a mapped or listed one (synthetic input only)', () => {
+    const synthetic = (text: string, ...files: string[]): ServerSentenceScan => ({
+      sentences: [{ text, files }],
+      unseen: {},
+    });
+    const route = 'apps/server/src/routes/servers.ts';
+    // new and unknown: refused
+    expect(unclassified(synthetic('A sentence nobody translated yet', route))).toHaveLength(1);
+    // mapped: accepted
+    expect(unclassified(synthetic('Server not found', route))).toEqual([]);
+    // listed by name: accepted
+    expect(unclassified(synthetic('Invalid cursor', route))).toEqual([]);
+    // a new sentence of a listed SHAPE is accepted by the classifier, so the pinned count is what catches it
+    expect(unclassified(synthetic('widgetId must be a string', route))).toEqual([]);
+    // an admin-only file exempts what only it writes, not a sentence a member route writes as well
+    expect(unclassified(synthetic('Only an admin reads this', 'apps/server/src/routes/admin.ts'))).toEqual([]);
+    expect(unclassified(synthetic('Only an admin reads this', 'apps/server/src/routes/admin.ts', 'apps/server/src/routes/dm.ts'))).toHaveLength(1);
+  });
+
+  it('every listed sentence is still written by the server and still untranslated', () => {
+    const written = new Map(SCAN.sentences.map((s) => [s.text, s] as const));
+    const stale: string[] = [];
+    for (const g of ENGLISH_ON_PURPOSE) {
+      for (const text of g.sentences ?? []) {
+        if (!written.has(text)) stale.push(`gone from the server: ${text}`);
+        else if (isTranslated(text)) stale.push(`translated now, remove it from the list: ${text}`);
+      }
+    }
+    expect(stale).toEqual([]);
+  });
+
+  it('every listed file exists, writes at least one sentence, and each group states its reason', () => {
+    const files = new Set(SCAN.sentences.flatMap((s) => s.files));
+    const problems: string[] = [];
+    for (const g of ENGLISH_ON_PURPOSE) {
+      for (const f of g.files ?? []) if (!files.has(f)) problems.push(`no sentence found in ${f}`);
+      expect(g.reason.length, 'a group states its reason').toBeGreaterThan(40);
+    }
+    expect(problems).toEqual([]);
+  });
+
+  it('a listed shape matches exactly the sentences it matched when it was reviewed', () => {
+    // a new sentence of that shape raises the count: read it, map it or list it by name, then update the number
+    const counts = ENGLISH_ON_PURPOSE.flatMap((g) => g.patterns ?? []).map((p) => ({
+      re: String(p.re),
+      matches: SCAN.sentences.filter((s) => p.re.test(s.text) && !isTranslated(s.text) && !inListedFile(s)).length,
+      expected: p.matches,
+    }));
+    expect(counts.filter((c) => c.matches !== c.expected)).toEqual([]);
+  });
+
+  it('the sites the scan cannot read are the ones counted here, file by file', () => {
+    expect(SCAN.unseen).toEqual(UNSEEN_SITES);
   });
 });

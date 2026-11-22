@@ -58,6 +58,18 @@ describe('importTheme', () => {
     await expect(importTheme(asFile({ name: 'X' }))).rejects.toThrow();
   });
 
+  it('words a validator refusal in the app language, not in the server English', async () => {
+    // the validator names the layer: the translated sentence keeps it as a plain value
+    await expect(importTheme(asFile(themeJson({ chat: 'rgba(0, 0, 0, 0.5)' })))).rejects.toThrow(
+      'Invalid theme colors (Invalid value for color chat: use hex (#RRGGBB))',
+    );
+    // a nested pattern refusal: the layer, then the translated reason
+    const withPattern = { ...themeJson(), patterns: { sidebar: { type: 'dots', color: 'red', opacity: 0.5 } } };
+    await expect(importTheme(asFile(withPattern))).rejects.toThrow(
+      'Invalid theme patterns (Pattern sidebar: Pattern color must be a valid hex color (#RRGGBB))',
+    );
+  });
+
   it('round-trips what exportTheme writes', async () => {
     // exportTheme builds a blob URL and clicks an <a>; capture the payload
     // rather than the download, which jsdom cannot perform.
