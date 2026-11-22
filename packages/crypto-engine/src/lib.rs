@@ -712,17 +712,6 @@ impl EngineMasterKey {
         result
     }
 
-    /// Restore a master key from its raw base64 secret — the form transferred
-    /// to another of the account's own devices over the pairwise Olm channel
-    /// (D6). Callers MUST check `publicKey()` against the published master key
-    /// before storing.
-    #[wasm_bindgen(js_name = fromSecret)]
-    pub fn from_secret(secret_b64: &str) -> Result<EngineMasterKey, JsError> {
-        Ed25519SecretKey::from_base64(secret_b64)
-            .map(|inner| EngineMasterKey { inner })
-            .map_err(|_| JsError::new("invalid master key material"))
-    }
-
     /// Internal: the private half, for building a device-approval payload
     /// inside this crate. Deliberately NOT exposed to JS — see
     /// EngineSession::encryptMasterSecret.

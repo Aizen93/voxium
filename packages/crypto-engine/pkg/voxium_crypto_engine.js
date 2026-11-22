@@ -615,23 +615,6 @@ export class EngineMasterKey {
         return EngineMasterKey.__wrap(ret[0]);
     }
     /**
-     * Restore a master key from its raw base64 secret — the form transferred
-     * to another of the account's own devices over the pairwise Olm channel
-     * (D6). Callers MUST check `publicKey()` against the published master key
-     * before storing.
-     * @param {string} secret_b64
-     * @returns {EngineMasterKey}
-     */
-    static fromSecret(secret_b64) {
-        const ptr0 = passStringToWasm0(secret_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.enginemasterkey_fromSecret(ptr0, len0);
-        if (ret[2]) {
-            throw takeFromExternrefTable0(ret[1]);
-        }
-        return EngineMasterKey.__wrap(ret[0]);
-    }
-    /**
      * Generate a fresh master key.
      */
     constructor() {

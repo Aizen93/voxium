@@ -459,7 +459,7 @@ describe('crypto engine (cross-signing master key)', () => {
     expect(sealSecret('same input', CTX, KEY_A)).not.toBe(sealSecret('same input', CTX, KEY_A));
   });
 
-  it('restores an identical key from a sealed blob and from a raw secret', () => {
+  it('restores an identical key from a sealed blob', () => {
     const master = new EngineMasterKey();
     const canonical = masterCanonical('user-alice', master.publicKey());
     const signature = master.sign(canonical);
@@ -473,12 +473,10 @@ describe('crypto engine (cross-signing master key)', () => {
     // The private half has no JS accessor: device approval goes through the
     // session bindings, so the secret never exists as a JS string (§14).
     expect('secretBase64' in (master as object)).toBe(false);
+    // ... and no entrance takes the raw secret from JavaScript either
+    expect('fromSecret' in EngineMasterKey).toBe(false);
 
     expect(() => EngineMasterKey.fromSealed(master.seal(KEY_A), KEY_B)).toThrow();
-    // wrong length (any 32 bytes IS a valid Ed25519 secret, so only the length
-    // can be rejected here — the caller checks publicKey() against the
-    // published master key, which is the real authenticity gate, see D6)
-    expect(() => EngineMasterKey.fromSecret(Buffer.alloc(31).toString('base64'))).toThrow();
   });
 
   it('computes a symmetric 60-digit account safety number', () => {

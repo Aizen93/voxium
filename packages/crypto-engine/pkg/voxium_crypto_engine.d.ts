@@ -153,13 +153,6 @@ export class EngineMasterKey {
      */
     static fromSealed(sealed_b64: string, pickle_key: Uint8Array): EngineMasterKey;
     /**
-     * Restore a master key from its raw base64 secret — the form transferred
-     * to another of the account's own devices over the pairwise Olm channel
-     * (D6). Callers MUST check `publicKey()` against the published master key
-     * before storing.
-     */
-    static fromSecret(secret_b64: string): EngineMasterKey;
-    /**
      * Generate a fresh master key.
      */
     constructor();
@@ -417,7 +410,6 @@ export interface InitOutput {
     readonly engineinboundgroupsession_pickle: (a: number, b: number, c: number) => [number, number, number, number];
     readonly engineinboundgroupsession_sessionId: (a: number) => [number, number];
     readonly enginemasterkey_fromSealed: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly enginemasterkey_fromSecret: (a: number, b: number) => [number, number, number];
     readonly enginemasterkey_new: () => number;
     readonly enginemasterkey_openSessionKey: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly enginemasterkey_publicKey: (a: number) => [number, number];
