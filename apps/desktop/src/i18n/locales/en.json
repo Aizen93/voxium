@@ -2168,7 +2168,23 @@
     "installed": "Update installed. Restart Voxium to apply.",
     "restartNow": "Restart Now",
     "failed": "Something went wrong during the update.",
-    "retry": "Retry"
+    "retry": "Retry",
+    "failedNetwork": "The update could not be downloaded. Check your connection and retry."
+  },
+  "emojiPickerLabels": {
+    "category": {
+      "suggested": "Frequently used",
+      "smileys_people": "Smileys & people",
+      "animals_nature": "Animals & nature",
+      "food_drink": "Food & drink",
+      "travel_places": "Travel & places",
+      "activities": "Activities",
+      "objects": "Objects",
+      "symbols": "Symbols",
+      "flags": "Flags"
+    },
+    "defaultCaption": "What's your mood?",
+    "clearSearch": "Clear"
   },
   "themes": {
     "builtIn": {

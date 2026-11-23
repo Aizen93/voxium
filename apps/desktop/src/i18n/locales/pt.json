@@ -2215,7 +2215,23 @@
     "installed": "Atualização instalada. Reinicie o Voxium para aplicá-la.",
     "restartNow": "Reiniciar agora",
     "failed": "Algo deu errado durante a atualização.",
-    "retry": "Tentar novamente"
+    "retry": "Tentar novamente",
+    "failedNetwork": "Não foi possível baixar a atualização. Verifique sua conexão e tente novamente."
+  },
+  "emojiPickerLabels": {
+    "category": {
+      "suggested": "Usados com frequência",
+      "smileys_people": "Smileys e pessoas",
+      "animals_nature": "Animais e natureza",
+      "food_drink": "Comida e bebida",
+      "travel_places": "Viagens e lugares",
+      "activities": "Atividades",
+      "objects": "Objetos",
+      "symbols": "Símbolos",
+      "flags": "Bandeiras"
+    },
+    "defaultCaption": "Como você está se sentindo?",
+    "clearSearch": "Limpar"
   },
   "themes": {
     "builtIn": {

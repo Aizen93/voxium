@@ -2255,7 +2255,23 @@
     "installed": "تم تثبيت التحديث. أعد تشغيل Voxium لتطبيقه.",
     "restartNow": "إعادة التشغيل الآن",
     "failed": "حدث خطأ أثناء التحديث.",
-    "retry": "إعادة المحاولة"
+    "retry": "إعادة المحاولة",
+    "failedNetwork": "تعذّر تنزيل التحديث. تحقق من اتصالك وأعد المحاولة."
+  },
+  "emojiPickerLabels": {
+    "category": {
+      "suggested": "كثيرة الاستخدام",
+      "smileys_people": "الوجوه والأشخاص",
+      "animals_nature": "الحيوانات والطبيعة",
+      "food_drink": "الطعام والشراب",
+      "travel_places": "السفر والأماكن",
+      "activities": "الأنشطة",
+      "objects": "الأشياء",
+      "symbols": "الرموز",
+      "flags": "الأعلام"
+    },
+    "defaultCaption": "ما هو مزاجك؟",
+    "clearSearch": "مسح"
   },
   "themes": {
     "builtIn": {
