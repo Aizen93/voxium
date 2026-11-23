@@ -25,11 +25,14 @@ vi.mock('../../utils/prisma', () => {
 // real database) and what follows its commit (accountDeletion.test.ts)
 const settle = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/conversationLifecycle', () => ({ settleConversationsOfDeletedAccount: (...a: unknown[]) => settle(...a) }));
+// The reports step (reportSettlement.test.ts): here whether it runs, where, for whom
+const settleReports = vi.hoisted(() => vi.fn(async () => 0));
+vi.mock('../../utils/reportSettlement', () => ({ settleReportsOfDeletedAccounts: (...a: unknown[]) => settleReports(...(a as [])) }));
 const announce = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/accountDeletion', () => ({ announceConversationsOfDeletedAccount: (...a: unknown[]) => announce(...a) }));
 const deleteBlobs = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/attachmentBlobs', () => ({ deleteAttachmentBlobs: (...a: unknown[]) => deleteBlobs(...a) }));
-const flag = vi.hoisted(() => vi.fn(() => false));
+const flag = vi.hoisted(() => vi.fn((_name?: string) => false));
 vi.mock('../../utils/featureFlags', () => ({ isFeatureEnabled: (...a: unknown[]) => flag(...(a as [])) }));
 
 const deleteMultipleFromS3 = vi.hoisted(() => vi.fn(async (keys: string[]) => keys.length));
@@ -276,13 +279,12 @@ describe('registration hygiene sweep — the swept accounts and their conversati
   });
 
   it('the flag is read ONCE for the sweep and given to every step', async () => {
-    flag.mockImplementation(() => true);
+    flag.mockImplementation((name?: string) => name === 'account_deletion_keeps_conversations');
     stage(['u-1', 'u-2'], [{ user1Id: 'u-1', user2Id: 'v-9' }, { user1Id: 'u-2', user2Id: 'v-8' }]);
 
     await runRegistrationHygiene();
 
-    expect(flag).toHaveBeenCalledTimes(1);
-    expect(flag).toHaveBeenCalledWith('account_deletion_keeps_conversations');
+    expect(flag.mock.calls.filter(([name]) => name === 'account_deletion_keeps_conversations')).toHaveLength(1);
     expect(settle.mock.calls.map((c) => c.slice(1))).toEqual([['u-1', { keep: true }], ['u-2', { keep: true }]]);
   });
 
@@ -446,7 +448,98 @@ describe('registration hygiene sweep — the swept accounts and their conversati
 
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(settle).not.toHaveBeenCalled();
+    expect(settleReports).not.toHaveBeenCalled();
     expect(flag).not.toHaveBeenCalled();
+  });
+
+  // ─── Their moderation reports (#48) ───────────────────────────────────────
+
+  describe('the reports filed by or about the swept accounts', () => {
+    const reportsFlag = (on: boolean) => flag.mockImplementation((name?: string) => name === 'account_deletion_keeps_reports' && on);
+    beforeEach(() => {
+      settleReports.mockImplementation((async () => { ran.push('reports of the batch'); return 0; }) as never);
+    });
+
+    it('flag off: no report statement, the batch runs exactly the statements it ran before the step existed', async () => {
+      reportsFlag(false);
+      stage(['u-1', 'u-2', 'u-3'], [{ user1Id: 'u-1', user2Id: 'v-9' }]);
+
+      await runRegistrationHygiene();
+
+      expect(settleReports).not.toHaveBeenCalled();
+      expect(ran).toEqual([
+        'lock: the accounts that still qualify',
+        'read: which of them own a space now',
+        'lock: their conversations',
+        'conversations of u-1',
+        'delete: the accounts',
+      ]);
+    });
+
+    it('flag on: ONE call for every account of the batch still eligible, on the transaction\'s client, BETWEEN the conversations\' lock and the conversation steps, so no report row is written twice (a reported account need not have a conversation)', async () => {
+      reportsFlag(true);
+      // u-2 owns a space now and is dropped; u-3 is a side of no conversation
+      stage(['u-1', 'u-2', 'u-3'], [{ user1Id: 'u-1', user2Id: 'v-9' }], ['u-2']);
+
+      const result = await runRegistrationHygiene();
+
+      expect(result.deletedUsers).toBe(2);
+      expect(settleReports).toHaveBeenCalledTimes(1);
+      expect(settleReports).toHaveBeenCalledWith(prisma, ['u-1', 'u-3']);
+      expect(ran).toEqual([
+        'lock: the accounts that still qualify',
+        'read: which of them own a space now',
+        'lock: their conversations',
+        'reports of the batch',
+        'conversations of u-1',
+        'delete: the accounts',
+      ]);
+    });
+
+    it('the flag is read ONCE for the sweep, before any batch, and the step runs in each batch', async () => {
+      reportsFlag(true);
+      const ids = Array.from({ length: SWEEP_ACCOUNTS_PER_TRANSACTION + 1 }, (_, i) => ({ id: `u-${i}`, avatarUrl: null }));
+      vi.mocked(prisma.user.findMany).mockResolvedValue(ids as never);
+      vi.mocked(prisma.$queryRaw).mockImplementation(((strings: TemplateStringsArray, ...values: unknown[]) => {
+        const sql = strings.join('?');
+        if (/FROM users/.test(sql)) return Promise.resolve((values[0] as string[]).map((id) => ({ id })));
+        return Promise.resolve([]);
+      }) as never);
+      vi.mocked(prisma.user.deleteMany).mockImplementation(((args: { where: { id: { in: string[] } } }) => Promise.resolve({ count: args.where.id.in.length })) as never);
+
+      await runRegistrationHygiene();
+
+      expect(flag.mock.calls.filter(([name]) => name === 'account_deletion_keeps_reports')).toHaveLength(1);
+      expect(settleReports).toHaveBeenCalledTimes(2);
+      expect((settleReports.mock.calls[0] as unknown[])[1]).toHaveLength(SWEEP_ACCOUNTS_PER_TRANSACTION);
+      expect((settleReports.mock.calls[1] as unknown[])[1]).toEqual([`u-${SWEEP_ACCOUNTS_PER_TRANSACTION}`]);
+    });
+
+    it('a final delete that disagrees rolls the batch back whole, the reports step with it (it ran inside the transaction)', async () => {
+      reportsFlag(true);
+      stage(['u-1', 'u-2'], []);
+      vi.mocked(prisma.user.deleteMany).mockImplementation((() => lazyStatement(ran, 'delete: the accounts', { count: 1 })) as never);
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const result = await runRegistrationHygiene();
+
+        expect(ran).toContain('reports of the batch');
+        expect(ran.indexOf('reports of the batch')).toBeLessThan(ran.indexOf('delete: the accounts'));
+        expect(result.deletedUsers).toBe(0);
+        expect(result.failedBatch).toEqual({ name: 'SweepDeleteMismatchError', code: 'SWEEP_DELETE_MISMATCH' });
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it('nothing still qualifies: no report step either', async () => {
+      reportsFlag(true);
+      stage([]);
+
+      await runRegistrationHygiene();
+
+      expect(settleReports).not.toHaveBeenCalled();
+    });
   });
 });
 

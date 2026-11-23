@@ -868,9 +868,12 @@ model Report {
   reason          String
   // Nullable since migration 20261123120000_reports_outlive_deleted_accounts
   // (#48): a NULL side is an account that was deleted, its deletion time in
-  // the matching *DeletedAt column. Nothing writes one yet, and both foreign
-  // keys still CASCADE: an account deletion deletes the reports filed by or
-  // about it with the account.
+  // the matching *DeletedAt column. Written only by an account deletion or a
+  // registration hygiene sweep batch with the flag
+  // account_deletion_keeps_reports on (settleReportsOfDeletedAccounts,
+  // utils/reportSettlement.ts), which settles the account's reports before
+  // its row goes. Both foreign keys still CASCADE: with the flag off, the
+  // reports filed by or about an account are deleted with it.
   reporterId      String?   @map("reporter_id")
   reportedUserId  String?   @map("reported_user_id")
   // The reported account's username, kept when that account is deleted (a

@@ -2967,8 +2967,13 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
     // and both audit rows. Before, each was its own write and the audit rows
     // came last, after awaits that could throw: a failing step answered 500
     // with the ban committed and neither `user.ban` nor `report.resolve`
-    // recorded.
-    const { messageDeleted, disarmedServerIds } = await prisma.$transaction(async (tx) => {
+    // recorded. Run again whole when PostgreSQL aborts it to break a
+    // deadlock (an account deletion that keeps reports holds the reported
+    // messages of its reports: utils/accountDeletion.ts names the cycles);
+    // every decision a concurrent write can change is made inside, on each
+    // attempt (the report read again, the message to delete, the transition
+    // out of pending), and nothing outside it runs before it commits.
+    const { messageDeleted, disarmedServerIds } = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       // The account rows FIRST (lockAccountRows), as on the ban route: the
       // reported account's (the one banned, and the author whose deletion
       // cascades to the message and the report) and the reporter's (whose
@@ -2982,10 +2987,29 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         { id: report.reportedUserId, mode: banTarget ? 'update' : 'keep' },
         { id: report.reporterId, mode: 'keep' },
       ]);
-      // Either account deleted since the read above took this report with it
-      // (both foreign keys cascade): the route's not-found, never a 500 from
-      // the writes below
-      if ([report.reportedUserId, report.reporterId].some((uid) => uid && !locked.has(uid))) throw new NotFoundError('Report');
+      // The report again, now that both accounts are held: from here on
+      // neither side can change (an account deletion turns a side NULL, or
+      // takes the report with it, only after it holds that account's row), so
+      // what follows is decided from this read, never from the one above. A
+      // plain read: a lock on the report row here, before the message row,
+      // would close the cycle the message lock below avoids.
+      const current = await tx.report.findUnique({
+        where: { id },
+        select: { reporterId: true, reportedUserId: true, messageId: true },
+      });
+      // Gone with an account deleted since the read above (unless a deletion
+      // keeps it, a report goes with its accounts), or still naming an
+      // account that is gone: the route's not-found, never a 500 from the
+      // writes below
+      if (!current || [current.reportedUserId, current.reporterId].some((uid) => uid && !locked.has(uid))) throw new NotFoundError('Report');
+      // Kept after its reported account was deleted since the read above
+      // (#48): nobody is left to ban, and nothing is written
+      if (action === 'ban' && current.reportedUserId === null) throw new BadRequestError(REPORTED_ACCOUNT_DELETED_MESSAGE);
+      // The message to delete is the one the report names NOW: one a
+      // deletion unlinked from it (its author's account deleted: the message
+      // went with it, or stays as a placeholder in a direct conversation kept
+      // for the other person) is not this resolution's to delete
+      const target = message && current.messageId === message.id ? message : null;
       const disarmed = banTarget ? await disarmWebhookRowsHeldBy(tx, banTarget.id) : [];
       // The reported message's row BEFORE the report's, in the order its
       // author's own delete takes them (the message row, then the report
@@ -2993,7 +3017,7 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       // message second closed a cycle with that delete. Only locked here, the
       // same lock its DELETE takes: the pending check below still decides
       // before anything is deleted.
-      if (message) await tx.$queryRaw`SELECT id FROM messages WHERE id = ${message.id} FOR UPDATE`;
+      if (target) await tx.$queryRaw`SELECT id FROM messages WHERE id = ${target.id} FOR UPDATE`;
       // Only from pending, re-checked by the write itself: a second resolve or
       // a dismiss that committed since the read above leaves nothing to
       // transition, and this whole resolution rolls back (ban included) with
@@ -3009,7 +3033,7 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       });
       if (transitioned.count === 0) throw new BadRequestError('Report is already processed');
       // deleteMany: a message its author deleted meanwhile is not an error
-      const deleted = message ? (await tx.message.deleteMany({ where: { id: message.id } })).count > 0 : false;
+      const deleted = target ? (await tx.message.deleteMany({ where: { id: target.id } })).count > 0 : false;
       if (banTarget) {
         await tx.user.update({
           where: { id: banTarget.id },
@@ -3033,12 +3057,13 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
           targetType: 'report',
           targetId: id,
           // What this resolution deleted, not what it asked for: a message its
-          // author deleted meanwhile was not deleted here
+          // author deleted meanwhile, or one the report no longer names, was
+          // not deleted here
           metadata: { resolution: sanitizedResolution, action: action ?? null, messageDeleted: deleted },
         }),
       });
       return { messageDeleted: deleted, disarmedServerIds: disarmed };
-    }, BAN_TRANSACTION_OPTIONS);
+    }, BAN_TRANSACTION_OPTIONS), `[Admin] The resolution of report ${id}`);
 
     // Committed. A ban signs the account out everywhere FIRST, right after
     // the commit (never throws). Everything after is best effort, each step
@@ -3090,7 +3115,10 @@ adminRouter.post('/reports/:id/dismiss', async (req: Request<{ id: string }>, re
     if (report.status !== 'pending') throw new BadRequestError('Report is already processed');
 
     // Only from pending, as a resolve: a resolve or another dismiss that
-    // committed since the read above must not be overwritten
+    // committed since the read above must not be overwritten. The update is
+    // the decision, on the row as it stands under its own lock, and nothing
+    // in it depends on the report's accounts: one kept after an account's
+    // deletion (#48) is dismissed like any other.
     const transitioned = await prisma.report.updateMany({
       where: { id, status: 'pending' },
       data: {

@@ -14,7 +14,8 @@ import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs'
 import { revokeUserSessions } from './sessionRevocation';
 import { emitToModerators } from './moderatorAudience';
 import { isFeatureEnabled } from './featureFlags';
-import { settleConversationsOfDeletedAccount, type DeletedAccountConversations } from './conversationLifecycle';
+import { lockConversationsOfAccount, settleConversationsOfDeletedAccount, type DeletedAccountConversations } from './conversationLifecycle';
+import { settleReportsOfDeletedAccounts } from './reportSettlement';
 import { getIO } from '../websocket/socketServer';
 import { endDMCall } from '../websocket/dmVoiceHandler';
 import { deletedParticipantId } from './deletedParticipant';
@@ -75,6 +76,10 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   // both people (as an account deletion always did); on, one the other
   // person can still reach outlives the account for them, read-only.
   const keepConversations = isFeatureEnabled('account_deletion_keeps_conversations');
+  // And of the moderation reports filed by or about it (#48), read once the
+  // same way: off, they go with the account through the cascade; on, each is
+  // kept without its link to the account (utils/reportSettlement.ts).
+  const keepReports = isFeatureEnabled('account_deletion_keeps_reports');
 
   // The user delete cascades every message the account wrote in every
   // channel (Message.author is onDelete: Cascade), attachment rows included,
@@ -104,7 +109,7 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     ...await readKeys({ channel: { createdById: userId, secure: true } }, 'the secure channels the account created'),
   ];
 
-  const { secure, removedFrom, conversations } = await deleteAccountRows(userId, { keepConversations });
+  const { secure, removedFrom, conversations } = await deleteAccountRows(userId, { keepConversations, keepReports });
 
   // Everything below follows the commit: each step on its own, a failure
   // logged and never thrown, so a deletion that has committed is answered as
@@ -174,20 +179,33 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  *  4. the account row (FOR UPDATE), then the member rows committed since
  *     step 1 (a second DELETE), then the account's device-registry row a
  *     second time;
- *  5. the account's direct conversations, every row FOR UPDATE in id order,
- *     then what becomes of each: kept for the other person (the account's
- *     messages there rewritten to placeholders, each row before its
- *     reactions and attachments, the other read row unhidden, the side set
- *     NULL) or deleted with its cascade
+ *  5. the account's direct conversations: (5a) every row FOR UPDATE in id
+ *     order, then (5b) what becomes of each: kept for the other person (the
+ *     account's messages there rewritten to placeholders, each row before
+ *     its reactions and attachments, the other read row unhidden, the side
+ *     set NULL) or deleted with its cascade
  *     (settleConversationsOfDeletedAccount, utils/conversationLifecycle.ts,
- *     which documents this step against every writer of a conversation);
- *  6. the user delete and every row it cascades to or sets null (messages,
+ *     which documents this step against every writer of a conversation; 5a
+ *     is its first statement, lockConversationsOfAccount);
+ *  6. with the flag account_deletion_keeps_reports on, BETWEEN 5a and 5b
+ *     (5a is then run on its own first, and 5b's own lock meets rows the
+ *     transaction already holds): the moderation reports filed by or about
+ *     the account, the messages they name FOR NO KEY UPDATE in id order,
+ *     then the reports FOR UPDATE in id order, then one update that unlinks
+ *     the account, marks its deletion and leaves on those rows no link a
+ *     later statement would set NULL (settleReportsOfDeletedAccounts,
+ *     utils/reportSettlement.ts). With the flag off neither this step nor
+ *     the separate 5a issues a statement: the reports go in 7 through the
+ *     cascade, exactly as before it existed;
+ *  7. the user delete and every row it cascades to or sets null (messages,
  *     reactions, reads, invites it created, join requests it decided, bans
  *     it issued, webhooks it created or rotated, its E2E devices with their
  *     one-time keys, its sign-in sessions and, through them, the session of
- *     each refresh-token redemption record, set null, …): the long part.
+ *     each refresh-token redemption record, set null, the reports it
+ *     resolved, set null, and with the flag off the reports filed by or
+ *     about it, …): the long part.
  * It takes NO space row. Why each comes where it does:
- *  - the sign-in sessions go in 6, with no statement of their own: a renewal
+ *  - the sign-in sessions go in 7, with no statement of their own: a renewal
  *    (services/sessionService.ts) takes only its own session row and reads
  *    the account without a lock, so it waits for this transaction at most on
  *    that row and closes no cycle; a sign-in's session insert key-shares the
@@ -276,7 +294,7 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * The direct conversations: step 5 takes every conversation row of the
  * account before it touches anything in them, after the account row (which
  * holds back every new conversation with the account), so the user delete
- * in step 6 finds none left to cascade into (each is deleted, or its side set
+ * in step 7 finds none left to cascade into (each is deleted, or its side set
  * NULL, explicitly: nothing rests on the foreign keys' CASCADE). Every writer
  * of a conversation (a message, an edit, a reaction or a delete of one, a
  * removal, a reopen; utils/conversationLifecycle.ts) takes the conversation
@@ -286,11 +304,128 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * account row this transaction holds while this transaction waits for the
  * conversation row, a cycle PostgreSQL breaks (both are retried, and the
  * account's write retried after this one committed answers 404 or 403).
+ * The reports (step 6, flag on): without it this transaction reaches the
+ * account's reports only through cascades (5b's and 7's); with it, it takes
+ * them, and the messages they name, after the conversations' lock and before
+ * anything is done in a conversation. Every report it takes names the
+ * account (it is selected by it), and so does every report a cascade of 5b
+ * can reach (only a conversation's two people can report a message in it,
+ * and never their own).
+ * WITH THE FLAG ON, NO REPORT ROW IS WRITTEN TWICE IN THIS TRANSACTION.
+ * PostgreSQL runs every foreign-key check of a row again (FOR KEY SHARE on
+ * the account or message it names) when a transaction updates a row it has
+ * already written itself, even when the key did not change. A second write
+ * of a report row would key-share the other person's account row, which
+ * that person's own deletion holds FOR UPDATE (its step 4) while it waits
+ * for the conversation row 5a holds here: a cycle. The keys of `reports`
+ * (schema.prisma): from it, reporter_id and reported_user_id to users ON
+ * DELETE CASCADE, message_id to messages SET NULL, resolved_by_id to users
+ * SET NULL; into it, none (no table has a key to `reports`). Every statement
+ * of this transaction that can write a report row, directly or through those
+ * keys:
+ *  - step 2's delete of the secure channels the account created cascades to
+ *    their messages, and through message_id to the reports naming them:
+ *    there are none, a message of a secure channel cannot be reported
+ *    (POST /reports refuses it; the refusal and secure channels shipped in
+ *    the same release);
+ *  - step 6's update, the first write of each row it touches (5a only locks
+ *    conversations, and no statement before it writes a report row);
+ *  - 5b: a placeholder rewrite keeps each message's id, so message_id's ON
+ *    UPDATE CASCADE writes nothing; a conversation delete cascades to its
+ *    messages and sets message_id NULL on the reports naming them, which all
+ *    name the account, and step 6 has set that link NULL on every one of
+ *    them already (the reported side always, the reporter side for a message
+ *    of a direct conversation), so it matches no row;
+ *  - 7, the user delete: the reporter_id and reported_user_id CASCADE match
+ *    no row (step 6 set both NULL wherever they named the account, and no
+ *    report naming it can commit while the account row is held); the
+ *    message_id SET NULL of the account's own messages matches no row (a
+ *    report on a message always names its author as reported, POST /reports
+ *    checks it, and step 6 set that link NULL); the cascade deletes no other
+ *    message (the account's conversations are settled in 5b, the channels
+ *    it created are its secure ones, deleted in 2, and its other keys from a
+ *    parent of messages are SET NULL or Restrict); the resolved_by_id SET
+ *    NULL writes the reports the account resolved, once: step 6 set that
+ *    link NULL on the rows it touched.
+ * The registration hygiene sweep keeps the same rule for a batch: its
+ * statements are the same kinds, in the same order. The "none" above rests on
+ * two facts about the rows already stored: no report names a message of a
+ * secure channel, and a report's message is its reported account's (the
+ * route has checked the author since it was written, and no route changes a
+ * message's author). With the flag off this step does not run and the
+ * transaction does what it did before: a report row 5b's cascade set NULL
+ * can be written again by 7's cascade, deleted (a delete runs no
+ * foreign-key check) or, when the account resolved that report, given a NULL
+ * resolver first (an update, which checks the row's other keys again); that
+ * path is unchanged.
+ * Writer by writer:
+ *  - a report resolution (POST /admin/reports/:id/resolve, with or without a
+ *    ban, with or without deleteMessage) takes both accounts' rows first
+ *    (lockAccountRows), so it queues with this transaction on the account
+ *    row before it holds a message or a report row; one that took the
+ *    account row first finishes while this transaction waits in step 4 (it
+ *    needs nothing steps 1 to 3 hold), and one that waited reads the report
+ *    again once it has the rows and decides from that (its account side gone
+ *    to NULL: a ban is refused, and a message no longer linked is not
+ *    deleted). A resolution of ANOTHER report on a message step 6 locks (one
+ *    that names neither this account nor its message, with deleteMessage)
+ *    does not queue on the account row: it takes that message row before its
+ *    report, as step 6 does, so the two meet on the message row. A
+ *    resolution runs under retryOnTransactionConflict;
+ *  - a dismissal (POST /admin/reports/:id/dismiss) is one conditional update
+ *    of the report row: it waits for this transaction when step 6 holds that
+ *    row, and holds nothing this transaction needs (it also key-shares the
+ *    acting administrator's account row through resolved_by_id: a cycle only
+ *    when that administrator is the account being deleted, as with the
+ *    cascade of 7 before);
+ *  - a report being filed (POST /reports) key-shares both of its accounts:
+ *    it waits for step 4's lock holding no report row this step can see (its
+ *    own is not committed), and fails on the foreign key once this commits;
+ *  - its author's own delete of a reported message takes the message row,
+ *    then the report row through the key's SET NULL; step 6 takes the
+ *    message before the report, so the two meet on the message row and the
+ *    one that waits holds nothing the other needs (for a DM message the
+ *    delete takes the conversation row even before that, which 5a holds);
+ *  - another account deletion, or the registration hygiene sweep, takes the
+ *    same kinds of locks in the same order (its accounts, its conversations'
+ *    lock, then messages and reports in id order, then the conversations'
+ *    outcome). Where two share a conversation, a message or a report they
+ *    take it in one order. The deletions of a conversation's two people meet
+ *    on the conversation row, at 5a, before either holds a message or a
+ *    report of it. A message both lock in step 6 is taken FOR NO KEY UPDATE,
+ *    which they cannot both hold: the deletion of a reporter and that of the
+ *    account whose message they reported queue on that message before either
+ *    holds a report row (with a shared lock both would hold it, and the
+ *    author's cascade would wait for the other while the other waited for
+ *    the report row the author's deletion took).
+ * What remains is the cascade-against-cascade case described above: a
+ * statement that already holds a row step 7 reaches, and then needs a
+ * message step 6 holds, waits for this transaction while this one waits for
+ * that row. Three are known, the same under this order:
+ *  - a channel or space delete that has already deleted another message of
+ *    the channel and, with it, the account's reaction on it or (SET NULL)
+ *    the reply link of the account's message to it, then reaches a message
+ *    step 6 holds; step 7 wants that reaction or message row;
+ *  - a resolution with a ban whose disarm locked a webhook the account
+ *    created, then deleting the reported message step 6 holds; step 7 sets
+ *    that webhook's creator NULL;
+ *  - two deletions (or a deletion and the sweep) sharing a reported message:
+ *    one holds another reported message, an earlier one in id order, that
+ *    replies to a message of the other's account, and waits for the shared
+ *    one; the other's step 7 deletes the message replied to and sets that
+ *    reply link NULL, which waits for the first.
+ * PostgreSQL aborts one side. This transaction runs again whole (so does the
+ * sweep's batch, and so does a resolution), and step 6 then selects by the
+ * account again under that attempt's own locks (the flag was read once,
+ * before the first attempt).
  */
-export async function deleteAccountRows(userId: string, opts: { keepConversations: boolean }): Promise<AccountRowsDeleted> {
+export async function deleteAccountRows(
+  userId: string,
+  opts: { keepConversations: boolean; keepReports: boolean },
+): Promise<AccountRowsDeleted> {
   let committed: { removal: SecureMembershipRemoval; serverIds: string[]; conversations: DeletedAccountConversations };
   try {
-    committed = await runAccountDeletionTransaction(userId, opts.keepConversations);
+    committed = await runAccountDeletionTransaction(userId, opts);
   } catch (err) {
     // `Server.owner` is onDelete: Restrict: the account came to own a space
     // after `deleteUserAccount` checked it owned none (a transfer to it, which
@@ -454,7 +589,7 @@ async function lowerMemberCounts(serverIds: string[], userId: string): Promise<v
 
 function runAccountDeletionTransaction(
   userId: string,
-  keepConversations: boolean,
+  { keepConversations, keepReports }: { keepConversations: boolean; keepReports: boolean },
 ): Promise<{ removal: SecureMembershipRemoval; serverIds: string[]; conversations: DeletedAccountConversations }> {
   // Most E2E material has no key to the account (the key shares, master
   // transfers, master key and device registry; the devices and the two
@@ -496,6 +631,16 @@ function runAccountDeletionTransaction(
     // Its device rows go with the user delete; this row has no key to the
     // account. Under the account row lock, no registration can write it again.
     await tx.e2EDeviceRegistry.deleteMany({ where: { userId } });
+    // With the flag on, the reports filed by or about the account are kept
+    // without their link to it (step 6 of the lock order above), between
+    // the conversations' lock (5a) and what is done in them (5b), so that no
+    // report row is written twice: the conversations, then the messages the
+    // reports name, then the reports, then the one update. Flag off: neither
+    // statement, and the cascades below delete the reports as before.
+    if (keepReports) {
+      await lockConversationsOfAccount(tx, userId);
+      await settleReportsOfDeletedAccounts(tx, [userId]);
+    }
     // The direct conversations, under the account row lock (no new one can
     // start with this account meanwhile): each locked in id order, then kept
     // for the other person read-only or deleted, explicitly, whatever the

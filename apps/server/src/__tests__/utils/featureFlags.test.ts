@@ -87,6 +87,9 @@ const DEFAULT_ANSWERS: Record<FeatureFlagName, boolean> = {
   // OFF until the Privacy Policy has given its notice: an account deletion
   // deletes its conversations for both people, as before
   account_deletion_keeps_conversations: false,
+  // OFF until the Privacy Policy has given its notice: an account deletion
+  // deletes the reports filed by or about it, as before
+  account_deletion_keeps_reports: false,
   // OFF (observe) until the reuse logs say enforcing would sign out almost
   // nobody: a reused refresh token is logged and the session kept
   refresh_reuse_revocation: false,
