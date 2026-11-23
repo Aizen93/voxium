@@ -876,6 +876,11 @@
     "conversationStart": "ダイレクトメッセージの履歴の始まりです。",
     "welcomeMessage": "サイドバーから会話を選択するか、いずれかのスペースのメンバーをクリックして新しい会話を始めましょう。",
     "failedToLoadConversations": "会話を読み込めませんでした",
+    "list": {
+      "loadMore": "さらに会話を読み込む",
+      "loadMoreFailed": "これ以上の会話を読み込めませんでした。",
+      "loadMoreRetry": "再試行"
+    },
     "remove": {
       "action": "会話を削除",
       "actionWith": "{{name}}との会話を削除",

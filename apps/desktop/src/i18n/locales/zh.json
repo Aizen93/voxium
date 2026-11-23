@@ -876,6 +876,11 @@
     "conversationStart": "这是你们私信记录的开始。",
     "welcomeMessage": "从侧边栏选择一个对话，或点击任意空间中的成员来开始新的对话。",
     "failedToLoadConversations": "无法加载对话",
+    "list": {
+      "loadMore": "加载更多对话",
+      "loadMoreFailed": "无法加载更多对话。",
+      "loadMoreRetry": "重试"
+    },
     "remove": {
       "action": "移除对话",
       "actionWith": "移除与{{name}}的对话",

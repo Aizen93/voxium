@@ -1185,6 +1185,7 @@ describe('DM routes — the wire for live conversations is unchanged', () => {
         lastMessage: null,
         encryptedAt: '2026-08-01T14:00:00.000Z',
         createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-01T00:00:00.000Z',
       },
     });
     // the pair lookup is by both live ids, sorted (Prisma's compound input

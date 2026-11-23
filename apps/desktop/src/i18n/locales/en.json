@@ -878,6 +878,11 @@
     "conversationStart": "This is the start of your direct message history.",
     "welcomeMessage": "Select a conversation from the sidebar, or click on a member in any space to start a new one.",
     "failedToLoadConversations": "Failed to load conversations",
+    "list": {
+      "loadMore": "Load more conversations",
+      "loadMoreFailed": "Could not load more conversations.",
+      "loadMoreRetry": "Try again"
+    },
     "remove": {
       "action": "Remove conversation",
       "actionWith": "Remove conversation with {{name}}",

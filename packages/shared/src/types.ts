@@ -618,6 +618,9 @@ export interface UnreadCount {
 
 export interface Conversation {
   id: string;
+  /** The list's order key as the server last served it (`GET /dm` in its paged
+   *  mode only; a row opened locally and a legacy answer carry none). */
+  updatedAt?: string;
   /** null: that side's account was deleted (the conversation outlived it). */
   user1Id: string | null;
   user2Id: string | null;
@@ -650,6 +653,22 @@ export interface Conversation {
 export interface ClearedConversationFloor {
   conversationId: string;
   clearedUntil: string;
+}
+
+/**
+ * Query parameters of `GET /dm` (the conversation list). Neither present: the
+ * legacy list (at most 200 rows, no `nextCursor`). Either present: one page of
+ * `limit` rows (DM_LIST_PAGE_DEFAULT when absent, DM_LIST_PAGE_MAX at most)
+ * after `cursor`, a `nextCursor` of the answer handed back verbatim.
+ */
+export interface DMListRequest {
+  limit?: string;
+  cursor?: string;
+}
+
+/** The part of the `GET /dm` answer that pages: present only when more rows exist. */
+export interface DMListPageInfo {
+  nextCursor?: string;
 }
 
 export interface DMUnreadCount {

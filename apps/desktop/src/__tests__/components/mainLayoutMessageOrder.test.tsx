@@ -32,6 +32,7 @@ const H = vi.hoisted(() => ({
     updateLastMessage: vi.fn(),
     forgetRemoval: vi.fn(),
     fetchConversations: vi.fn(async () => undefined),
+    fetchConversationsFor: vi.fn(async () => undefined),
   },
   server: { incrementUnread: vi.fn(), markChannelRead: vi.fn() },
 }));
@@ -442,12 +443,12 @@ describe('a direct conversation: the view on screen is read after every await', 
     viewConversation('c-1');
     setConversations(['c-2']);
     let listed!: () => void;
-    H.dm.fetchConversations.mockImplementationOnce(() => new Promise<undefined>((resolve) => { listed = () => resolve(undefined); }));
+    H.dm.fetchConversationsFor.mockImplementationOnce(() => new Promise<undefined>((resolve) => { listed = () => resolve(undefined); }));
     const m1 = wire('dm', 'm1');
     const inserting = fire('dm:message:new', m1);
     await gateCalls(1);
     H.gate[0].resolve(opened(m1, 'hello'));
-    await vi.waitFor(() => expect(H.dm.fetchConversations).toHaveBeenCalled(), { timeout: 10_000, interval: 5 });
+    await vi.waitFor(() => expect(H.dm.fetchConversationsFor).toHaveBeenCalled(), { timeout: 10_000, interval: 5 });
     // the list is on its way; the person opens another conversation meanwhile
     setConversations(['c-1', 'c-2'], 'c-2');
     await act(async () => { listed(); await inserting; });

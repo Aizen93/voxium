@@ -3,7 +3,7 @@ import { api } from '../services/api';
 import { useChatStore, clearConversationView } from './chatStore';
 import { toast } from './toastStore';
 import i18n from '../i18n';
-import { DELETED_MESSAGE_TYPE, isDeletedParticipantId, isDMSystemNotice } from '@voxium/shared';
+import { DELETED_MESSAGE_TYPE, DM_LIST_PAGE_DEFAULT, isDeletedParticipantId, isDMSystemNotice } from '@voxium/shared';
 import type { Conversation, DMUnreadCount, UserStatus } from '@voxium/shared';
 import { deletedParticipantAuthor } from '../services/e2e/displayGate';
 import { isParticipantDeleted, isHeldReadOnly } from '../utils/dmParticipant';
@@ -83,8 +83,29 @@ interface DMState {
   openedAt: Record<string, number>;
   /** Counts the local opens this session: a list fetch takes it as its mark. */
   openSeq: number;
+  /**
+   * The cursor of the next page of the list (`GET /dm?cursor=`), null when
+   * the whole list is loaded: the server sent no `nextCursor` (the last page,
+   * or a server from before the paged list, which answers the whole list).
+   */
+  listNextCursor: string | null;
+  /** A later page is being requested. */
+  isLoadingMore: boolean;
+  /** The last request for a later page failed (the list offers a retry; nothing loads by itself until then). */
+  loadMoreFailed: boolean;
 
+  /** The list's first page (resume, reconnect, mount). */
   fetchConversations: () => Promise<void>;
+  /**
+   * The first page, and once more when the conversation is still not held
+   * after its answer (a new message can reach the client before the server
+   * has moved its conversation up the list): at most two requests.
+   */
+  fetchConversationsFor: (conversationId: string) => Promise<void>;
+  /** The next page, appended after the rows held; nothing without a cursor or while one is in flight. */
+  loadMoreConversations: () => Promise<void>;
+  /** The one implementation of both (a first page replaces the head, a later page appends). */
+  loadConversationPage: (kind: 'first' | 'more') => Promise<void>;
   setActiveConversation: (conversationId: string) => void;
   clearActiveConversation: () => void;
   openDM: (userId: string) => Promise<string>;
@@ -161,6 +182,9 @@ export function wasRemovedSince(conversationId: string, mark: number): boolean {
 // fresher). Monotonic, so a logout needs no reset.
 let _listTicket = 0;
 let _listAppliedTicket = 0;
+// Later-page requests: only the latest one settles isLoadingMore / loadMoreFailed
+// (a logout resets the state under a request in flight).
+let _moreTicket = 0;
 
 /**
  * A list whose request began before a local open (openDM, addConversation:
@@ -179,6 +203,34 @@ function withLocalOpens(
   const listed = new Set(conversations.map((c) => c.id));
   const added = held.filter((c) => (openedAt[c.id] ?? -1) > mark && !listed.has(c.id));
   return added.length === 0 ? conversations : [...added, ...conversations];
+}
+
+/**
+ * Whether a held row is kept by a first page that is not the whole list: it
+ * sorts after `last` in the list's own order (updatedAt newest first, then id
+ * descending: the server's keyset), by the `updatedAt` the server served for
+ * each. A row that cannot be placed (it carries no served time, or `last`
+ * carries none) is KEPT too: nothing that cannot be placed is dropped.
+ */
+function liesBeyond(row: Conversation, last: Conversation | undefined): boolean {
+  if (!last?.updatedAt || !row.updatedAt) return true;
+  const at = Date.parse(row.updatedAt);
+  const lastAt = Date.parse(last.updatedAt);
+  if (!Number.isFinite(at) || !Number.isFinite(lastAt)) return true;
+  return at < lastAt || (at === lastAt && row.id < last.id);
+}
+
+/** The rows a first page keeps beyond its own answer, after it and in the order held. */
+function withKeptRows(listed: Conversation[], kept: readonly Conversation[]): Conversation[] {
+  if (kept.length === 0) return listed;
+  const ids = new Set(listed.map((c) => c.id));
+  return [...listed, ...kept.filter((c) => !ids.has(c.id))];
+}
+
+/** The server refused the cursor of a later page: 400 `Invalid cursor`. */
+function isInvalidCursorAnswer(err: unknown): boolean {
+  const response = (err as { response?: { status?: number; data?: { error?: unknown } } } | null)?.response;
+  return response?.status === 400 && response.data?.error === 'Invalid cursor';
 }
 
 // Dedup: prevent redundant mark-as-read API calls (same pattern as serverStore)
@@ -342,10 +394,28 @@ export const useDMStore = create<DMState>((set, get) => ({
   removalSeq: 0,
   openedAt: {},
   openSeq: 0,
+  listNextCursor: null,
+  isLoadingMore: false,
+  loadMoreFailed: false,
 
-  fetchConversations: async () => {
-    set({ isLoading: true });
-    const ticket = ++_listTicket;
+  fetchConversations: () => get().loadConversationPage('first'),
+  fetchConversationsFor: async (conversationId) => {
+    await get().loadConversationPage('first');
+    if (!get().conversations.some((c) => c.id === conversationId)) await get().loadConversationPage('first');
+  },
+  loadMoreConversations: () => get().loadConversationPage('more'),
+
+  loadConversationPage: async (kind) => {
+    const more = kind === 'more';
+    // a later page needs a cursor and runs one at a time
+    if (more && (get().listNextCursor === null || get().isLoadingMore)) return;
+    const cursor = more ? get().listNextCursor : null;
+    const moreTicket = more ? ++_moreTicket : 0;
+    // a first page applied after this request began makes a later page's answer
+    // stale (that first page decided which later rows stay and where the cursor is)
+    const appliedMark = _listAppliedTicket;
+    set(more ? { isLoadingMore: true, loadMoreFailed: false } : { isLoading: true });
+    const ticket = more ? _listTicket : ++_listTicket;
     // the local opens before the request: one after it is not undone by its answer
     const openMark = get().openSeq;
     // a purge of a cleared history that failed, or waited for the encryption
@@ -358,6 +428,9 @@ export const useDMStore = create<DMState>((set, get) => ({
     const removalMark = get().removalSeq;
     let clearedList: unknown;
     let conversations: Conversation[];
+    let nextCursor: string | null = null;
+    // the held rows a first page keeps beyond its own answer
+    let keptHeld: Conversation[] = [];
     let transitions: ReadOnlyTransition[];
     let applied: string[];
     let served: string[];
@@ -368,17 +441,38 @@ export const useDMStore = create<DMState>((set, get) => ({
     // connection — surfaced as "Failed to load conversations" over a list that
     // had loaded perfectly well and was already on screen.
     try {
-      const { data } = await api.get('/dm');
+      const { data } = await api.get('/dm', {
+        params: more ? { limit: DM_LIST_PAGE_DEFAULT, cursor } : { limit: DM_LIST_PAGE_DEFAULT },
+      });
       // the floors of this account's removed conversations, beside the list
-      clearedList = (data as { cleared?: unknown }).cleared;
-      const fetched = (data.data as Conversation[]).map(withLockedPreview);
+      // (the first page only: a later page carries none)
+      clearedList = more ? undefined : (data as { cleared?: unknown }).cleared;
+      // a server from before the paged list answers the whole list and no cursor
+      const cursorField = (data as { nextCursor?: unknown }).nextCursor;
+      nextCursor = typeof cursorField === 'string' && cursorField.length > 0 ? cursorField : null;
+      const answered = (data.data as Conversation[]).map(withLockedPreview);
+      const held = get();
+      // a later page never replaces a row the store holds (a newer copy of it)
+      const fetched = more ? answered.filter((c) => !held.conversations.some((h) => h.id === c.id)) : answered;
+      // A first page that still has pages after it, over a store that holds a
+      // cursor, is the authoritative list down to its LAST row. A held row it
+      // does not name is kept only when it lies BEYOND that row in the
+      // list's own order (a row of the old first page that new
+      // conversations pushed past rank 50 included), after its own rows and
+      // in the order held; its cursor stays where the loaded rows end. One
+      // that sorts at or before the last row and is not named no longer
+      // exists for this account (hidden or deleted elsewhere): dropped. An
+      // answer that is the whole list (no cursor) drops everything else.
+      keptHeld = !more && nextCursor !== null && held.listNextCursor !== null
+        ? held.conversations.filter((c) => !answered.some((a) => a.id === c.id) && liesBeyond(c, answered[answered.length - 1]))
+        : [];
       // what the list itself says, before this session's own knowledge joins it
       served = fetched.filter(isParticipantDeleted).map((c) => c.id);
       servedLive = fetched.filter((c) => !isParticipantDeleted(c)).map((c) => c.id);
       // the local opens joined in BEFORE the read-only reconciliation, so
       // the flags, the id set and the statuses below all follow the final list
       ({ conversations, transitions, applied } = reconcileReadOnly(
-        withLocalOpens(fetched, openMark, get().openedAt, get().conversations),
+        more ? fetched : withKeptRows(withLocalOpens(fetched, openMark, get().openedAt, get().conversations), keptHeld),
         get().conversations,
         get().readOnlyPending,
         // the signed-in account, as the E2E layer reads it (no store import:
@@ -386,7 +480,24 @@ export const useDMStore = create<DMState>((set, get) => ({
         currentE2ESessionUser() ?? null,
       ));
     } catch (err) {
-      console.error('Failed to fetch conversations:', err);
+      console.error('Failed to fetch conversations:', err instanceof Error ? err.message : err);
+      if (more) {
+        // another account is signed in now: the failure is not its to show
+        if ((currentE2ESessionUser() ?? null) !== (askedBy ?? null)) {
+          if (moreTicket === _moreTicket) set({ isLoadingMore: false });
+          return;
+        }
+        if (isInvalidCursorAnswer(err)) {
+          // The cursor is refused (the signing key changed while the app was
+          // open): start over from the first page, whose answer replaces the
+          // rows (no cursor held), and show no failure for it.
+          if (moreTicket === _moreTicket) set({ isLoadingMore: false, loadMoreFailed: false, listNextCursor: null });
+          await get().loadConversationPage('first');
+          return;
+        }
+        if (moreTicket === _moreTicket) set({ isLoadingMore: false, loadMoreFailed: true });
+        return;
+      }
       toast.error(i18n.t('dm.failedToLoadConversations'));
       set({ isLoading: false });
       return;
@@ -394,20 +505,32 @@ export const useDMStore = create<DMState>((set, get) => ({
 
     // Another account is signed in now: this answer is not its to apply
     if ((currentE2ESessionUser() ?? null) !== (askedBy ?? null)) {
-      if (ticket === _listTicket) set({ isLoading: false });
+      if (more) {
+        if (moreTicket === _moreTicket) set({ isLoadingMore: false });
+      } else if (ticket === _listTicket) set({ isLoading: false });
       return;
     }
-    // An answer older than a list already applied is dropped: that list began
-    // later and set isLoading itself.
-    if (ticket < _listAppliedTicket) return;
-    _listAppliedTicket = ticket;
+    if (more) {
+      // A first page applied since this request began: it decided which later
+      // rows stay and where the cursor stands, so this answer (positioned by
+      // the cursor it was asked with) is dropped; the next request asks again.
+      if (_listAppliedTicket !== appliedMark) {
+        if (moreTicket === _moreTicket) set({ isLoadingMore: false });
+        return;
+      }
+    } else {
+      // An answer older than a list already applied is dropped: that list began
+      // later and set isLoading itself.
+      if (ticket < _listAppliedTicket) return;
+      _listAppliedTicket = ticket;
+    }
 
     // The reader's floors, before anything of the list reaches the store:
     // those of the removed conversations it leaves out (`cleared`), then those
     // it carries (clearedUntil); applied outside the try above, which only the
     // fetch may fail. Then what a list begun before a removal must not bring
     // back is left out.
-    applyClearedList(clearedList, askedBy);
+    if (!more) applyClearedList(clearedList, askedBy);
     conversations = withoutStaleRemovals(withClearedFloors(conversations, askedBy), removalMark, get().removedAt);
 
     // Initialize participant statuses from the conversation data.
@@ -452,10 +575,17 @@ export const useDMStore = create<DMState>((set, get) => ({
           if (readOnlyPurges[id] === 'done') readOnlyPurges[id] = 'unmarked';
         }
       }
+      // A later page is appended to the rows the store holds NOW (never
+      // replacing one); a first page replaces the head and keeps what it kept.
+      const rows = more
+        ? [...state.conversations, ...conversations.filter((c) => !state.conversations.some((h) => h.id === c.id))]
+        : conversations;
       return {
-        conversations,
+        conversations: rows,
+        // a first page that kept later rows leaves the cursor where those rows end
+        listNextCursor: more || keptHeld.length === 0 ? nextCursor : state.listNextCursor,
         participantStatuses: { ...state.participantStatuses, ...statuses },
-        isLoading: false,
+        ...(more ? (moreTicket === _moreTicket ? { isLoadingMore: false, loadMoreFailed: false } : {}) : { isLoading: false }),
         readOnlyPending,
         readOnlyConfirmed,
         readOnlyPurges,
