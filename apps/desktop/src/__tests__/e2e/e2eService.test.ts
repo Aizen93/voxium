@@ -54,9 +54,13 @@ vi.mock('../../stores/toastStore', () => ({ toast: { error: vi.fn(), success: vi
 import {
   E2EService,
   E2EIdentityChangedError,
+  E2EKeyBackupUnconfirmedError,
   FALLBACK_KEY_UPLOAD_RECORD,
+  KEY_BACKUP_UNCONFIRMED_MAX,
+  KEY_BACKUP_WRITE_SETTLE_MS,
   FALLBACK_ROTATION_MIN_INTERVAL_MS,
   OUTBOUND_ROTATION_REPAIR,
+  type E2EKeyBackupWriteCheck,
   type E2EServiceOptions,
 } from '../../services/e2e/e2eService';
 import { watchKeyArrivals, redecryptPassesSettled } from '../../services/e2e/redecryptOnKeyArrival';
@@ -68,7 +72,17 @@ import { useServerStore } from '../../stores/serverStore';
 import type { Message } from '@voxium/shared';
 import { generateRecoveryKey } from '../../services/e2e/engine';
 import { initEngine, EngineAccount, EngineMasterKey, EngineGroupSession } from '../../services/e2e/engine';
-import { E2EVault, E2EVaultClosedError, VAULT_OWNER_KEY, stampVaultOwner, vaultDbName, type PickleKeyProvider } from '../../services/e2e/vault';
+import {
+  E2EVault,
+  E2EVaultClosedError,
+  VAULT_OWNER_KEY,
+  stampVaultOwner,
+  vaultDbName,
+  type KeyBackupWriteRecord,
+  type KeyBackupWrites,
+  type PickleKeyProvider,
+} from '../../services/e2e/vault';
+import { sha256Hex } from '../../utils/sha256';
 import {
   acquireVaultOwnership,
   getVaultOwnershipState,
@@ -7345,16 +7359,19 @@ describe('E2EService — lifecycle', () => {
         outbound.free();
       }
 
+      // creating the backup read it once already; only the restore's reads count
+      const backupReads = () => gate.reads.filter((r) => r === 'GET /e2e/backup').length;
       const warn = vi.spyOn(console, 'warn');
       const error = vi.spyOn(console, 'error');
       try {
         const backup = service.backupMessageKeys();
         await gate.held;
+        const readsBefore = backupReads();
         // restoring the account key replaces (and frees) the one the pass holds
         const restore = service.restoreKeyBackup(recoveryKey);
         // a restore free to start would have sent its first request by now
         await new Promise((resolve) => setTimeout(resolve, 0));
-        expect(gate.reads).not.toContain('GET /e2e/backup');
+        expect(backupReads()).toBe(readsBefore);
         gate.release();
 
         await expect(backup).resolves.toBe(count);
@@ -9318,5 +9335,1023 @@ describe('E2EService — the repairs that ship with one owner per vault', () => 
       put.mockRestore();
       warn.mockRestore();
     }
+  });
+});
+
+describe('E2EService — a key backup write that gets no usable answer (spec §15.7)', () => {
+  /** Shaped like axios's error for a request no answer came back to. */
+  const networkError = () => Object.assign(new Error('Network Error'), { code: 'ERR_NETWORK' });
+  /** Shaped like axios's error for an answer with this status. */
+  const statusError = (status: number) =>
+    Object.assign(new Error(`Request failed with status code ${status}`), { response: { status } });
+
+  // the service logs each lost answer; kept out of the test output
+  let warn: { mockRestore(): void } | undefined;
+  beforeEach(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn?.mockRestore();
+    _resetVaultOwnershipForTests();
+  });
+
+  const vaultOf = (service: E2EService) => (service as unknown as { vault: E2EVault }).vault;
+
+  /**
+   * A device holding the account key, over the fake's client with a hand on
+   * the backup route: the next write can fail after the fake stored it (its
+   * answer lost on the way back) or before, a step of the test can run while
+   * it is in flight, the next backup read can fail or answer without its blob,
+   * and the first backup read after a failed write can be preceded by a step.
+   */
+  async function backupDevice(opts: { readTimeoutMs?: number } = {}) {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const keyProvider = memoryKeyProvider();
+    const vaultNamespace = `v${++vaultSeq}`;
+    const base = server.apiFor(userId);
+    let nextWrite: { stored: boolean; error: Error } | null = null;
+    let duringWrite: (() => void) | null = null;
+    let failNextRead: Error | null = null;
+    let blobless = false;
+    let writeFailed = false;
+    let beforeReread: (() => void) | null = null;
+    let hangNextRead = false;
+    /** The blobs of the writes that failed, in order: a test can land one later. */
+    const failedBlobs: string[] = [];
+    let writes = 0;
+    let reads = 0;
+    let rereads = 0;
+    /** The request options of every backup read, in order. */
+    const readOptions: unknown[] = [];
+    const api = {
+      ...base,
+      async get(url: string, options?: unknown) {
+        if (url === '/e2e/backup') {
+          reads++;
+          readOptions.push(options);
+          if (hangNextRead) {
+            // no answer until the request's own deadline aborts it
+            hangNextRead = false;
+            const signal = (options as { signal?: AbortSignal } | undefined)?.signal;
+            return new Promise((_, reject) => {
+              signal?.addEventListener('abort', () => reject(Object.assign(new Error('canceled'), { code: 'ERR_CANCELED' })));
+            });
+          }
+          if (failNextRead) {
+            const error = failNextRead;
+            failNextRead = null;
+            throw error;
+          }
+          if (blobless) {
+            blobless = false;
+            return { data: { success: true, data: { exists: true, updatedAt: new Date().toISOString() } } };
+          }
+          if (writeFailed) {
+            rereads++;
+            const step = beforeReread;
+            beforeReread = null;
+            step?.();
+          }
+        }
+        return base.get(url);
+      },
+      async put(url: string, body: FakePutBody) {
+        if (url === '/e2e/backup') {
+          writes++;
+          const step = duringWrite;
+          duringWrite = null;
+          if (nextWrite) {
+            const { stored, error } = nextWrite;
+            nextWrite = null;
+            failedBlobs.push((body as BackupBody).blob);
+            if (stored) await base.put(url, body);
+            step?.();
+            writeFailed = true;
+            throw error;
+          }
+          const answer = await base.put(url, body);
+          step?.();
+          return answer;
+        }
+        return base.put(url, body);
+      },
+    };
+    const start = async () => {
+      const started = new E2EService(userId, {
+        api: api as unknown as E2EServiceOptions['api'],
+        keyProvider,
+        wasmInput: wasmBytes,
+        vaultNamespace,
+        deviceListCacheMs: 0,
+        keyBackupReadTimeoutMs: opts.readTimeoutMs,
+      });
+      liveServices.add(started);
+      await started.initialize();
+      await flushQueue();
+      return started;
+    };
+    const device = {
+      server,
+      userId,
+      service: await start(),
+      /** The app closed and opened again on the same vault. */
+      restart: async () => {
+        await device.service.dispose();
+        device.service = await start();
+      },
+      failNextWrite: (stored: boolean, error: Error) => (nextWrite = { stored, error }),
+      duringNextWrite: (step: () => void) => (duringWrite = step),
+      failNextRead: (error: Error) => (failNextRead = error),
+      answerNextReadWithoutBlob: () => (blobless = true),
+      hangNextRead: () => (hangNextRead = true),
+      /** A failed write the server takes after all, late (the last one by default). */
+      landFailedWrite: (index = failedBlobs.length - 1) =>
+        server.backups.set(userId, { blob: failedBlobs[index], updatedAt: new Date().toISOString() }),
+      failedBlobs: () => failedBlobs,
+      beforeReread: (step: () => void) => (beforeReread = step),
+      writes: () => writes,
+      reads: () => reads,
+      rereads: () => rereads,
+      readOptions: () => readOptions,
+      storedBlob: () => server.backups.get(userId)?.blob ?? null,
+      /** The vault's key backup writes, read past the service (no fence). */
+      vaultWrites: async () => {
+        const vault = new E2EVault(userId, keyProvider, vaultNamespace);
+        await vault.open();
+        try {
+          return (await vault.getKeyBackupWrites()) as KeyBackupWrites | undefined;
+        } finally {
+          vault.close();
+        }
+      },
+      /** The record of a write not confirmed, if any. */
+      record: async () => ((await device.vaultWrites())?.pending),
+      /** Write the record as a test needs it, through the service's own vault. */
+      setPending: async (pending: KeyBackupWriteRecord) => {
+        const vault = vaultOf(device.service);
+        const current = ((await vault.getKeyBackupWrites()) as KeyBackupWrites | undefined) ?? { unconfirmed: [] };
+        await vault.putKeyBackupWrites({ ...current, pending });
+      },
+      vaultName: () => vaultDbName(userId, vaultNamespace),
+    };
+    return device;
+  }
+
+  /** Whether `recoveryKey` opens the backup the server holds, as a fresh install of the account finds out. */
+  async function opens(server: Server, userId: string, recoveryKey: string): Promise<boolean> {
+    const reinstall = makeDevice(server, userId);
+    await reinstall.service.initialize();
+    await flushQueue();
+    try {
+      await reinstall.service.restoreKeyBackup(recoveryKey);
+      return true;
+    } catch (err) {
+      if (err instanceof Error && /does not open this backup|no key backup/.test(err.message)) return false;
+      throw err;
+    }
+  }
+
+  const unconfirmed = async (attempt: Promise<string>): Promise<E2EKeyBackupUnconfirmedError> => {
+    const err = await attempt.then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(err).toBeInstanceOf(E2EKeyBackupUnconfirmedError);
+    const typed = err as E2EKeyBackupUnconfirmedError;
+    // the recovery key of the attempt goes nowhere: these are all the error holds
+    expect(Object.keys(typed).sort()).toEqual(['firstSetup', 'name', 'outcome', 'stored']);
+    expect(typed.message).not.toMatch(/[A-Z2-7]{4}-[A-Z2-7]{4}/);
+    return typed;
+  };
+
+  /** A backup sealed under a key this device never saw: another write that landed meanwhile. */
+  const otherBlob = () => {
+    const other = new EngineMasterKey();
+    const blob = other.sealForBackup(generateRecoveryKey());
+    other.free();
+    return blob;
+  };
+
+  /** Hold the service's queue with a task of the test's own; resolves once the task runs. */
+  async function holdQueue(service: E2EService) {
+    let release!: () => void;
+    let running!: () => void;
+    const started = new Promise<void>((resolve) => (running = resolve));
+    const held = (service as unknown as { enqueue<T>(fn: () => Promise<T>): Promise<T> }).enqueue(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+          running();
+        })
+    );
+    await started;
+    return async () => {
+      release();
+      await held;
+    };
+  }
+
+  /** Counts the tasks queued on the service from now on: a test waits until a check has queued its own. */
+  function countQueued(service: E2EService) {
+    const target = service as unknown as { enqueue<T>(fn: () => Promise<T>): Promise<T> };
+    const spy = vi.spyOn(target, 'enqueue');
+    return {
+      until: (count: number) => vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(count), { timeout: 10_000 }),
+      restore: () => spy.mockRestore(),
+    };
+  }
+
+  describe('one write', () => {
+    it('returns the recovery key when the write is answered, with no read after it and no record left', async () => {
+      const d = await backupDevice();
+      const recoveryKey = await d.service.createKeyBackup();
+      expect(d.rereads()).toBe(0);
+      expect(await d.record()).toBeUndefined();
+      expect(await opens(d.server, d.userId, recoveryKey)).toBe(true);
+    });
+
+    it('gives the reads before and after the write a deadline of their own: they hold the serial queue', async () => {
+      const d = await backupDevice();
+      d.failNextWrite(true, networkError());
+
+      await d.service.createKeyBackup();
+
+      // a signal of the request's own, which no GET in flight can be joined to
+      expect(d.readOptions()).toHaveLength(2);
+      for (const options of d.readOptions()) {
+        expect((options as { signal?: unknown }).signal).toBeInstanceOf(AbortSignal);
+      }
+    });
+
+    it.each([
+      ['no answer', networkError],
+      ['a 500', () => statusError(500)],
+      ['a 502', () => statusError(502)],
+      ['a 504', () => statusError(504)],
+    ])('returns the recovery key after %s once the read finds the blob sealed for it', async (_, error) => {
+      const d = await backupDevice();
+      const earlier = await d.service.createKeyBackup();
+      d.failNextWrite(true, error());
+
+      const recoveryKey = await d.service.createKeyBackup();
+
+      expect(d.rereads()).toBe(1);
+      expect(await d.record()).toBeUndefined();
+      expect(recoveryKey).not.toBe(earlier);
+      expect(await opens(d.server, d.userId, recoveryKey)).toBe(true);
+      expect(await opens(d.server, d.userId, earlier)).toBe(false);
+    });
+
+    it("reports 'unchanged' when the read finds the backup held before, and keeps the record", async () => {
+      const d = await backupDevice();
+      const earlier = await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      d.failNextWrite(false, networkError());
+
+      const err = await unconfirmed(d.service.createKeyBackup());
+
+      expect(err.outcome).toBe('unchanged');
+      expect(err.firstSetup).toBe(false);
+      expect(err.stored).toEqual({ exists: true, updatedAt: d.server.backups.get(d.userId)!.updatedAt });
+      // the baseline, and the time this check found it: the settle window starts here
+      expect(await d.record()).toEqual({ baseline: sha256Hex(held), checkedAt: expect.any(Number) });
+      expect(d.storedBlob()).toBe(held);
+      expect(await opens(d.server, d.userId, earlier)).toBe(true);
+    });
+
+    it("reports 'unchanged' on a first setup when nothing is stored, and keeps the record", async () => {
+      const d = await backupDevice();
+      d.failNextWrite(false, statusError(503));
+
+      const err = await unconfirmed(d.service.createKeyBackup());
+
+      expect(err.outcome).toBe('unchanged');
+      expect(err.firstSetup).toBe(true);
+      expect(err.stored).toEqual({ exists: false, updatedAt: null });
+      expect(await d.record()).toEqual({ baseline: null, checkedAt: expect.any(Number) });
+    });
+
+    it("reports 'elsewhere' when the read finds another device's backup: the earlier key no longer opens it", async () => {
+      const d = await backupDevice();
+      const earlier = await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      d.failNextWrite(false, networkError());
+      const other = otherBlob();
+      d.beforeReread(() => d.server.backups.set(d.userId, { blob: other, updatedAt: new Date().toISOString() }));
+
+      const err = await unconfirmed(d.service.createKeyBackup());
+
+      expect(err.outcome).toBe('elsewhere');
+      expect(err.firstSetup).toBe(false);
+      expect(err.stored?.exists).toBe(true);
+      expect(await d.record()).toEqual({ baseline: sha256Hex(held) });
+      expect(await opens(d.server, d.userId, earlier)).toBe(false);
+    });
+
+    it("reports 'changed' when the backup held before is gone", async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(false, networkError());
+      d.beforeReread(() => d.server.backups.delete(d.userId));
+
+      const err = await unconfirmed(d.service.createKeyBackup());
+
+      expect(err.outcome).toBe('changed');
+      expect(err.stored).toEqual({ exists: false, updatedAt: null });
+    });
+
+    it("reports 'unknown' when the read after the write fails, and keeps the record", async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      d.failNextWrite(true, networkError());
+      d.beforeReread(() => {
+        throw networkError();
+      });
+
+      const err = await unconfirmed(d.service.createKeyBackup());
+
+      expect(err.outcome).toBe('unknown');
+      expect(err.firstSetup).toBe(false);
+      expect(err.stored).toBeNull();
+      expect(await d.record()).toEqual({ baseline: sha256Hex(held) });
+    });
+
+    it.each([400, 429])('lets a %i refusal propagate as itself, with no read after it and no record', async (status) => {
+      const d = await backupDevice();
+      const earlier = await d.service.createKeyBackup();
+      const refusal = statusError(status);
+      d.failNextWrite(false, refusal);
+
+      await expect(d.service.createKeyBackup()).rejects.toBe(refusal);
+
+      expect(d.rereads()).toBe(0);
+      expect(await d.record()).toBeUndefined();
+      expect(await opens(d.server, d.userId, earlier)).toBe(true);
+    });
+
+    it('sends nothing when the read before the write fails', async () => {
+      const d = await backupDevice();
+      const failure = networkError();
+      d.failNextRead(failure);
+
+      await expect(d.service.createKeyBackup()).rejects.toBe(failure);
+
+      expect(d.writes()).toBe(0);
+      expect(await d.record()).toBeUndefined();
+      expect(d.server.backups.has(d.userId)).toBe(false);
+    });
+
+    it('sends nothing when the read before the write answers a backup without its blob', async () => {
+      const d = await backupDevice();
+      d.answerNextReadWithoutBlob();
+
+      await expect(d.service.createKeyBackup()).rejects.toThrow(/without its blob/);
+
+      expect(d.writes()).toBe(0);
+      expect(await d.record()).toBeUndefined();
+    });
+
+    it('sends nothing when the record of the write cannot be stored', async () => {
+      const d = await backupDevice();
+      const vault = vaultOf(d.service);
+      const put = vi.spyOn(vault, 'putKeyBackupWrites').mockRejectedValueOnce(new DOMException('the disk is full', 'QuotaExceededError'));
+      try {
+        await expect(d.service.createKeyBackup()).rejects.toMatchObject({ name: 'QuotaExceededError' });
+      } finally {
+        put.mockRestore();
+      }
+      expect(d.writes()).toBe(0);
+      expect(d.server.backups.has(d.userId)).toBe(false);
+    });
+
+    it('sends nothing once another page holds the vault: the record is fenced like every write', async () => {
+      const d = await backupDevice();
+      const vault = vaultOf(d.service);
+      const write = vault.putKeyBackupWrites.bind(vault);
+      const put = vi.spyOn(vault, 'putKeyBackupWrites').mockImplementation(async (record) => {
+        await stampVaultOwner(d.vaultName(), 'another-page', 'claim');
+        return write(record);
+      });
+      try {
+        await expect(d.service.createKeyBackup()).rejects.toSatisfy(isE2ESessionEnded);
+      } finally {
+        put.mockRestore();
+      }
+      expect(d.writes()).toBe(0);
+    });
+
+    it('ends with the session when it ends during the read after the write: no key, no outcome', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(true, networkError());
+      d.beforeReread(() => void d.service.dispose());
+
+      const err = await d.service.createKeyBackup().then(
+        () => null,
+        (e: unknown) => e
+      );
+
+      expect(isE2ESessionEnded(err)).toBe(true);
+      expect(err).not.toBeInstanceOf(E2EKeyBackupUnconfirmedError);
+      expect(d.rereads()).toBe(1);
+      expect(d.writes()).toBe(2);
+    });
+  });
+
+  describe('a chain of writes keeps the baseline: the backup the person last held a key for', () => {
+    it("judges a retry after 'unknown' against the first baseline, not the backup the first write left", async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      // the first write lands, its answer and the read after it are lost
+      d.failNextWrite(true, networkError());
+      d.beforeReread(() => {
+        throw networkError();
+      });
+      expect((await unconfirmed(d.service.createKeyBackup())).outcome).toBe('unknown');
+      const landed = d.storedBlob();
+      expect(landed).not.toBe(held);
+
+      // the retry does not land
+      d.failNextWrite(false, networkError());
+      const err = await unconfirmed(d.service.createKeyBackup());
+
+      // the server holds a backup whose key was never shown: not "unchanged"
+      expect(err.outcome).toBe('changed');
+      expect(err.firstSetup).toBe(false);
+      expect(await d.record()).toEqual({ baseline: sha256Hex(held) });
+    });
+
+    it("judges a retry after 'elsewhere' against the first baseline", async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      d.failNextWrite(false, networkError());
+      const other = otherBlob();
+      d.beforeReread(() => d.server.backups.set(d.userId, { blob: other, updatedAt: new Date().toISOString() }));
+      expect((await unconfirmed(d.service.createKeyBackup())).outcome).toBe('elsewhere');
+
+      d.failNextWrite(false, networkError());
+      const err = await unconfirmed(d.service.createKeyBackup());
+
+      expect(err.outcome).toBe('elsewhere');
+      expect(await d.record()).toEqual({ baseline: sha256Hex(held) });
+    });
+
+    it("judges a retry of a first setup after 'unknown' against \"none\"", async () => {
+      const d = await backupDevice();
+      d.failNextWrite(true, networkError());
+      d.beforeReread(() => {
+        throw networkError();
+      });
+      const first = await unconfirmed(d.service.createKeyBackup());
+      expect(first.outcome).toBe('unknown');
+      expect(first.firstSetup).toBe(true);
+
+      d.failNextWrite(false, networkError());
+      const err = await unconfirmed(d.service.createKeyBackup());
+
+      expect(err.outcome).toBe('changed');
+      expect(err.firstSetup).toBe(true);
+      expect(await d.record()).toEqual({ baseline: null });
+    });
+
+    it("checks again against the first baseline after 'unknown', a retry and 'unknown' again", async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      d.failNextWrite(true, networkError());
+      d.beforeReread(() => {
+        throw networkError();
+      });
+      await unconfirmed(d.service.createKeyBackup());
+      d.failNextWrite(false, networkError());
+      d.beforeReread(() => {
+        throw networkError();
+      });
+      expect((await unconfirmed(d.service.createKeyBackup())).outcome).toBe('unknown');
+
+      const check = await d.service.resolveKeyBackupWrite();
+
+      expect(check).toEqual({ outcome: 'changed', firstSetup: false, stored: expect.objectContaining({ exists: true }) });
+      expect(await d.record()).toEqual({ baseline: sha256Hex(held) });
+    });
+
+    it('starts the settle window again at a retry: its write may land later too', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      expect((await d.record())?.checkedAt).toEqual(expect.any(Number));
+
+      // the retry is not answered and its read fails: nothing checks it after it leaves
+      d.failNextWrite(false, networkError());
+      d.beforeReread(() => {
+        throw networkError();
+      });
+      await unconfirmed(d.service.createKeyBackup());
+
+      expect(await d.record()).toEqual({ baseline: expect.any(String) });
+    });
+
+    it('ends the chain with a write that is answered: the key is shown and the record is gone', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(true, networkError());
+      d.beforeReread(() => {
+        throw networkError();
+      });
+      await unconfirmed(d.service.createKeyBackup());
+
+      const recoveryKey = await d.service.createKeyBackup();
+
+      expect(await d.record()).toBeUndefined();
+      expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+      expect(await opens(d.server, d.userId, recoveryKey)).toBe(true);
+    });
+
+    it('puts the record back as it was when a retry is refused', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      d.failNextWrite(true, networkError());
+      d.beforeReread(() => {
+        throw networkError();
+      });
+      await unconfirmed(d.service.createKeyBackup());
+      const before = await d.record();
+
+      d.failNextWrite(false, statusError(400));
+      await expect(d.service.createKeyBackup()).rejects.toMatchObject({ response: { status: 400 } });
+
+      expect(await d.record()).toEqual(before);
+      expect(before).toEqual({ baseline: sha256Hex(held) });
+    });
+  });
+
+  describe('the record outlives the attempt', () => {
+    it('is kept across a session that ends during the write, and judged after the app opens again', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      // the write lands, and the app closes before its answer is read
+      d.duringNextWrite(() => void d.service.dispose());
+
+      await expect(d.service.createKeyBackup()).rejects.toSatisfy(isE2ESessionEnded);
+      expect(d.storedBlob()).not.toBe(held);
+      expect(await d.record()).toEqual({ baseline: sha256Hex(held) });
+      expect((await d.vaultWrites())?.unconfirmed).toContain(sha256Hex(d.storedBlob()!));
+
+      await d.restart();
+      const check = await d.service.resolveKeyBackupWrite();
+
+      expect(check).toEqual({ outcome: 'changed', firstSetup: false, stored: expect.objectContaining({ exists: true }) });
+    });
+
+    it('answers null with no request when nothing is pending', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const reads = d.reads();
+
+      expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+      expect(d.reads()).toBe(reads);
+    });
+
+    it('ends with the session when it ends during a check: no outcome', async () => {
+      // a page that gave its vault up has no logout to stop the store asking
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      d.beforeReread(() => void d.service.dispose());
+
+      await expect(d.service.resolveKeyBackupWrite()).rejects.toSatisfy(isE2ESessionEnded);
+    });
+
+    it("answers 'unknown' when the read fails, and keeps the record", async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      const before = await d.record();
+      d.failNextRead(networkError());
+
+      expect(await d.service.resolveKeyBackupWrite()).toEqual({ outcome: 'unknown', firstSetup: false, stored: null });
+      expect(await d.record()).toEqual(before);
+    });
+
+    describe('with no record pending, a read that fails is no answer: the check fails', () => {
+      /** No record left (recovery turned off), a blob of this device's own unconfirmed writes stored. */
+      async function ownLandingWithoutRecord(d: Awaited<ReturnType<typeof backupDevice>>) {
+        d.failNextWrite(false, networkError());
+        await unconfirmed(d.service.createKeyBackup());
+        await d.service.deleteKeyBackup();
+        d.landFailedWrite();
+        expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('changed');
+      }
+      /** No record left, only digests: the stored backup is the one whose key was shown. */
+      async function digestsOnly(d: Awaited<ReturnType<typeof backupDevice>>) {
+        d.failNextWrite(false, networkError());
+        await unconfirmed(d.service.createKeyBackup());
+        await d.service.createKeyBackup();
+        expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+        expect((await d.vaultWrites())?.unconfirmed).toHaveLength(1);
+      }
+
+      it.each([
+        ['a landing of its own is stored', ownLandingWithoutRecord],
+        ['only digests are left', digestsOnly],
+      ])('rejects when the read fails and %s, instead of answering nothing to say', async (_, arrange) => {
+        const d = await backupDevice();
+        await arrange(d);
+        d.failNextRead(networkError());
+
+        await expect(d.service.resolveKeyBackupWrite()).rejects.toThrow('Network Error');
+      });
+
+      it('rejects when the read gets no answer before its deadline', async () => {
+        const d = await backupDevice({ readTimeoutMs: 20 });
+        await ownLandingWithoutRecord(d);
+        d.hangNextRead();
+
+        await expect(d.service.resolveKeyBackupWrite()).rejects.toThrow('canceled');
+      });
+
+      it('rejects when the record went while the check waited on the queue and the read fails', async () => {
+        const d = await backupDevice();
+        d.failNextWrite(false, networkError());
+        await unconfirmed(d.service.createKeyBackup());
+        const release = await holdQueue(d.service);
+        const queued = countQueued(d.service);
+        let check!: Promise<unknown>;
+        try {
+          check = d.service.resolveKeyBackupWrite();
+          // it saw the record and queued its judging
+          await queued.until(1);
+          const vault = vaultOf(d.service);
+          const writes = (await vault.getKeyBackupWrites()) as KeyBackupWrites;
+          await vault.putKeyBackupWrites({ unconfirmed: writes.unconfirmed });
+          d.failNextRead(networkError());
+        } finally {
+          queued.restore();
+          await release();
+        }
+
+        await expect(check).rejects.toThrow('Network Error');
+      });
+    });
+
+    it("keeps answering 'unchanged' inside the settle window, and settles a full window after the first such check", async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      const first = await d.record();
+
+      // checked again inside the window: same answer, same start of the window
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('unchanged');
+      expect(await d.record()).toEqual(first);
+
+      // the first check that found the baseline lies a full window back
+      await d.setPending({ baseline: sha256Hex(held), checkedAt: Date.now() - KEY_BACKUP_WRITE_SETTLE_MS });
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('settled');
+      expect(await d.record()).toBeUndefined();
+      expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+    });
+
+    it('starts the window again from a check time ahead of the clock', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      const ahead = Date.now() + 60 * 60 * 1000;
+      await d.setPending({ baseline: sha256Hex(held), checkedAt: ahead });
+
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('unchanged');
+
+      const record = await d.record();
+      expect(record?.checkedAt).toBeLessThan(ahead);
+      expect(record?.checkedAt).toBeLessThanOrEqual(Date.now());
+    });
+
+    it("answers 'changed' for a record this code never writes", async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      await vaultOf(d.service).putKeyBackupWrites(null as unknown as KeyBackupWrites);
+
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('changed');
+    });
+
+    it('is cleared when recovery is turned off, and kept when turning it off fails', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+
+      const api = (d.service as unknown as { client: { delete: (url: string) => Promise<unknown> } }).client;
+      const refused = vi.spyOn(api, 'delete').mockRejectedValueOnce(networkError());
+      try {
+        await expect(d.service.deleteKeyBackup()).rejects.toThrow('Network Error');
+      } finally {
+        refused.mockRestore();
+      }
+      expect(await d.record()).toBeDefined();
+
+      await d.service.deleteKeyBackup();
+      expect(await d.record()).toBeUndefined();
+      expect(d.server.backups.has(d.userId)).toBe(false);
+    });
+  });
+
+  describe('the window and the deadline', () => {
+    it('counts the settle window from the FIRST check that found the baseline', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      // the first such check lies five minutes back
+      const first = Date.now() - 5 * 60 * 1000;
+      await d.setPending({ baseline: sha256Hex(held), checkedAt: first });
+
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('unchanged');
+
+      // a check inside the window moves nothing: the window still ends at first + 10 minutes
+      expect((await d.record())?.checkedAt).toBe(first);
+    });
+
+    it("lets a read that gets no answer end at its own deadline, as 'unknown'", async () => {
+      const d = await backupDevice({ readTimeoutMs: 20 });
+      // a record pending already, so the next attempt reads only after its write
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      d.failNextWrite(false, networkError());
+      // the read after the write hangs until its deadline aborts it
+      d.hangNextRead();
+
+      const err = await unconfirmed(d.service.createKeyBackup());
+
+      expect(err.outcome).toBe('unknown');
+      const last = d.readOptions().at(-1) as { signal: AbortSignal };
+      expect(last.signal.aborted).toBe(true);
+    });
+  });
+
+  describe("this device's own writes that were never confirmed", () => {
+    it('recognises one that lands after its record settled, with no record left', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      await d.setPending({ baseline: sha256Hex(held), checkedAt: Date.now() - KEY_BACKUP_WRITE_SETTLE_MS });
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('settled');
+      expect(await d.record()).toBeUndefined();
+
+      d.landFailedWrite();
+
+      expect(await d.service.resolveKeyBackupWrite()).toEqual({
+        outcome: 'changed',
+        firstSetup: false,
+        stored: expect.objectContaining({ exists: true }),
+      });
+    });
+
+    it('recognises one that lands after recovery was turned off', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      await d.service.deleteKeyBackup();
+      expect(await d.record()).toBeUndefined();
+      expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+
+      d.landFailedWrite();
+
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('changed');
+    });
+
+    it('recognises one that lands after a later write was answered', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      const later = await d.service.createKeyBackup();
+      expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+
+      // the earlier write overtakes the later one
+      d.landFailedWrite();
+
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('changed');
+      expect(await opens(d.server, d.userId, later)).toBe(false);
+    });
+
+    it('recognises one whose record a check settled while this check waited on the queue', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const held = d.storedBlob()!;
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      await d.setPending({ baseline: sha256Hex(held), checkedAt: Date.now() - KEY_BACKUP_WRITE_SETTLE_MS });
+      // the first check reads the baseline and settles the record; the write
+      // lands before the second check reads
+      d.beforeReread(() => d.beforeReread(() => d.landFailedWrite()));
+      const release = await holdQueue(d.service);
+      const queued = countQueued(d.service);
+      let first!: Promise<E2EKeyBackupWriteCheck | null>;
+      let second!: Promise<E2EKeyBackupWriteCheck | null>;
+      try {
+        // both see the record off the queue and queue their judging
+        first = d.service.resolveKeyBackupWrite();
+        await queued.until(1);
+        second = d.service.resolveKeyBackupWrite();
+        await queued.until(2);
+      } finally {
+        queued.restore();
+        await release();
+      }
+
+      expect((await first)?.outcome).toBe('settled');
+      expect(await d.record()).toBeUndefined();
+      expect(await second).toEqual({ outcome: 'changed', firstSetup: false, stored: expect.objectContaining({ exists: true }) });
+    });
+
+    it('recognises one whose record a dismiss dropped while this check waited on the queue', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      d.landFailedWrite();
+      const release = await holdQueue(d.service);
+      const queued = countQueued(d.service);
+      let dismissed!: Promise<void>;
+      let check!: Promise<E2EKeyBackupWriteCheck | null>;
+      try {
+        dismissed = d.service.dismissKeyBackupWrite();
+        await queued.until(1);
+        // sees the record off the queue, and judges after the dismiss
+        check = d.service.resolveKeyBackupWrite();
+        await queued.until(2);
+      } finally {
+        queued.restore();
+        await release();
+      }
+
+      await dismissed;
+      expect(await d.record()).toBeUndefined();
+      expect((await check)?.outcome).toBe('changed');
+    });
+
+    it('drops a blob from the list once its key was shown, and keeps the confirmed one', async () => {
+      const d = await backupDevice();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      const lost = sha256Hex(d.failedBlobs()[0]);
+      // this one lands and is proven by the read after it
+      d.failNextWrite(true, networkError());
+      await d.service.createKeyBackup();
+      const proven = sha256Hex(d.storedBlob()!);
+
+      const writes = await d.vaultWrites();
+      expect(writes?.unconfirmed).toEqual([lost]);
+      expect(writes?.confirmed).toBe(proven);
+      expect(writes?.pending).toBeUndefined();
+    });
+
+    it(`keeps at most ${KEY_BACKUP_UNCONFIRMED_MAX} of them, the oldest out first`, async () => {
+      const d = await backupDevice();
+      for (let i = 0; i <= KEY_BACKUP_UNCONFIRMED_MAX; i++) {
+        d.failNextWrite(false, networkError());
+        await unconfirmed(d.service.createKeyBackup());
+      }
+
+      const kept = (await d.vaultWrites())?.unconfirmed ?? [];
+      expect(kept).toHaveLength(KEY_BACKUP_UNCONFIRMED_MAX);
+      expect(kept).not.toContain(sha256Hex(d.failedBlobs()[0]));
+      expect(kept.at(-1)).toBe(sha256Hex(d.failedBlobs().at(-1)!));
+    });
+
+    it('raises no alarm for a key shown whose confirmation the vault could not store', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const vault = vaultOf(d.service);
+      const write = vault.putKeyBackupWrites.bind(vault);
+      let puts = 0;
+      // the second write of the attempt is its confirmation
+      const put = vi.spyOn(vault, 'putKeyBackupWrites').mockImplementation(async (writes) => {
+        puts++;
+        if (puts === 2) throw new DOMException('the disk is full', 'QuotaExceededError');
+        return write(writes);
+      });
+      try {
+        await d.service.createKeyBackup();
+      } finally {
+        put.mockRestore();
+      }
+      // the vault still holds the record and the blob among the unconfirmed
+      expect(await d.record()).toBeDefined();
+      const shown = sha256Hex(d.storedBlob()!);
+      expect((await d.vaultWrites())?.unconfirmed).toContain(shown);
+
+      expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+      // the check stored the confirmation the vault had missed
+      const writes = await d.vaultWrites();
+      expect(writes?.pending).toBeUndefined();
+      expect(writes?.unconfirmed).not.toContain(shown);
+      expect(writes?.confirmed).toBe(shown);
+      // so no landing is read after a restart either
+      await d.restart();
+      expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+    });
+
+    it("judges nothing for another account: each account's vault is its own", async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      d.landFailedWrite();
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('changed');
+
+      const other = makeParty(d.server, 'bob');
+      await other.service.initialize();
+      await flushQueue();
+
+      expect(await other.service.resolveKeyBackupWrite()).toBeNull();
+    });
+  });
+
+  describe('another device of the account', () => {
+    it("reports its backup as 'elsewhere' while a record is pending, and a dismiss ends the record", async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      // another device replaces the backup
+      d.server.backups.set(d.userId, { blob: otherBlob(), updatedAt: new Date().toISOString() });
+
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('elsewhere');
+
+      await d.service.dismissKeyBackupWrite();
+
+      expect(await d.record()).toBeUndefined();
+      expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+    });
+
+    it('raises nothing for it when no record is pending', async () => {
+      const d = await backupDevice();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      await d.service.dismissKeyBackupWrite();
+      d.server.backups.set(d.userId, { blob: otherBlob(), updatedAt: new Date().toISOString() });
+
+      expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+    });
+
+    it("drops only the record on a dismiss: a landing of this device's own still counts, and nothing is read", async () => {
+      const d = await backupDevice();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      const sealed = (await d.vaultWrites())?.unconfirmed;
+      d.landFailedWrite();
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('changed');
+      const reads = d.reads();
+
+      await d.service.dismissKeyBackupWrite();
+
+      expect(d.reads()).toBe(reads);
+      expect(await d.record()).toBeUndefined();
+      expect((await d.vaultWrites())?.unconfirmed).toEqual(sealed);
+      expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('changed');
+    });
+  });
+
+  describe('the panel never waits on the serial queue for nothing', () => {
+    it('answers at once when nothing is pending and nothing was sealed', async () => {
+      const d = await backupDevice();
+      await d.service.createKeyBackup();
+      const release = await holdQueue(d.service);
+      try {
+        expect(await d.service.resolveKeyBackupWrite()).toBeNull();
+      } finally {
+        await release();
+      }
+    });
+
+    it('looks for a landing of its own off the queue when only the digests are left', async () => {
+      const d = await backupDevice();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      await d.service.deleteKeyBackup();
+      d.landFailedWrite();
+      const release = await holdQueue(d.service);
+      try {
+        expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('changed');
+      } finally {
+        await release();
+      }
+    });
   });
 });
