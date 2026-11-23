@@ -12,6 +12,7 @@ import { writeConversationMessage } from '../utils/conversationLifecycle';
 import { viewersRoom } from '../utils/conversationAudience';
 import { isReadOnlyConversation } from '../utils/conversationVisibility';
 import { ForbiddenError, NotFoundError } from '../utils/errors';
+import { describeCaughtError } from '../utils/loggableError';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -573,7 +574,7 @@ export function handleDMVoiceEvents(
       try {
         rejoinedCall = await getUserDMCall(userId);
       } catch (err) {
-        console.error('[DMVoice] Redis error reading the call of a re-join:', err instanceof Error ? err.message : err);
+        console.error('[DMVoice] Redis error reading the call of a re-join:', describeCaughtError(err));
         socket.emit('voice:error', { message: 'Voice service temporarily unavailable.' });
         return;
       }
