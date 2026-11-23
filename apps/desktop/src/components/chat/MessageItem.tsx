@@ -41,13 +41,24 @@ interface Props {
    * (deleting one's own message stays). The stores refuse those too.
    */
   readOnly?: boolean;
+  /**
+   * The viewer may send in this channel (the server judges a reply like any
+   * send). Only false when the channel's bits are KNOWN and lack the bit: a
+   * control that prevents a refusal stays usable while they are unknown.
+   */
+  canReply?: boolean;
+  /**
+   * The viewer may react in this channel. The server's toggle asks the bit to
+   * ADD and to REMOVE a reaction, so false also makes the chips display-only.
+   */
+  canReact?: boolean;
 }
 
 function formatMessageTime(dateStr: string, t: TFunction) {
   return formatMessageStamp(dateStr, t);
 }
 
-export const MessageItem = memo(function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId, readOnly = false }: Props) {
+export const MessageItem = memo(function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId, readOnly = false, canReply = true, canReact = true }: Props) {
   const { t } = useTranslation();
   const { editMessage, editDMMessage } = useChatStore();
   const [isEditing, setIsEditing] = useState(false);
@@ -61,11 +72,15 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
 
   // the conversation turned read-only under an edit being typed: the edit is dropped
   useEffect(() => {
-    if (readOnly) {
-      setIsEditing(false);
-      setShowReactionPicker(false);
-    }
+    if (readOnly) setIsEditing(false);
   }, [readOnly]);
+
+  // the react control goes away (read-only, or the channel's ADD_REACTIONS is
+  // gone): the picker's state goes with it, so it does not pop open again when
+  // the control comes back
+  useEffect(() => {
+    if (readOnly || !canReact) setShowReactionPicker(false);
+  }, [readOnly, canReact]);
 
   useEffect(() => {
     if (isEditing && editRef.current) {
@@ -267,8 +282,8 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
   }
 
   // What the hover toolbar offers (a read-only DM keeps only the delete of one's own)
-  const showReply = !isSystemMessage && !readOnly;
-  const showReact = !readOnly;
+  const showReply = !isSystemMessage && !readOnly && canReply;
+  const showReact = !readOnly && canReact;
   const showEdit = isOwn && !isWebhook && !readOnly;
   // A webhook author is not a user, nor is the deleted account's placeholder:
   // there is no one to report (a moderator deletes the message or the webhook)
@@ -450,7 +465,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 )}
               </div>
             </div>
-            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} readOnly={readOnly} />
+            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} readOnly={readOnly || !canReact} />
           </>
         ) : (
           <>
@@ -493,7 +508,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 </div>
               )}
             </div>
-            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} readOnly={readOnly} />
+            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} readOnly={readOnly || !canReact} />
           </>
         )}
       </div>

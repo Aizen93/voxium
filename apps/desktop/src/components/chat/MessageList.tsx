@@ -45,6 +45,12 @@ export function MessageList() {
   // offers a power, so it waits for the answer. A secure channel is never
   // asked (null): its rule is below.
   const channelPerms = useChannelPermissions(activeServerId, activeChannelId, user?.id);
+  // Reply (the server judges SEND_MESSAGES) and reactions (ADD_REACTIONS, for
+  // adding and for removing) only PREVENT a refusal: usable while the bits are
+  // unknown (null: not loaded, a failed fetch, a secure channel), absent only
+  // when they are known and lack the bit.
+  const canReply = channelPerms === null || hasPermission(channelPerms, Permissions.SEND_MESSAGES);
+  const canReact = channelPerms === null || hasPermission(channelPerms, Permissions.ADD_REACTIONS);
   const canManageMessages = channelPerms !== null && hasPermission(channelPerms, Permissions.MANAGE_MESSAGES);
   // SECURE channels: moderation is membership-derived, never role-derived —
   // the channel CREATOR moderates (MANAGE_MESSAGES in the fixed creator set),
@@ -282,6 +288,8 @@ export function MessageList() {
                   isOwn={isOwn}
                   canDelete={isOwn || canModerate}
                   channelId={activeChannelId!}
+                  canReply={canReply}
+                  canReact={canReact}
                 />
               </div>
             );

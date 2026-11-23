@@ -30,8 +30,8 @@ vi.mock('react-virtuoso', () => ({
 }));
 
 vi.mock('../../components/chat/MessageItem', () => ({
-  MessageItem: ({ message, canDelete, isOwn }: { message: Message; canDelete: boolean; isOwn: boolean }) => (
-    <div data-testid={`row-${message.id}`} data-can-delete={String(canDelete)} data-own={String(isOwn)} />
+  MessageItem: ({ message, canDelete, isOwn, canReply, canReact }: { message: Message; canDelete: boolean; isOwn: boolean; canReply?: boolean; canReact?: boolean }) => (
+    <div data-testid={`row-${message.id}`} data-can-delete={String(canDelete)} data-own={String(isOwn)} data-can-reply={String(canReply)} data-can-react={String(canReact)} />
   ),
 }));
 
@@ -215,6 +215,74 @@ describe('MessageList — Delete follows MANAGE_MESSAGES, not only the legacy ro
     fetchPerms.mockResolvedValue('0');
     await render();
     expect(canDelete('m-sec')).toBe('true');
+  });
+});
+
+const attr = (id: string, name: string) => container.querySelector(`[data-testid="row-${id}"]`)?.getAttribute(name);
+
+describe('MessageList — Reply and reactions follow SEND_MESSAGES and ADD_REACTIONS of the channel', () => {
+  it('held: both props true', async () => {
+    fetchPerms.mockResolvedValue((Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.ADD_REACTIONS).toString());
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('true');
+    expect(attr('m-alice', 'data-can-react')).toBe('true');
+  });
+
+  it('known and denied: each prop follows its own bit', async () => {
+    fetchPerms.mockResolvedValue((Permissions.VIEW_CHANNEL | Permissions.ADD_REACTIONS).toString());
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('false');
+    expect(attr('m-alice', 'data-can-react')).toBe('true');
+    act(() => root.unmount());
+    root = createRoot(container);
+    resetChannelPermissionsCache();
+    fetchPerms.mockResolvedValue((Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES).toString());
+    await render();
+    expect(attr('m-mine', 'data-can-reply')).toBe('true');
+    expect(attr('m-mine', 'data-can-react')).toBe('false');
+  });
+
+  it('ADMINISTRATOR holds both', async () => {
+    fetchPerms.mockResolvedValue(Permissions.ADMINISTRATOR.toString());
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('true');
+    expect(attr('m-alice', 'data-can-react')).toBe('true');
+  });
+
+  it('not loaded yet: usable, never hidden', async () => {
+    fetchPerms.mockReturnValue(new Promise(() => {}));
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('true');
+    expect(attr('m-alice', 'data-can-react')).toBe('true');
+  });
+
+  it('a failed fetch stays usable (logged, never thrown)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fetchPerms.mockRejectedValue(new Error('offline'));
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('true');
+    expect(attr('m-alice', 'data-can-react')).toBe('true');
+    warn.mockRestore();
+  });
+
+  it('a secure channel asks nothing and keeps both', async () => {
+    serverState.activeChannelId = 'ch-sec';
+    chatState.messages = [msg('m-sec', author('u-alice'), 'ch-sec')];
+    await render();
+    expect(fetchPerms).not.toHaveBeenCalled();
+    expect(attr('m-sec', 'data-can-reply')).toBe('true');
+    expect(attr('m-sec', 'data-can-react')).toBe('true');
+  });
+
+  it('an override write that takes the bits away removes the controls', async () => {
+    fetchPerms.mockResolvedValue((Permissions.SEND_MESSAGES | Permissions.ADD_REACTIONS).toString());
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('true');
+    fetchPerms.mockResolvedValue('0');
+    await act(async () => { invalidateChannelPermissions('srv-1'); });
+    for (let i = 0; i < 3; i++) await act(async () => { await Promise.resolve(); });
+    expect(attr('m-alice', 'data-can-reply')).toBe('false');
+    expect(attr('m-alice', 'data-can-react')).toBe('false');
   });
 });
 
