@@ -8,6 +8,14 @@ import type { CORSRule } from '@aws-sdk/client-s3';
  * HTTP server that answers the browser's preflight (OPTIONS on a presigned PUT
  * address) and the bucket's CORS configuration (GET/PUT ?cors). The SDK, the
  * presigner and fetch are the real ones; only the store is fake.
+ *
+ * The store ends every connection after its answer (`Connection: close`).
+ * Reusing a connection would make a case depend on timing: fetch keeps an idle
+ * connection for the next request, and when the store (this very process) drops
+ * it first (a case that destroys its sockets, a keep-alive window that lapses on
+ * a busy machine) the next request fails with `TypeError: fetch failed`
+ * (ECONNRESET) instead of reaching the store. One connection per request leaves
+ * nothing to go stale, and the requests on the wire are the same.
  */
 
 const BUCKET = 'acme-private-assets';
@@ -93,6 +101,7 @@ async function startStore(patch: Partial<StoreState> = {}) {
   };
   const seen: Seen[] = [];
   const server = http.createServer((req, res) => {
+    res.setHeader('connection', 'close');
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {

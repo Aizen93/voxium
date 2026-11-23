@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -10,7 +10,9 @@ import path from 'node:path';
 // `sudo`, `apt-get` and `dpkg` are stubs first on PATH that record how they
 // were called (with the environment apt would see) and answer what each case
 // scripts. `timeout`, `env` and `bash` are the real ones, so the time limit is
-// really applied.
+// really applied. The time-limit case asserts what happened (the hanging apt
+// never reached its end, the next attempt ran after it), never how many
+// seconds it took: a wall-clock bound measured a starved machine, not the script.
 
 const ROOT = path.resolve(__dirname, '../../../../..');
 const SCRIPT = path.join(ROOT, '.github/scripts/apt-install.sh');
@@ -48,7 +50,7 @@ echo "apt-get $*|frontend=\${DEBIAN_FRONTEND-unset}" >> "$STUB_LOG"
 outcome=$(echo "$APT_PLAN" | cut -d, -f"$count")
 case "$outcome" in
   ok) exit 0 ;;
-  hang) sleep 60; exit 0 ;;
+  hang) sleep 60; touch "$STUB_DIR/hang.finished"; exit 0 ;;
   *) exit 100 ;;
 esac
 `,
@@ -80,14 +82,18 @@ describe.runIf(usableBash())('apt-install.sh', () => {
   });
 
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   });
 
   function run(env: Record<string, string>, args: string[] = PACKAGES) {
     const started = Date.now();
+    // Output goes to a file, not a pipe: a process the limit left behind would
+    // hold a pipe open and make the run wait for it
+    const outFile = path.join(dir, 'output.log');
+    const out = openSync(outFile, 'w');
     const result = spawnSync('bash', [SCRIPT, ...args], {
-      encoding: 'utf8',
-      timeout: 60_000,
+      stdio: ['ignore', out, out],
+      timeout: 120_000,
       env: {
         ...process.env,
         PATH: `${dir}${path.delimiter}${process.env.PATH ?? ''}`,
@@ -98,11 +104,13 @@ describe.runIf(usableBash())('apt-install.sh', () => {
         ...env,
       },
     });
+    closeSync(out);
     const calls = existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
     const apt = calls.filter((c) => c.startsWith('apt-get '));
     return {
       status: result.status,
-      output: `${result.stdout}${result.stderr}`,
+      output: readFileSync(outFile, 'utf8'),
+      hangFinished: existsSync(path.join(dir, 'hang.finished')),
       calls,
       apt,
       updates: apt.filter((c) => c.startsWith('apt-get update')).length,
@@ -172,13 +180,24 @@ describe.runIf(usableBash())('apt-install.sh', () => {
   });
 
   it('stops an attempt that passes its limit, counts it as failed, and goes on', () => {
-    // The first update would sleep for a minute; the limit is one second
-    const r = run({ APT_PLAN: 'hang,ok,ok', APT_ATTEMPT_SECONDS: '1' });
+    // The first update would sleep for a minute; the limit is ten seconds. The
+    // limit also binds the two good attempts that follow (stub start-up on a
+    // starved machine can take seconds, so one second made THEM fail), which is
+    // why it is not shorter. What is
+    // asserted is the order of events and that the limit ended it: the hanging
+    // apt never got to the end of its sleep (it writes a marker there), and the
+    // second attempt ran after the first was reported as passing its limit.
+    const r = run({ APT_PLAN: 'hang,ok,ok', APT_ATTEMPT_SECONDS: '10' });
     expect(r.status).toBe(0);
     expect(r.updates).toBe(2);
-    expect(r.output).toContain('attempt 1 of 3 failed or passed its 1s limit');
-    expect(r.seconds).toBeLessThan(30);
-  });
+    expect(r.hangFinished).toBe(false);
+    expect(r.output).toContain('attempt 1 of 3 failed or passed its 10s limit');
+    expect(r.output.indexOf('attempt 1 of 3 failed')).toBeLessThan(r.output.indexOf('Packages installed.'));
+    expect(r.dpkg).toEqual(['dpkg --configure -a']);
+    // The run lasts at least the 10 s limit by design (the hanging attempt is
+    // waited out); the assertions above never read how long it took, so a larger
+    // test timeout than the 10 s default only has to outlast a starved machine.
+  }, 90_000);
 
   it('refuses to run with no package, or with something that is not a package name', () => {
     for (const args of [[], ['-o', 'APT::Get::AllowUnauthenticated=true'], ['libssl-dev', 'evil; rm -rf /'], ['Libssl']]) {
