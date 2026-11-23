@@ -7,7 +7,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { MessageItem } from './MessageItem';
 import { isNewDay, daySeparatorFor } from '../../utils/dateSeparator';
 import { startsMessageGroup } from '../../utils/messageGrouping';
-import { useServerPermissions } from '../../hooks/useServerPermissions';
+import { useChannelPermissions } from '../../hooks/useChannelPermissions';
 import { Permissions, hasPermission } from '@voxium/shared';
 import { ArrowDown } from 'lucide-react';
 
@@ -40,9 +40,12 @@ export function MessageList() {
 
   // The server lets MANAGE_MESSAGES delete other people's messages (a
   // webhook's posts included — they are deleted only this way), however the
-  // bit was obtained; the legacy role field decides nothing
-  const serverPerms = useServerPermissions(activeServerId, user?.id);
-  const canManageMessages = serverPerms !== null && hasPermission(serverPerms, Permissions.MANAGE_MESSAGES);
+  // bit was obtained, and judges it in THIS channel (an override can grant or
+  // take it away there); the legacy role field decides nothing. The control
+  // offers a power, so it waits for the answer. A secure channel is never
+  // asked (null): its rule is below.
+  const channelPerms = useChannelPermissions(activeServerId, activeChannelId, user?.id);
+  const canManageMessages = channelPerms !== null && hasPermission(channelPerms, Permissions.MANAGE_MESSAGES);
   // SECURE channels: moderation is membership-derived, never role-derived —
   // the channel CREATOR moderates (MANAGE_MESSAGES in the fixed creator set),
   // and a server admin/owner who is a plain member (or no member at all) does

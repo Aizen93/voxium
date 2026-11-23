@@ -15,6 +15,7 @@ import { resetUndecryptedRows } from '../services/e2e/undecryptedRows';
 import { resetClearedHistory } from '../services/dmClearedHistory';
 import { stopE2EDeviceListWatch } from './e2eStore';
 import { resetServerPermissionsCache } from '../hooks/useServerPermissions';
+import { resetChannelPermissionsCache } from '../services/channelPermissionsCache';
 import { resetMediaCache } from '../services/mediaBlobCache';
 import { resetWebhookSocketState } from '../services/webhookSocketHandlers';
 
@@ -91,6 +92,7 @@ export function resetAccountStores(): void {
   retireDirectory();
   // The effective-permission answers are the leaving account's too
   resetServerPermissionsCache();
+  resetChannelPermissionsCache();
   // The floors of the histories it cleared, and the purges still owed for
   // them (a pass still running applies nothing)
   resetClearedHistory();

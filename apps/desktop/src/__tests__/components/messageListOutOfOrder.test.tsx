@@ -79,6 +79,7 @@ vi.mock('../../stores/serverStore', () => {
 import { MessageList } from '../../components/chat/MessageList';
 import { DMMessageList } from '../../components/dm/DMMessageList';
 import { resetServerPermissionsCache } from '../../hooks/useServerPermissions';
+import { resetChannelPermissionsCache } from '../../services/channelPermissionsCache';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -101,6 +102,7 @@ const LISTS = [
 beforeEach(() => {
   vi.clearAllMocks();
   resetServerPermissionsCache();
+  resetChannelPermissionsCache();
   V.last = null;
   V.mounts = 0;
   serverState.channels = [{ id: 'ch-1', name: 'general', type: 'text', serverId: 'srv-1', categoryId: null, position: 0, createdAt: '2026-01-01T00:00:00.000Z' }];

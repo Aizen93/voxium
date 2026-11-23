@@ -62,6 +62,7 @@ vi.mock('../../stores/authStore', () => {
   return { useAuthStore };
 });
 vi.mock('../../hooks/useServerPermissions', () => ({ useServerPermissions: () => null }));
+vi.mock('../../hooks/useChannelPermissions', () => ({ useChannelPermissions: () => null }));
 vi.mock('../../components/dm/DMMessageList', () => ({
   DMMessageList: ({ readOnly }: { readOnly?: boolean }) => <div data-testid="message-list" data-read-only={String(!!readOnly)} />,
 }));

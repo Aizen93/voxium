@@ -98,6 +98,7 @@ vi.mock('../../stores/serverStore', () => {
 import { MessageList } from '../../components/chat/MessageList';
 import { DMMessageList } from '../../components/dm/DMMessageList';
 import { resetServerPermissionsCache } from '../../hooks/useServerPermissions';
+import { resetChannelPermissionsCache } from '../../services/channelPermissionsCache';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -154,6 +155,7 @@ function expectMarginsContained() {
 beforeEach(() => {
   vi.clearAllMocks();
   resetServerPermissionsCache();
+  resetChannelPermissionsCache();
   chatState.hasMore = false;
   chatState.targetMessageId = null;
   serverState.activeServerId = 'srv-1';
