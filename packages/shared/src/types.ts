@@ -1358,7 +1358,7 @@ export type AuditAction =
   | 'storage.file_delete' | 'storage.cleanup_orphans'
   | 'registration.hygiene_sweep'
   | 'announcement.create' | 'announcement.publish' | 'announcement.delete'
-  | 'report.resolve' | 'report.dismiss'
+  | 'report.resolve' | 'report.dismiss' | 'report.retention_sweep'
   | 'support.claim' | 'support.close'
   | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user'
   | 'feature_flag.update' | 'feature_flag.reset'

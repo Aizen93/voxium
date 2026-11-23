@@ -25,6 +25,7 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'announcement.delete': 'Announcement Deleted',
   'report.resolve': 'Report Resolved',
   'report.dismiss': 'Report Dismissed',
+  'report.retention_sweep': 'Expired Reports Deleted',
   'support.claim': 'Ticket Claimed',
   'support.close': 'Ticket Closed',
   'ratelimit.update': 'Rate Limit Updated',
@@ -61,6 +62,7 @@ const ACTION_COLORS: Record<string, string> = {
   'announcement.delete': 'bg-red-500/20 text-red-400',
   'report.resolve': 'bg-green-500/20 text-green-400',
   'report.dismiss': 'bg-gray-500/20 text-gray-400',
+  'report.retention_sweep': 'bg-yellow-500/20 text-yellow-400',
   'support.claim': 'bg-blue-500/20 text-blue-400',
   'support.close': 'bg-gray-500/20 text-gray-400',
   'ratelimit.update': 'bg-orange-500/20 text-orange-400',
@@ -151,6 +153,14 @@ function formatMetadata(action: AuditAction, metadata: Record<string, unknown> |
       return `${metadata.trigger}: ${metadata.deletedUsers} account(s), `
         + `${metadata.deletedAvatars} avatar(s), ${metadata.deletedIpRecords} IP record(s) `
         + `in ${metadata.durationMs}ms`;
+    case 'report.retention_sweep': {
+      // The durable record of a nightly job nobody watches run: how many it
+      // deleted, under which period, and whether a batch stopped it
+      const parts = [`${metadata.deletedReports} report(s) kept ${metadata.retentionMonths} month(s) after an account's deletion`];
+      const failed = metadata.failedBatch as { name?: unknown } | undefined;
+      if (failed) parts.push(`stopped at a failed batch (${String(failed.name)})`);
+      return parts.join(' | ');
+    }
     case 'feature_flag.update':
       return `${metadata.enabled ? 'Enabled' : 'Disabled'}`;
     case 'webhook.disable':
@@ -173,7 +183,7 @@ function formatMetadata(action: AuditAction, metadata: Record<string, unknown> |
 }
 
 /** Actions a scheduled job can perform with no human actor. */
-const SYSTEM_ACTIONS = new Set<AuditAction>(['registration.hygiene_sweep']);
+const SYSTEM_ACTIONS = new Set<AuditAction>(['registration.hygiene_sweep', 'report.retention_sweep']);
 
 /**
  * Was this null-actor row written by the system rather than by an admin
@@ -197,7 +207,7 @@ const ALL_ACTIONS: AuditAction[] = [
   'ip_ban.create', 'ip_ban.delete',
   'storage.file_delete', 'storage.cleanup_orphans',
   'announcement.create', 'announcement.publish', 'announcement.delete',
-  'report.resolve', 'report.dismiss',
+  'report.resolve', 'report.dismiss', 'report.retention_sweep',
   'support.claim', 'support.close',
   'ratelimit.update', 'ratelimit.reset', 'ratelimit.clear_user',
   'feature_flag.update', 'feature_flag.reset',

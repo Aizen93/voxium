@@ -49,8 +49,9 @@ const DEFAULTS = {
   // deleted with the account, through the foreign keys' cascade, as before.
   // ON: each is kept without its link to the account (a reported account by
   // its username, the reported content as filed), its deletion marked
-  // (utils/reportSettlement.ts). OFF until the Privacy Policy has given its
-  // notice of the change.
+  // (utils/reportSettlement.ts), and deleted REPORT_RETENTION_MONTHS after
+  // that deletion (utils/reportRetention.ts, which runs whatever this flag
+  // says). OFF until the Privacy Policy has given its notice of the change.
   account_deletion_keeps_reports: { name: 'account_deletion_keeps_reports', label: 'Reports Outlive Deleted Accounts', description: 'When an account is deleted, the moderation reports filed by or about it are kept without the link to the account, with the reported username and content, for a fixed period (off: they are deleted with the account)', enabled: false },
   // What a renewal does with a refresh token that a renewal already replaced,
   // presented after the grace window, or an older one (services/

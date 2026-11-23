@@ -239,3 +239,37 @@ describe('AdminAuditLog — rows with no actor', () => {
     expect(detailsCell(row)).toBe('scheduled: 4 account(s), 3 avatar(s), 2 IP record(s) in 120ms');
   });
 });
+
+describe('AdminAuditLog — the report retention job (#48)', () => {
+  const actorCell = (row: HTMLElement) => row.querySelectorAll('td')[1].textContent;
+  const detailsCell = (row: HTMLElement) => row.querySelectorAll('td')[3].textContent;
+  const retention = (id: string, metadata: Record<string, unknown> | null) =>
+    entry({ id, action: 'report.retention_sweep', actorId: null, actorUsername: null, targetType: 'report', targetId: null, metadata });
+
+  async function renderRows(...logs: AuditLogEntry[]) {
+    store.auditLogs = logs;
+    store.auditLogsTotal = logs.length;
+    await act(async () => { root.render(<AdminAuditLog />); });
+    return rows();
+  }
+
+  it('is labelled, run by the system, and described by what it deleted under which period', async () => {
+    const [row] = await renderRows(retention('r', { trigger: 'scheduled', deletedReports: 7, retentionMonths: 12 }));
+
+    expect(row.textContent).toContain('Expired Reports Deleted');
+    expect(actorCell(row)).toBe('System');
+    expect(detailsCell(row)).toBe("7 report(s) kept 12 month(s) after an account's deletion");
+  });
+
+  it('says when a batch stopped the run, by the error\'s name', async () => {
+    const [row] = await renderRows(retention('f', { trigger: 'scheduled', deletedReports: 1000, retentionMonths: 12, failedBatch: { name: 'PrismaClientKnownRequestError', code: 'P2010' } }));
+
+    expect(detailsCell(row)).toBe("1000 report(s) kept 12 month(s) after an account's deletion | stopped at a failed batch (PrismaClientKnownRequestError)");
+  });
+
+  it('is offered in the filter', async () => {
+    await act(async () => { root.render(<AdminAuditLog />); });
+    const options = Array.from(document.body.querySelectorAll('option')).map((o) => [o.value, o.textContent]);
+    expect(options).toEqual(expect.arrayContaining([['report.retention_sweep', 'Expired Reports Deleted']]));
+  });
+});
