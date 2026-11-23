@@ -118,7 +118,7 @@ describe('Report Routes — E2E message reports', () => {
   const conversationView = (reads: unknown[] = [], sides = { user1Id: 'user-1', user2Id: 'user-2' }) => ({ id: 'conv-1', ...sides, reads });
 
   function mockHappyPath(message: Record<string, unknown>) {
-    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-2' } as any);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-2', username: 'bob' } as any);
     vi.mocked(prisma.report.findFirst).mockResolvedValue(null);
     vi.mocked(prisma.message.findUnique).mockResolvedValue(message as any);
     vi.mocked(prisma.conversation.findUnique).mockResolvedValue(conversationView() as any);
@@ -440,7 +440,7 @@ describe('Report Routes — type: server', () => {
   });
 
   it('files the report against the owner with the name + description snapshot (contentSource server) and notifies admins', async () => {
-    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'Shady Lounge', description: 'Totally legit', ownerId: 'owner-1', discoveryListed: true } as any);
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'Shady Lounge', description: 'Totally legit', ownerId: 'owner-1', discoveryListed: true, owner: { username: 'shady-owner' } } as any);
 
     const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
 
@@ -451,6 +451,7 @@ describe('Report Routes — type: server', () => {
         reason: REASON,
         reporterId: 'user-1',
         reportedUserId: 'owner-1',
+        reportedUsername: 'shady-owner',
         messageId: null,
         messageContent: 'Shady Lounge\n\nTotally legit',
         contentSource: 'server',
@@ -464,7 +465,7 @@ describe('Report Routes — type: server', () => {
   });
 
   it('a server without a description snapshots the name alone', async () => {
-    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'Quiet', description: null, ownerId: 'owner-1', discoveryListed: true } as any);
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'Quiet', description: null, ownerId: 'owner-1', discoveryListed: true, owner: { username: 'quiet-owner' } } as any);
     await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
     expect(prisma.report.create).toHaveBeenCalledWith({ data: expect.objectContaining({ messageContent: 'Quiet' }) });
   });
@@ -537,7 +538,7 @@ describe('Report Routes — the duplicate the look cannot see', () => {
 
   it('two identical SPACE reports at once: one is filed, the other gets the existing 400', async () => {
     databaseAdmitsOne('reports_pending_server_key');
-    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'owner-1', discoveryListed: true } as any);
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'owner-1', discoveryListed: true, owner: { username: 'owner' } } as any);
     const send = () => request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
 
     const [a, b] = await Promise.all([send(), send()]);
@@ -577,7 +578,7 @@ describe('Report Routes — the duplicate the look cannot see', () => {
   it('the index named as the meta target (the form without the pg adapter) is a duplicate report too', async () => {
     vi.mocked(prisma.report.findFirst).mockResolvedValue(null as any);
     vi.mocked(prisma.report.create).mockRejectedValue(Object.assign(new Error('Unique constraint failed'), { code: 'P2002', meta: { target: 'reports_pending_server_key' } }));
-    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'owner-1', discoveryListed: true } as any);
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'owner-1', discoveryListed: true, owner: { username: 'owner' } } as any);
 
     const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
 
@@ -595,5 +596,62 @@ describe('Report Routes — the duplicate the look cannot see', () => {
     expect(res.status).toBe(500);
     expect(mockEmit).not.toHaveBeenCalled();
     errSpy.mockRestore();
+  });
+});
+
+// ─── The reported username, kept on the report (#48) ────────────────────────
+// A report outlives the account it concerns once that account is deleted,
+// and is then shown by the username written here when it is filed.
+
+describe('Report Routes — the reported username is written at filing', () => {
+  const REASON = 'Harassing other members in the channel';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null as any);
+    vi.mocked(prisma.report.create).mockResolvedValue({} as any);
+    vi.mocked(prisma.report.count).mockResolvedValue(1 as any);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-2', username: 'bob' } as any);
+  });
+
+  it('a user report: the account the look found names it', async () => {
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'user', reportedUserId: 'user-2', reason: REASON });
+
+    expect(res.status).toBe(201);
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { id: 'user-2' }, select: { id: true, username: true } });
+    expect(prisma.report.create).toHaveBeenCalledWith({ data: expect.objectContaining({ reportedUserId: 'user-2', reportedUsername: 'bob' }) });
+  });
+
+  it('a message report: the author the look found names it', async () => {
+    vi.mocked(prisma.message.findUnique).mockResolvedValue({
+      id: 'msg-1', content: 'hi', encrypted: false, channelId: 'ch-1', conversationId: null, authorId: 'user-2',
+      createdAt: new Date('2026-11-11T10:00:00.000Z'), channel: { serverId: 'srv-1', secure: false },
+    } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({ userId: 'user-1' } as any);
+
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'message', reportedUserId: 'user-2', messageId: 'msg-1', reason: REASON });
+
+    expect(res.status).toBe(201);
+    expect(prisma.report.create).toHaveBeenCalledWith({ data: expect.objectContaining({ reportedUserId: 'user-2', reportedUsername: 'bob', messageId: 'msg-1' }) });
+  });
+
+  it("a space report: the space's owner, read with the listing in the same statement", async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'owner-1', discoveryListed: true, owner: { username: 'the-owner' } } as any);
+
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+
+    expect(res.status).toBe(201);
+    expect(vi.mocked(prisma.server.findUnique).mock.calls[0][0]).toMatchObject({ select: { ownerId: true, owner: { select: { username: true } } } });
+    expect(prisma.report.create).toHaveBeenCalledWith({ data: expect.objectContaining({ reportedUserId: 'owner-1', reportedUsername: 'the-owner' }) });
+  });
+
+  it('an account deleted before the look keeps its 404, and nothing is filed', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(null as any);
+
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'user', reportedUserId: 'user-2', reason: REASON });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('User not found');
+    expect(prisma.report.create).not.toHaveBeenCalled();
   });
 });
