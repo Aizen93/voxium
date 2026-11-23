@@ -22,6 +22,7 @@ import {
 import { isE2ESessionEnded } from '../../services/e2e/session';
 import { shortDeviceId } from '../../utils/deviceId';
 import { copyToClipboard } from '../../utils/clipboard';
+import { formatDate } from '../../utils/formatDate';
 
 /**
  * Account-level encryption management: this account's devices, linking,
@@ -334,7 +335,7 @@ function LinkDeviceForm({ userId }: { userId: string }) {
         <p className="mb-2 font-mono text-[11px] text-vox-text-primary">
           {t('e2e.linkConfirmDevice', {
             id: shortDeviceId(pending.deviceId),
-            date: new Date(pending.createdAt).toLocaleString(),
+            date: formatDate('dateTime', pending.createdAt),
           })}
         </p>
         <p className="mb-2 text-vox-accent-warning">{t('e2e.linkConfirmExplainer')}</p>
@@ -769,7 +770,7 @@ function KeyBackupSection({
           )}
           {keyBackup.updatedAt && (
             <p className="mb-2">
-              {t('e2e.backupUpdatedAt', { date: new Date(keyBackup.updatedAt).toLocaleDateString() })}
+              {t('e2e.backupUpdatedAt', { date: formatDate('date', keyBackup.updatedAt) })}
             </p>
           )}
           <div className="flex gap-2">
@@ -1150,7 +1151,7 @@ export function E2EDevicesSection() {
                       )}
                     </div>
                     <p className="mt-0.5 text-[11px] text-vox-text-muted">
-                      {t('e2e.deviceAdded', { date: new Date(device.createdAt).toLocaleDateString() })}
+                      {t('e2e.deviceAdded', { date: formatDate('date', device.createdAt) })}
                     </p>
                     <span
                       className={clsx(

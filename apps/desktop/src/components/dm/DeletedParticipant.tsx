@@ -2,7 +2,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { UserX, Ban } from 'lucide-react';
 import { clsx } from 'clsx';
-import { format, isToday, isYesterday } from 'date-fns';
+import { formatMessageStamp } from '../../utils/formatDate';
 
 /**
  * What a direct conversation shows where the other side's account was deleted
@@ -52,11 +52,7 @@ export function ReadOnlyConversationNotice() {
 }
 
 function rowTime(dateStr: string, t: TFunction): string {
-  const date = new Date(dateStr);
-  if (Number.isNaN(date.getTime())) return '';
-  if (isToday(date)) return t('messageItem.todayAt', { time: format(date, 'h:mm a') });
-  if (isYesterday(date)) return t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') });
-  return format(date, 'MM/dd/yyyy h:mm a');
+  return formatMessageStamp(dateStr, t);
 }
 
 /**

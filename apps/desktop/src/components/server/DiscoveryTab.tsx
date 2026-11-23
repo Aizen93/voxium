@@ -8,6 +8,7 @@ import { toast } from '../../stores/toastStore';
 import { getTranslatedError, translateServerError } from '../../utils/serverErrors';
 import { DiscoveryCard } from '../discovery/DiscoveryCard';
 import { TierBadge, tierPercent } from '../discovery/TierBadge';
+import { formatDate } from '../../utils/formatDate';
 
 interface Props {
   serverId: string;
@@ -132,7 +133,7 @@ export function DiscoveryTab({ serverId, onGoToGeneral }: Props) {
     }
   };
 
-  const lastCheck = info?.statsRefreshedAt ? new Date(info.statsRefreshedAt).toLocaleString() : null;
+  const lastCheck = info?.statsRefreshedAt ? formatDate('dateTime', info.statsRefreshedAt) : null;
 
   return (
     <div className="space-y-6" data-testid="discovery-tab">

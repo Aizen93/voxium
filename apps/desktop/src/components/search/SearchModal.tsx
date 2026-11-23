@@ -8,7 +8,7 @@ import { useDMStore } from '../../stores/dmStore';
 import { Avatar } from '../common/Avatar';
 import { AppTag } from '../common/AppTag';
 import { Search, X, Hash, Lock } from 'lucide-react';
-import { format, isToday, isYesterday } from 'date-fns';
+import { formatMessageStamp } from '../../utils/formatDate';
 import type { SearchResult, Channel } from '@voxium/shared';
 import { withoutSecureChannelHits } from '../../utils/searchHits';
 
@@ -206,12 +206,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
     }
   };
 
-  const formatTime = (dateStr: string) => {
-    const date = new Date(dateStr);
-    if (isToday(date)) return t('messageItem.todayAt', { time: format(date, 'h:mm a') });
-    if (isYesterday(date)) return t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') });
-    return format(date, 'MM/dd/yyyy h:mm a');
-  };
+  const formatTime = (dateStr: string) => formatMessageStamp(dateStr, t);
 
   const truncate = (text: string, max: number) => {
     return text.length > max ? text.slice(0, max) + '...' : text;

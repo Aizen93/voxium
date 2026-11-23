@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { toast } from '../../stores/toastStore';
 import { X } from 'lucide-react';
-import { format } from 'date-fns';
+import { formatDate } from '../../utils/formatDate';
 import type { Message } from '@voxium/shared';
 
 interface Props {
@@ -68,7 +68,7 @@ export function DeleteConfirmModal({ message, channelId, conversationId, onClose
               {message.author.displayName}
             </span>
             <span className="text-xs text-vox-text-muted">
-              {format(new Date(message.createdAt), 'MM/dd/yyyy h:mm a')}
+              {formatDate('dateTime', message.createdAt)}
             </span>
           </div>
           <p className="text-sm text-vox-text-secondary line-clamp-3 break-words">

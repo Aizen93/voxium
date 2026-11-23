@@ -40,7 +40,17 @@ describe('daySeparatorFor', () => {
   it('renders an absolute label for older days', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-07-15T10:00:00'));
-    expect(daySeparatorFor('2026-07-01T12:00:00')).toEqual({ kind: 'date', label: 'July 1, 2026' });
+    expect(daySeparatorFor('2026-07-01T12:00:00', { language: 'en' })).toEqual({ kind: 'date', label: 'July 1, 2026' });
+  });
+
+  it('writes the date in the language it is given, not in English', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-15T10:00:00'));
+    const at = new Date('2026-07-01T12:00:00');
+    for (const language of ['en', 'fr', 'ja', 'ar']) {
+      const want = new Intl.DateTimeFormat(language, { year: 'numeric', month: 'long', day: 'numeric' }).format(at);
+      expect(daySeparatorFor('2026-07-01T12:00:00', { language })).toEqual({ kind: 'date', label: want });
+    }
   });
 
   it('degrades to an empty label on an unparseable date', () => {

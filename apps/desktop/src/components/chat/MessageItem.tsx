@@ -12,7 +12,7 @@ import { AttachmentDisplay } from './AttachmentDisplay';
 import { E2EAttachmentDisplay } from './E2EAttachmentDisplay';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Pencil, Trash2, SmilePlus, Reply, Flag, Lock } from 'lucide-react';
-import { format, isToday, isYesterday } from 'date-fns';
+import { formatDate, formatMessageStamp } from '../../utils/formatDate';
 import { clsx } from 'clsx';
 import type { Message } from '@voxium/shared';
 import { StaffBadge } from '../common/StaffBadge';
@@ -44,10 +44,7 @@ interface Props {
 }
 
 function formatMessageTime(dateStr: string, t: TFunction) {
-  const date = new Date(dateStr);
-  if (isToday(date)) return t('messageItem.todayAt', { time: format(date, 'h:mm a') });
-  if (isYesterday(date)) return t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') });
-  return format(date, 'MM/dd/yyyy h:mm a');
+  return formatMessageStamp(dateStr, t);
 }
 
 export const MessageItem = memo(function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId, readOnly = false }: Props) {
@@ -460,7 +457,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
             <div className="flex items-start gap-3">
               <div className="w-10 shrink-0 text-center">
                 <span className="hidden group-hover:inline font-mono text-[10px] text-vox-text-muted/80">
-                  {format(new Date(message.createdAt), 'h:mm')}
+                  {formatDate('clock', message.createdAt)}
                 </span>
               </div>
 
