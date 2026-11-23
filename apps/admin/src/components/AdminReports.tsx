@@ -19,6 +19,20 @@ const TYPE_ICONS: Record<string, typeof MessageSquare> = {
   server: ServerIcon,
 };
 
+/**
+ * A report outlives an account that is deleted (the server keeps it for a
+ * fixed period, then deletes it): its side of that account is null. The
+ * reported side keeps the username the report was filed against.
+ */
+function reportedAccountDeleted(report: Report): boolean {
+  return report.reportedUserId === null;
+}
+
+/** The day a kept report will be deleted, or null while none of its accounts is deleted. */
+function expiryDate(report: Report): string | null {
+  return report.expiresAt ? new Date(report.expiresAt).toLocaleDateString() : null;
+}
+
 /** A server report snapshots the listing as "name\n\ndescription": the first line names it. */
 function listingName(report: Report): string {
   const first = report.messageContent?.split('\n')[0]?.trim();
@@ -33,9 +47,21 @@ export function AdminReports() {
   } = useAdminStore();
 
   const [resolveModal, setResolveModal] = useState<Report | null>(null);
+  // The report the resolve dialog is open on, as the list holds it NOW: a
+  // refresh while the dialog is open (its reported account deleted meanwhile)
+  // shows in the dialog, and in what it sends
+  const resolving = resolveModal ? (reports.find((r) => r.id === resolveModal.id) ?? resolveModal) : null;
   const [resolution, setResolution] = useState('');
   const [banOnResolve, setBanOnResolve] = useState(false);
+  // The ban box ticked counts only while there is someone to ban: never a ban
+  // of a deleted account, which the dialog then offers no box for and the
+  // server refuses
+  const banning = banOnResolve && resolving !== null && !reportedAccountDeleted(resolving);
   const [deleteOnResolve, setDeleteOnResolve] = useState(false);
+  // The delete box ticked counts only while the report still names a message:
+  // the link goes when the message does, the box goes with it, and neither the
+  // label nor the request may then speak of a delete
+  const deleting = deleteOnResolve && resolving !== null && resolving.type === 'message' && !!resolving.messageId;
   const [dismissModal, setDismissModal] = useState<Report | null>(null);
   // "Block from directory" shortcut on a server report: hides the listing
   // and stops the owner relisting; the report itself stays open.
@@ -55,12 +81,12 @@ export function AdminReports() {
   }, [setReportsFilter]);
 
   const handleResolve = async () => {
-    if (!resolveModal) return;
+    if (!resolveModal || !resolving) return;
     // The store reports a failure itself and resolves false: the modal stays open for another try.
     const done = await resolveReport(resolveModal.id, {
       resolution: resolution || 'Resolved',
-      ...(banOnResolve ? { action: 'ban' } : {}),
-      ...(deleteOnResolve ? { deleteMessage: true } : {}),
+      ...(banning ? { action: 'ban' } : {}),
+      ...(deleting ? { deleteMessage: true } : {}),
     });
     if (!done) return;
     setResolveModal(null);
@@ -94,7 +120,9 @@ export function AdminReports() {
           {report.type}
         </span>
       ),
-      reporter: (
+      reporter: report.reporterId === null ? (
+        <span className="text-xs italic text-vox-text-muted" data-testid="report-reporter-deleted">Deleted account</span>
+      ) : (
         <span className="text-vox-text-primary text-xs font-medium">{report.reporterUsername}</span>
       ),
       reported: (
@@ -102,6 +130,9 @@ export function AdminReports() {
           {report.reportedUsername}
           {report.type === 'server' && (
             <span className="block text-[10px] font-normal text-vox-text-muted" data-testid="report-owner-label">server owner</span>
+          )}
+          {reportedAccountDeleted(report) && (
+            <span className="block text-[10px] font-normal italic text-vox-text-muted" data-testid="report-reported-deleted">Deleted account</span>
           )}
         </span>
       ),
@@ -144,9 +175,20 @@ export function AdminReports() {
         </div>
       ),
       status: (
-        <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${STATUS_COLORS[report.status] || ''}`}>
-          {report.status}
-        </span>
+        <div>
+          <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${STATUS_COLORS[report.status] || ''}`}>
+            {report.status}
+          </span>
+          {expiryDate(report) && (
+            <span
+              className="block mt-0.5 text-[10px] text-vox-text-muted"
+              title="Kept after the deletion of an account it concerns, for a fixed period"
+              data-testid="report-expires"
+            >
+              Will be deleted on {expiryDate(report)}
+            </span>
+          )}
+        </div>
       ),
       created: (
         <span className="text-xs">{new Date(report.createdAt).toLocaleString()}</span>
@@ -229,16 +271,17 @@ export function AdminReports() {
       </div>
 
       {/* Resolve Modal */}
-      {resolveModal && (
+      {resolving && (
         <AdminConfirmModal
           title="Resolve Report"
           message={
             <div className="space-y-3">
               <p className="text-sm text-vox-text-secondary">
-                {resolveModal.type === 'server' ? 'Server owner' : 'Reported user'}: <strong>{resolveModal.reportedUsername}</strong>
+                {resolving.type === 'server' ? 'Server owner' : 'Reported user'}: <strong>{resolving.reportedUsername}</strong>
+                {reportedAccountDeleted(resolving) && ' (deleted account)'}
               </p>
               <p className="text-sm text-vox-text-secondary">
-                Reason: {resolveModal.reason}
+                Reason: {resolving.reason}
               </p>
               <div>
                 <label className="block text-xs text-vox-text-muted mb-1">Resolution note</label>
@@ -250,7 +293,7 @@ export function AdminReports() {
                   placeholder="Describe the resolution..."
                 />
               </div>
-              {resolveModal.type === 'message' && resolveModal.messageId && (
+              {resolving.type === 'message' && resolving.messageId && (
                 <label className="flex items-center gap-2 text-xs text-vox-text-secondary">
                   <input
                     type="checkbox"
@@ -261,21 +304,30 @@ export function AdminReports() {
                   Delete reported message
                 </label>
               )}
-              <label className="flex items-center gap-2 text-xs text-vox-text-secondary">
-                <input
-                  type="checkbox"
-                  checked={banOnResolve}
-                  onChange={(e) => setBanOnResolve(e.target.checked)}
-                  className="rounded"
-                />
-                {resolveModal.type === 'server'
-                  ? 'Ban the server owner (a platform ban also hides every server they own)'
-                  : 'Ban reported user'}
-              </label>
+              {reportedAccountDeleted(resolving) ? (
+                // A deleted account cannot be banned: no ban control at all,
+                // and the reason in its place
+                <p className="text-xs text-vox-text-muted" data-testid="report-ban-unavailable">
+                  The reported account has been deleted, so there is no one to ban.
+                  {expiryDate(resolving) && ` This report will be deleted on ${expiryDate(resolving)}.`}
+                </p>
+              ) : (
+                <label className="flex items-center gap-2 text-xs text-vox-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={banOnResolve}
+                    onChange={(e) => setBanOnResolve(e.target.checked)}
+                    className="rounded"
+                  />
+                  {resolving.type === 'server'
+                    ? 'Ban the server owner (a platform ban also hides every server they own)'
+                    : 'Ban reported user'}
+                </label>
+              )}
             </div>
           }
-          confirmLabel={banOnResolve ? 'Resolve & Ban' : deleteOnResolve ? 'Resolve & Delete' : 'Resolve'}
-          variant={banOnResolve ? 'danger' : 'primary'}
+          confirmLabel={banning ? 'Resolve & Ban' : deleting ? 'Resolve & Delete' : 'Resolve'}
+          variant={banning ? 'danger' : 'primary'}
           dismissible={false}
           onConfirm={handleResolve}
           onCancel={() => { setResolveModal(null); setResolution(''); setBanOnResolve(false); setDeleteOnResolve(false); }}

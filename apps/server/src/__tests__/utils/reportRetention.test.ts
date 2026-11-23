@@ -24,6 +24,7 @@ import { prisma } from '../../utils/prisma';
 import {
   runReportRetention,
   deleteExpiredReports,
+  reportExpiries,
   startReportRetention,
   stopReportRetention,
   REPORT_RETENTION_LOCK_KEY,
@@ -309,5 +310,46 @@ describe('the report retention schedule', () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+describe('reportExpiries — the date the moderation queue shows', () => {
+  const at = (iso: string) => new Date(iso);
+
+  it('no report with a mark: no statement, no date', async () => {
+    const dates = await reportExpiries([{ id: 'rep-1', reporterDeletedAt: null, reportedUserDeletedAt: null }]);
+
+    expect(dates.size).toBe(0);
+    expect(queryRaw).not.toHaveBeenCalled();
+  });
+
+  it("asks the database for each marked report's EARLIER mark plus the period, from the marks the caller read, in one statement", async () => {
+    queryRaw.mockResolvedValueOnce([
+      { id: 'rep-1', expiresAt: at('2027-11-20T08:00:00.000Z') },
+      { id: 'rep-3', expiresAt: at('2029-02-28T10:00:00.000Z') },
+    ] as never);
+
+    const dates = await reportExpiries([
+      { id: 'rep-1', reporterDeletedAt: at('2026-12-01T09:00:00.000Z'), reportedUserDeletedAt: at('2026-11-20T08:00:00.000Z') },
+      { id: 'rep-2', reporterDeletedAt: null, reportedUserDeletedAt: null },
+      { id: 'rep-3', reporterDeletedAt: null, reportedUserDeletedAt: at('2028-02-29T10:00:00.000Z') },
+    ]);
+
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+    const [call] = queryRaw.mock.calls;
+    expect(sqlOf(call)).toBe(
+      'SELECT m.id, m.mark::timestamp(3) + make_interval(months => ?) AS "expiresAt" FROM unnest(?::text[], ?::text[]) AS m(id, mark)',
+    );
+    expect(call.slice(1)).toEqual([
+      REPORT_RETENTION_MONTHS,
+      ['rep-1', 'rep-3'],
+      // the earlier of rep-1's two marks; rep-2 has none and is not sent
+      ['2026-11-20T08:00:00.000Z', '2028-02-29T10:00:00.000Z'],
+    ]);
+    // the database's answer, never a date the node computed (29 February plus
+    // twelve months is the 28th there)
+    expect(dates.get('rep-1')).toEqual(at('2027-11-20T08:00:00.000Z'));
+    expect(dates.get('rep-3')).toEqual(at('2029-02-28T10:00:00.000Z'));
+    expect(dates.has('rep-2')).toBe(false);
   });
 });

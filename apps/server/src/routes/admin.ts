@@ -14,6 +14,7 @@ import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
 import { deleteServerAndAnnounce } from '../utils/serverDeletion';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
+import { reportExpiries } from '../utils/reportRetention';
 import { readConversationAudience, viewersRoom } from '../utils/conversationAudience';
 import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
 import { getSfuStats } from '../mediasoup/mediasoupManager';
@@ -2886,6 +2887,10 @@ adminRouter.get('/reports', async (req: Request, res: Response, next: NextFuncti
       prisma.report.count({ where }),
     ]);
 
+    // When each report kept after an account's deletion will be deleted, by
+    // the retention job's own arithmetic, from the marks read above
+    const expiries = await reportExpiries(reports);
+
     const data = reports.map((r) => ({
       id: r.id,
       type: r.type,
@@ -2899,6 +2904,9 @@ adminRouter.get('/reports', async (req: Request, res: Response, next: NextFuncti
       reporterUsername: r.reporter?.username ?? null,
       reportedUserId: r.reportedUserId,
       reportedUsername: r.reportedUser?.username ?? r.reportedUsername ?? '',
+      reporterDeletedAt: r.reporterDeletedAt?.toISOString() ?? null,
+      reportedUserDeletedAt: r.reportedUserDeletedAt?.toISOString() ?? null,
+      expiresAt: expiries.get(r.id)?.toISOString() ?? null,
       messageId: r.messageId,
       messageContent: r.messageContent,
       contentSource: r.contentSource,

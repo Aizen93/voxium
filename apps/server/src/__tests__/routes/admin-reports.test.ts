@@ -1121,3 +1121,59 @@ describe('POST /admin/reports/:id/resolve|dismiss — decided from the report as
     expect(logAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'report.dismiss', targetId: 'rep-1' }));
   });
 });
+
+describe('GET /admin/reports — the deletion marks and the date a kept report will be deleted', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.report.count.mockResolvedValue(2);
+    mockUsers({ 'admin-1': { role: 'admin' } });
+  });
+  afterEach(() => {
+    prismaMock.$queryRaw.mockImplementation((_sql: TemplateStringsArray, id: string) => Promise.resolve([{ id }]));
+  });
+
+  const base = {
+    type: 'user', status: 'pending', reason: 'abuse in a space',
+    reporterId: 'user-2', reporter: { username: 'reporter' },
+    reportedUserId: 'user-3', reportedUser: { username: 'accused' }, reportedUsername: 'accused',
+    reporterDeletedAt: null, reportedUserDeletedAt: null,
+    messageId: null, messageContent: null, contentSource: 'server',
+    channelId: null, conversationId: null, serverId: null,
+    resolvedById: null, resolvedBy: null, resolution: null,
+    createdAt: new Date('2026-07-30'), resolvedAt: null,
+  };
+
+  it('serves each mark and the expiry the database computed; a report with no mark has neither, and asks for none', async () => {
+    prismaMock.report.findMany.mockResolvedValue([
+      { ...base, id: 'rep-kept', reportedUserId: null, reportedUser: null, reportedUsername: 'gone-user', reportedUserDeletedAt: new Date('2026-11-20T08:00:00.000Z') },
+      { ...base, id: 'rep-live' },
+    ]);
+    prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray) => Promise.resolve(
+      /FROM unnest/.test(strings.join('?')) ? [{ id: 'rep-kept', expiresAt: new Date('2027-11-20T08:00:00.000Z') }] : [],
+    ));
+
+    const res = await request(createApp()).get('/api/v1/admin/reports').set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    const [kept, live] = res.body.data;
+    expect(kept).toMatchObject({
+      id: 'rep-kept', reportedUserId: null, reportedUsername: 'gone-user',
+      reporterDeletedAt: null, reportedUserDeletedAt: '2026-11-20T08:00:00.000Z', expiresAt: '2027-11-20T08:00:00.000Z',
+    });
+    expect(live).toMatchObject({ id: 'rep-live', reporterDeletedAt: null, reportedUserDeletedAt: null, expiresAt: null });
+    // the expiry asked for the marked report alone
+    const expiryCall = (prismaMock.$queryRaw.mock.calls as unknown[][]).find(([sql]) => /FROM unnest/.test((sql as string[]).join('?')))!;
+    expect(expiryCall[2]).toEqual(['rep-kept']);
+  });
+
+  it('a page without a kept report sends no expiry statement', async () => {
+    prismaMock.report.findMany.mockResolvedValue([{ ...base, id: 'rep-live' }]);
+    prismaMock.$queryRaw.mockClear();
+
+    const res = await request(createApp()).get('/api/v1/admin/reports').set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].expiresAt).toBeNull();
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+  });
+});

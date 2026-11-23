@@ -19,7 +19,9 @@ import { describeCaughtError, loggableError } from './loggableError';
 // months are added by PostgreSQL (`make_interval(months => …)`: a calendar
 // month, the 29th of February plus twelve months being the 28th), never as
 // a number of days. A report expires at its mark plus the period (the
-// earlier mark: either one alone is enough).
+// earlier mark: either one alone is enough), the instant the moderation
+// queue shows it will be deleted (reportExpiries, below, the same
+// arithmetic done by the same database).
 //
 // THE BATCHES. In id order, REPORT_RETENTION_BATCH at a time, each one
 // statement of its own (a transaction that commits on its own). Each takes
@@ -173,4 +175,35 @@ export async function deleteExpiredReports(): Promise<ReportRetentionResult> {
     });
   }
   return { deleted, failedBatch };
+}
+
+/** The deletion marks of one report, as a reader has them. */
+export interface ReportDeletionMarks {
+  id: string;
+  reporterDeletedAt: Date | null;
+  reportedUserDeletedAt: Date | null;
+}
+
+/**
+ * When each of `reports` will be deleted: the earlier of its deletion marks
+ * plus REPORT_RETENTION_MONTHS, the arithmetic done by PostgreSQL, as the job
+ * does it, on the marks the caller read (so a report's marks and its date
+ * never come from two reads). A report with no mark has no date and is left
+ * out; no statement is sent when none has one.
+ */
+export async function reportExpiries(reports: ReportDeletionMarks[]): Promise<Map<string, Date>> {
+  const marked = reports.flatMap((r) => {
+    const marks = [r.reporterDeletedAt, r.reportedUserDeletedAt].filter((d): d is Date => d instanceof Date);
+    if (marks.length === 0) return [];
+    const earliest = marks.reduce((a, b) => (a.getTime() <= b.getTime() ? a : b));
+    return [{ id: r.id, mark: earliest.toISOString() }];
+  });
+  if (marked.length === 0) return new Map();
+  // The marks are timestamps without a zone holding UTC: Prisma reads them
+  // as UTC instants, and their ISO form cast back to `timestamp(3)` is the
+  // stored value (the zone suffix is ignored by that cast)
+  const rows = await prisma.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
+    SELECT m.id, m.mark::timestamp(3) + make_interval(months => ${REPORT_RETENTION_MONTHS}) AS "expiresAt"
+    FROM unnest(${marked.map((m) => m.id)}::text[], ${marked.map((m) => m.mark)}::text[]) AS m(id, mark)`;
+  return new Map(rows.map((r) => [r.id, r.expiresAt]));
 }
