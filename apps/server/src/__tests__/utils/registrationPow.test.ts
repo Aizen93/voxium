@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const redisSet = vi.fn();
 vi.mock('../../utils/redis', () => ({
@@ -16,11 +16,30 @@ import {
 
 const IP = '203.0.113.9';
 
+/**
+ * The two clock tests below walk the solver's loop past its deadline checks,
+ * which sit every 4096 nonces. With the real digest that is thousands of
+ * sequential WebCrypto calls (each one a hop to the thread pool), a cost that
+ * grows with how busy the machine is and ended in the default test timeout. What
+ * they assert is the solver's decisions about the clock, never a hash, so the
+ * digest is replaced by one that never clears the target (a first byte of 0xff:
+ * no leading zero bit): the loop is the real one and runs the same number of
+ * rounds on every machine, in milliseconds. The call count it returns is
+ * asserted, which also pins WHERE the deadline checks sit.
+ */
+function neverSolvingDigest() {
+  const never = new Uint8Array(32).fill(0xff);
+  return vi.spyOn(globalThis.crypto.subtle, 'digest').mockImplementation(async () => never.buffer.slice(0));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   process.env.JWT_SECRET = 'test-secret-for-pow-hmac-derivation';
   redisSet.mockResolvedValue('OK'); // NX succeeded — first redemption
 });
+
+// A failed assertion must not leave the clock or the digest replaced
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe('registration proof-of-work', () => {
   it('round-trips: issue → solve (shared solver) → verify', async () => {
@@ -88,6 +107,7 @@ describe('registration proof-of-work', () => {
     // 4096: elapsed sits just INSIDE the real 15-minute budget, but far past
     // the ~3 minutes the old code derived from `expires`. Call 3 pushes past
     // the real budget so the solve terminates instead of grinding.
+    const digest = neverSolvingDigest();
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => {
       checks++;
       if (checks <= 1) return startedAt;
@@ -99,16 +119,19 @@ describe('registration proof-of-work', () => {
     // The decisive assertion: it survived the FIRST in-loop check. Deriving the
     // budget from `expires` would have bailed there, at checks === 2.
     expect(checks).toBeGreaterThanOrEqual(3);
+    // ... and it bailed at the SECOND in-loop check, nonce 8192 (nonces 0..8192)
+    // 2 x DEADLINE_CHECK_EVERY (packages/shared/src/pow.ts, 4096) + 1: update with it
+    expect(digest).toHaveBeenCalledTimes(8193);
 
     clock.mockRestore();
+    digest.mockRestore();
   });
 
   it('abandons a challenge whose deadline passes MID-solve', async () => {
-    // Deterministic by construction, not by timing: SHA-256 is fixed, and no
-    // nonce below 8192 clears 20 leading zero bits for THIS challenge string
-    // (verified offline), so the in-loop deadline check at nonce 4096 is
-    // always reached first. The clock is stubbed to cross the deadline exactly
-    // between the pre-flight check and that first in-loop one.
+    // Deterministic by construction, not by timing: the digest never clears the
+    // target (see neverSolvingDigest), so the in-loop deadline check at nonce
+    // 4096 is always reached first. The clock is stubbed to cross the deadline
+    // exactly between the pre-flight check and that first in-loop one.
     const challenge = {
       challenge: '00000000000000000000000000000001',
       difficulty: POW_MAX_DIFFICULTY,
@@ -117,13 +140,18 @@ describe('registration proof-of-work', () => {
     };
     const startedAt = Date.now();
     let checks = 0;
+    const digest = neverSolvingDigest();
     const clock = vi.spyOn(Date, 'now').mockImplementation(() =>
       ++checks <= 1 ? startedAt : startedAt + POW_CHALLENGE_TTL_MS + 1);
 
     await expect(solveRegistrationPow(challenge)).rejects.toBeInstanceOf(PowExpiredError);
     expect(checks).toBeGreaterThan(1); // it really did start solving
+    // It stopped at the first in-loop check, nonce 4096 (nonces 0..4096)
+    // DEADLINE_CHECK_EVERY (packages/shared/src/pow.ts, 4096) + 1: update with it
+    expect(digest).toHaveBeenCalledTimes(4097);
 
     clock.mockRestore();
+    digest.mockRestore();
   });
 
   it('reports progress without a worker — the Node path stays a plain async call', async () => {
