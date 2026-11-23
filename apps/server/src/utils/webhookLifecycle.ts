@@ -3,6 +3,7 @@ import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { getIO } from '../websocket/socketServer';
 import { retryOnTransactionConflict } from './transactionRetry';
+import { describeCaughtError } from './loggableError';
 
 /**
  * The webhook lifecycle both management surfaces share: the owner's router
@@ -95,6 +96,12 @@ export interface WebhookDeletion {
   deletedMessages: number;
   /** Only channels that lost rows (empty without purge, or when a purge found nothing). */
   perChannel: Array<{ channelId: string; count: number }>;
+  /**
+   * Without purge: every channel that held rows of this webhook, which now
+   * read as a deleted webhook's (the rows stay, `webhook_id` is NULL). Empty
+   * with purge and for a webhook that posted nowhere.
+   */
+  detachedChannelIds: string[];
 }
 
 /**
@@ -156,20 +163,26 @@ export async function deleteWebhookWithPurge(webhookId: string, purge: boolean):
   // Filled batch by batch, so a batch or a transaction that fails for good
   // still leaves the counts of the batches that committed before it
   const batched = new Map<string, number>();
+  const detached = new Set<string>();
   let result: WebhookDeletion | null;
   try {
-    await detachOrPurgeInBatches(webhookId, purge, batched);
-    result = await lockAndDelete(webhookId, purge, batched);
+    await detachOrPurgeInBatches(webhookId, purge, batched, detached);
+    result = await lockAndDelete(webhookId, purge, batched, detached);
   } catch (err) {
-    announceBatchedPurge(webhookId, batched);
+    announceBatchedPurge(webhookId, batched, detached);
     throw err;
   }
-  if (!result) announceBatchedPurge(webhookId, batched);
+  if (!result) announceBatchedPurge(webhookId, batched, detached);
   return result;
 }
 
 /** The locked transaction of deleteWebhookWithPurge, run again whole on a deadlock. */
-function lockAndDelete(webhookId: string, purge: boolean, batched: Map<string, number>): Promise<WebhookDeletion | null> {
+function lockAndDelete(
+  webhookId: string,
+  purge: boolean,
+  batched: Map<string, number>,
+  detached: Set<string>,
+): Promise<WebhookDeletion | null> {
   return retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
     // Lock the webhook row FIRST, on every attempt. A concurrent delivery's
     // INSERT takes a KEY SHARE lock on it (the FK check), so it waits for this
@@ -191,6 +204,7 @@ function lockAndDelete(webhookId: string, purge: boolean, batched: Map<string, n
     // A fresh copy on each attempt: an earlier attempt's counts were rolled
     // back with its deletes.
     const counts = new Map(batched);
+    const detachedIds = new Set(detached);
     let deletedMessages = 0;
     for (const n of counts.values()) deletedMessages += n;
     if (purge) {
@@ -205,6 +219,14 @@ function lockAndDelete(webhookId: string, purge: boolean, batched: Map<string, n
         if (g.channelId) counts.set(g.channelId, (counts.get(g.channelId) ?? 0) + g._count._all);
       }
       deletedMessages += (await tx.message.deleteMany({ where: { webhookId } })).count;
+    } else {
+      // The rows still pointing at the webhook (in flight past the batches)
+      // are detached by the row delete below (the FK's SET NULL): their
+      // channels are told too
+      const groups = await tx.message.groupBy({ by: ['channelId'], where: { webhookId } });
+      for (const g of groups) {
+        if (g.channelId) detachedIds.add(g.channelId);
+      }
     }
     const perChannel = Array.from(counts, ([channelId, count]) => ({ channelId, count }));
     await tx.webhook.delete({ where: { id: webhookId } });
@@ -218,6 +240,7 @@ function lockAndDelete(webhookId: string, purge: boolean, batched: Map<string, n
       type: row.type as WebhookType,
       deletedMessages,
       perChannel,
+      detachedChannelIds: Array.from(detachedIds),
     };
   }, {
     // Deleting the row makes the FK's ON DELETE SET NULL rewrite every message
@@ -233,26 +256,53 @@ function lockAndDelete(webhookId: string, purge: boolean, batched: Map<string, n
 }
 
 /**
- * The receipts of the rows a purge's batches deleted when no delete of this
- * call commits after them: the webhook row was gone by the lock (a
- * concurrent delete of the same webhook won it, or a channel or space
+ * The announcements for the rows a delete's batches already changed, when no
+ * delete of this call commits after them: the webhook row was gone by the lock
+ * (a concurrent delete of the same webhook won it, or a channel or space
  * delete's cascade removed it), or a batch or the locked transaction failed
- * for good. Those rows stay deleted, and nobody else counted them (a
- * concurrent delete's own receipts count only what IT deleted). One
- * `message:bulk_deleted` per channel that lost rows, in the shape
- * emitWebhookDeletion sends, counts from the batches alone; no count-0
- * receipt and no refetch hint, which belong to a delete that committed.
- * Best effort after committed deletes: a failure is logged, never thrown.
+ * for good. Those rows stay deleted (or detached), and nobody else counted
+ * them (a concurrent delete's own announcements cover only what IT changed).
+ * With purge: one `message:bulk_deleted` per channel that lost rows, in the
+ * shape emitWebhookDeletion sends, counts from the batches alone; without it:
+ * one `webhook:messages_detached` per channel whose rows were detached. No
+ * count-0 receipt and no refetch hint, which belong to a delete that
+ * committed. Best effort after committed changes: a failure is logged, never
+ * thrown.
  */
-function announceBatchedPurge(webhookId: string, batched: Map<string, number>): void {
-  if (batched.size === 0) return;
-  try {
-    emitBulkDeletedReceipts(webhookId, Array.from(batched, ([channelId, count]) => ({ channelId, count })));
-  } catch (err) {
-    console.error(
-      `[Webhooks] The receipts of the messages purged with webhook ${webhookId} (gone by its lock) were not sent:`,
-      err instanceof Error ? err.message : err,
-    );
+function announceBatchedPurge(webhookId: string, batched: Map<string, number>, detached: Set<string>): void {
+  if (batched.size > 0) {
+    try {
+      emitBulkDeletedReceipts(webhookId, Array.from(batched, ([channelId, count]) => ({ channelId, count })));
+    } catch (err) {
+      console.error(
+        `[Webhooks] The receipts of the messages purged with webhook ${webhookId} (gone by its lock) were not sent:`,
+        describeCaughtError(err),
+      );
+    }
+  }
+  // The rows the batches detached stay detached: their channels are told
+  emitMessagesDetached(webhookId, Array.from(detached));
+}
+
+/**
+ * One `webhook:messages_detached` per channel that held rows of a webhook
+ * deleted WITHOUT purge, each to that channel's own room (the VIEW_CHANNEL
+ * audience; the space room never carries a channel id). The rows stay and now
+ * read as a deleted webhook's, so a client that has them loaded re-labels
+ * them instead of waiting for a reload. Best effort after the commit: a
+ * channel whose notice cannot be sent is logged by message and the others
+ * still go out; nothing is thrown.
+ */
+function emitMessagesDetached(webhookId: string, channelIds: string[]): void {
+  for (const channelId of channelIds) {
+    try {
+      getIO().to(`channel:${channelId}`).emit(WS_EVENTS.WEBHOOK_MESSAGES_DETACHED, { channelId, webhookId });
+    } catch (err) {
+      console.error(
+        `[Webhooks] The notice that the messages of deleted webhook ${webhookId} were detached was not sent to channel ${channelId}:`,
+        describeCaughtError(err),
+      );
+    }
   }
 }
 
@@ -290,7 +340,12 @@ const HISTORY_BATCH = 5000;
  * back alone and is run again (retryOnTransactionConflict); only the run that
  * committed returns rows, so nothing is counted twice.
  */
-async function detachOrPurgeInBatches(webhookId: string, purge: boolean, perChannel: Map<string, number>): Promise<void> {
+async function detachOrPurgeInBatches(
+  webhookId: string,
+  purge: boolean,
+  perChannel: Map<string, number>,
+  detached: Set<string>,
+): Promise<void> {
   const label = `[Webhooks] A history batch of webhook ${webhookId}`;
   for (;;) {
     if (purge) {
@@ -302,9 +357,13 @@ async function detachOrPurgeInBatches(webhookId: string, purge: boolean, perChan
         if (r.channel_id) perChannel.set(r.channel_id, (perChannel.get(r.channel_id) ?? 0) + 1);
       }
     } else {
-      const changed = Number(await retryOnTransactionConflict(() => prisma.$executeRaw`
-        UPDATE messages SET webhook_id = NULL WHERE id IN (SELECT id FROM messages WHERE webhook_id = ${webhookId} LIMIT ${HISTORY_BATCH})`, label)) || 0;
-      if (changed === 0) break;
+      const rows = (await retryOnTransactionConflict(() => prisma.$queryRaw<Array<{ channel_id: string | null }>>`
+        UPDATE messages SET webhook_id = NULL WHERE id IN (SELECT id FROM messages WHERE webhook_id = ${webhookId} LIMIT ${HISTORY_BATCH})
+        RETURNING channel_id`, label)) ?? [];
+      if (rows.length === 0) break;
+      for (const r of rows) {
+        if (r.channel_id) detached.add(r.channel_id);
+      }
     }
   }
 }
@@ -348,7 +407,9 @@ export async function disarmWebhookRowsHeldBy(
  * per channel that lost rows, each to that channel's own room (the
  * VIEW_CHANNEL audience); with nothing deleted, one count-0 receipt to the
  * current channel (the client handler is idempotent and the event is the
- * purge's receipt). Then the server-wide refetch hint, always LAST.
+ * purge's receipt). Without purge: one `webhook:messages_detached` per channel
+ * that held its rows, each to that channel's own room. Then the server-wide
+ * refetch hint, always LAST.
  */
 export function emitWebhookDeletion(result: WebhookDeletion, purge: boolean): void {
   if (purge) {
@@ -356,6 +417,8 @@ export function emitWebhookDeletion(result: WebhookDeletion, purge: boolean): vo
       ? result.perChannel
       : [{ channelId: result.channelId, count: 0 }];
     emitBulkDeletedReceipts(result.webhookId, receipts);
+  } else {
+    emitMessagesDetached(result.webhookId, result.detachedChannelIds);
   }
   emitWebhookChanged(result.serverId);
 }

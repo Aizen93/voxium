@@ -1042,3 +1042,25 @@ describe('POST /admin/users/:userId/unban — the ban hierarchy applies to the l
     expect(prismaMock.user.update).not.toHaveBeenCalled();
   });
 });
+
+describe('GET /admin/storage/files — a failing object store is logged by name and status', () => {
+  it('answers 500 and logs the described failure, never the store message', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' } });
+    const app = createApp();
+    vi.mocked(listAllS3Objects).mockRejectedValueOnce(
+      Object.assign(new Error('connect ECONNREFUSED store.example:9000 bucket private-bucket'), { name: 'ServiceUnavailable', $metadata: { httpStatusCode: 503 } }),
+    );
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await request(app).get('/api/v1/admin/storage/files').set('Authorization', `Bearer ${makeToken()}`);
+
+      expect(res.status).toBe(500);
+      const logged = errorSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(logged).toContain('The object store call failed (ServiceUnavailable, HTTP 503)');
+      expect(logged).not.toContain('store.example');
+      expect(logged).not.toContain('private-bucket');
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});

@@ -127,3 +127,66 @@ describe('chatStore.removeWebhookMessages — quotes of the purged rows', () => 
     expect(useChatStore.getState().messages[0].replyTo).toBeNull();
   });
 });
+
+describe('chatStore.markWebhookDeleted (a webhook deleted without purge)', () => {
+  const quoteOf = (parent: Message) => ({ id: parent.id, content: parent.content, author: parent.author });
+  const replyToA = msg('r-a', { replyToId: 'a1', replyTo: quoteOf(fromHookA) });
+  const replyToB = msg('r-b', { replyToId: 'b1', replyTo: quoteOf(fromHookB) });
+  const state = () => useChatStore.getState();
+
+  beforeEach(() => {
+    useChatStore.setState({
+      messages: [fromHookA, fromHuman, fromHookB, fromHookA2, fromHookAElsewhere, fromDeletedHook, replyToA, replyToB],
+      viewScope: channelView('ch-1'),
+    });
+  });
+
+  it('re-labels the webhook\'s rows of that channel as a deleted webhook\'s: webhookId null, author id webhook:deleted, the frozen name kept', () => {
+    state().markWebhookDeleted('ch-1', 'wh-a');
+    const byId = (id: string) => state().messages.find((m) => m.id === id)!;
+    expect(byId('a1')).toMatchObject({ webhookId: null, author: { id: 'webhook:deleted', displayName: 'Deploy bot', isWebhook: true, avatarUrl: null } });
+    expect(byId('a2')).toMatchObject({ webhookId: null, author: { id: 'webhook:deleted', displayName: 'Renamed' } });
+    // every row stays: nothing is dropped
+    expect(state().messages).toHaveLength(8);
+    // content and everything else on the row is as it was
+    expect({ ...byId('a1'), webhookId: 'wh-a', author: fromHookA.author }).toEqual(fromHookA);
+  });
+
+  it('leaves a human, another webhook, the same webhook in ANOTHER channel and an already deleted webhook\'s rows the same objects', () => {
+    state().markWebhookDeleted('ch-1', 'wh-a');
+    const after = state().messages;
+    expect(after).toContain(fromHuman);
+    expect(after).toContain(fromHookB);
+    expect(after).toContain(fromHookAElsewhere);
+    expect(after).toContain(fromDeletedHook);
+    expect(after.find((m) => m.id === 'r-b')).toBe(replyToB);
+  });
+
+  it('a reply quoting one of those rows shows the quote as a deleted webhook\'s too, and keeps its parent link', () => {
+    state().markWebhookDeleted('ch-1', 'wh-a');
+    const reply = state().messages.find((m) => m.id === 'r-a')!;
+    expect(reply.replyTo?.author.id).toBe('webhook:deleted');
+    expect(reply.replyTo?.author.displayName).toBe('Deploy bot');
+    expect(reply.replyToId).toBe('a1');
+  });
+
+  it('is immutable: the old rows are untouched, and nothing matching leaves the state as it is', () => {
+    const before = state().messages;
+    state().markWebhookDeleted('ch-1', 'wh-a');
+    expect(fromHookA.webhookId).toBe('wh-a');
+    expect(fromHookA.author.id).toBe('webhook:wh-a');
+    expect(before).toHaveLength(8);
+    const now = state().messages;
+    state().markWebhookDeleted('ch-1', 'wh-nope');
+    expect(state().messages).toBe(now);
+  });
+
+  it('for the view of ANOTHER channel, a conversation, or none recorded, nothing is written', () => {
+    for (const scope of [channelView('ch-2'), { kind: 'conversation' as const, id: 'ch-1' }, null]) {
+      useChatStore.setState({ viewScope: scope });
+      const before = state().messages;
+      state().markWebhookDeleted('ch-1', 'wh-a');
+      expect(state().messages).toBe(before);
+    }
+  });
+});

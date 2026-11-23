@@ -163,12 +163,13 @@ describe('deleteWebhookWithPurge', () => {
     expect(txMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(txMock.webhook.findUnique.mock.invocationCallOrder[0]);
     expect(txMock.webhook.findUnique.mock.invocationCallOrder[0]).toBeLessThan(txMock.webhook.delete.mock.invocationCallOrder[0]);
     expect(txMock.webhook.delete).toHaveBeenCalledWith({ where: { id: 'wh-1' } });
-    expect(txMock.message.groupBy).not.toHaveBeenCalled();
+    // no purge: the in-flight rows' channels are read (to be told), nothing is deleted
+    expect(txMock.message.groupBy).toHaveBeenCalledWith({ by: ['channelId'], where: { webhookId: 'wh-1' } });
     expect(txMock.message.deleteMany).not.toHaveBeenCalled();
 
     expect(result).toEqual({
       webhookId: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'github',
-      deletedMessages: 0, perChannel: [],
+      deletedMessages: 0, perChannel: [], detachedChannelIds: [],
     });
     // a transaction emits nothing: the caller announces after the commit
     expect(h.emitted).toHaveLength(0);
@@ -197,6 +198,7 @@ describe('deleteWebhookWithPurge', () => {
       webhookId: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'github',
       deletedMessages: 13,
       perChannel: [{ channelId: 'ch-1', count: 4 }, { channelId: 'ch-old', count: 9 }],
+      detachedChannelIds: [],
     });
   });
 
@@ -272,20 +274,27 @@ describe('deleteWebhookWithPurge — the history goes in batches with no lock he
   const sqlOf = (call: unknown[]) => (call[0] as string[]).join('?').replace(/\s+/g, ' ').trim();
 
   it('without purge: detaches 5000 rows per UPDATE until one changes nothing, all BEFORE the transaction, none inside it', async () => {
-    prismaMock.$executeRaw.mockResolvedValueOnce(5000).mockResolvedValueOnce(5000).mockResolvedValueOnce(120).mockResolvedValueOnce(0);
+    const batch = (n: number, channelId: string | null) => Array.from({ length: n }, () => ({ channel_id: channelId }));
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce(batch(5000, 'ch-1'))
+      .mockResolvedValueOnce(batch(5000, 'ch-1'))
+      .mockResolvedValueOnce([...batch(100, 'ch-old'), ...batch(20, null)])
+      .mockResolvedValueOnce([]);
     const result = await deleteWebhookWithPurge('wh-1', false);
 
-    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(4);
-    const [strings, ...values] = prismaMock.$executeRaw.mock.calls[0];
-    expect(sqlOf([strings])).toBe('UPDATE messages SET webhook_id = NULL WHERE id IN (SELECT id FROM messages WHERE webhook_id = ? LIMIT ?)');
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(4);
+    const [strings, ...values] = prismaMock.$queryRaw.mock.calls[0];
+    expect(sqlOf([strings])).toBe('UPDATE messages SET webhook_id = NULL WHERE id IN (SELECT id FROM messages WHERE webhook_id = ? LIMIT ?) RETURNING channel_id');
     expect(values).toEqual(['wh-1', 5000]);
-    const lastBatch = prismaMock.$executeRaw.mock.invocationCallOrder[3];
+    const lastBatch = prismaMock.$queryRaw.mock.invocationCallOrder[3];
     expect(lastBatch).toBeLessThan(prismaMock.$transaction.mock.invocationCallOrder[0]);
     // the disable is committed before the first batch
-    expect(prismaMock.webhook.updateMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.$executeRaw.mock.invocationCallOrder[0]);
-    expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+    expect(prismaMock.webhook.updateMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.$queryRaw.mock.invocationCallOrder[0]);
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
     expect(result!.deletedMessages).toBe(0);
     expect(result!.perChannel).toEqual([]);
+    // every channel the batches touched, once, a null channel never
+    expect(result!.detachedChannelIds).toEqual(['ch-1', 'ch-old']);
   });
 
   it('with purge: deletes in batches RETURNING channel_id until none, and the receipts merge the batches with what the transaction still found', async () => {
@@ -309,7 +318,7 @@ describe('deleteWebhookWithPurge — the history goes in batches with no lock he
   });
 
   it('a failing batch aborts before the lock (the webhook stays disabled, nothing announced)', async () => {
-    prismaMock.$executeRaw.mockRejectedValueOnce(new Error('db down'));
+    prismaMock.$queryRaw.mockRejectedValueOnce(new Error('db down'));
     await expect(deleteWebhookWithPurge('wh-1', false)).rejects.toThrow('db down');
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
     expect(h.emitted).toHaveLength(0);
@@ -368,6 +377,7 @@ describe('deleteWebhookWithPurge — a deadlock or serialization failure runs th
       webhookId: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'github',
       deletedMessages: 4,
       perChannel: [{ channelId: 'ch-1', count: 3 }, { channelId: 'ch-old', count: 1 }],
+      detachedChannelIds: [],
     });
     expect(warn).toHaveBeenCalledWith(
       '[Webhooks] The delete of webhook wh-1 was aborted by a deadlock or a serialization failure; retrying (1 of 2)',
@@ -385,7 +395,7 @@ describe('deleteWebhookWithPurge — a deadlock or serialization failure runs th
     expect(txMock.webhook.delete).toHaveBeenCalledTimes(1);
     expect(result).toEqual({
       webhookId: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'github',
-      deletedMessages: 0, perChannel: [],
+      deletedMessages: 0, perChannel: [], detachedChannelIds: [],
     });
   });
 
@@ -451,12 +461,16 @@ describe('deleteWebhookWithPurge — a deadlock or serialization failure runs th
   });
 
   it('a detach batch aborted by a write conflict is run again too', async () => {
-    prismaMock.$executeRaw.mockRejectedValueOnce(writeConflict()).mockResolvedValueOnce(4).mockResolvedValueOnce(0);
+    prismaMock.$queryRaw
+      .mockRejectedValueOnce(writeConflict())
+      .mockResolvedValueOnce([{ channel_id: 'ch-1' }])
+      .mockResolvedValueOnce([]);
 
     const result = await deleteWebhookWithPurge('wh-1', false);
 
-    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(3);
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(3);
     expect(result!.deletedMessages).toBe(0);
+    expect(result!.detachedChannelIds).toEqual(['ch-1']);
     expect(h.emitted).toHaveLength(0);
   });
 
@@ -607,6 +621,46 @@ describe('deleteWebhookWithPurge — a webhook gone by the lock still announces 
   });
 });
 
+describe('deleteWebhookWithPurge — rows detached by committed batches are announced when no delete commits after them', () => {
+  it('a webhook gone by the lock: the channels the batches detached are told, with no hint and no receipt', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ channel_id: 'ch-1' }, { channel_id: 'ch-1' }, { channel_id: 'ch-old' }]).mockResolvedValueOnce([]);
+    txMock.$queryRaw.mockResolvedValue([]);
+
+    await expect(deleteWebhookWithPurge('wh-1', false)).resolves.toBeNull();
+
+    expect(h.emitted).toEqual([
+      { room: 'channel:ch-1', event: 'webhook:messages_detached', payload: { channelId: 'ch-1', webhookId: 'wh-1' } },
+      { room: 'channel:ch-old', event: 'webhook:messages_detached', payload: { channelId: 'ch-old', webhookId: 'wh-1' } },
+    ]);
+  });
+
+  it('a transaction failing for good: the committed batches are announced, then the error surfaces', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ channel_id: 'ch-1' }]).mockResolvedValueOnce([]);
+    txMock.webhook.delete.mockRejectedValue(new Error('deadlock'));
+
+    await expect(deleteWebhookWithPurge('wh-1', false)).rejects.toThrow('deadlock');
+
+    expect(h.emitted).toEqual([
+      { room: 'channel:ch-1', event: 'webhook:messages_detached', payload: { channelId: 'ch-1', webhookId: 'wh-1' } },
+    ]);
+  });
+
+  it('a webhook that posted nowhere announces nothing on any path', async () => {
+    txMock.$queryRaw.mockResolvedValue([]);
+    await expect(deleteWebhookWithPurge('wh-1', false)).resolves.toBeNull();
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('in-flight rows the batches missed (read under the lock) are announced with the committed delete', async () => {
+    txMock.message.groupBy.mockResolvedValue([{ channelId: 'ch-9' }, { channelId: null }]);
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ channel_id: 'ch-1' }]).mockResolvedValueOnce([]);
+
+    const result = await deleteWebhookWithPurge('wh-1', false);
+
+    expect(result!.detachedChannelIds).toEqual(['ch-1', 'ch-9']);
+  });
+});
+
 describe('disarmWebhooksHeldBy — a platform ban stops the URLs the account holds', () => {
   const HELD = { OR: [{ lastRotatedById: 'u-1' }, { lastRotatedAt: null, createdById: 'u-1' }] };
 
@@ -660,12 +714,49 @@ describe('disarmWebhooksHeldBy — a platform ban stops the URLs the account hol
 describe('emitWebhookDeletion', () => {
   const base: WebhookDeletion = {
     webhookId: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic',
-    deletedMessages: 0, perChannel: [],
+    deletedMessages: 0, perChannel: [], detachedChannelIds: [],
   };
 
-  it('without purge: only the server-wide refetch hint', () => {
+  it('without purge and a webhook that posted nowhere: only the server-wide refetch hint', () => {
     emitWebhookDeletion(base, false);
     expect(h.emitted).toEqual([{ room: 'server:srv-1', event: 'webhook:changed', payload: { serverId: 'srv-1' } }]);
+  });
+
+  it('without purge: one detached notice per channel, each to its own room, then the hint LAST', () => {
+    emitWebhookDeletion({ ...base, detachedChannelIds: ['ch-1', 'ch-old'] }, false);
+    expect(h.emitted).toEqual([
+      { room: 'channel:ch-1', event: 'webhook:messages_detached', payload: { channelId: 'ch-1', webhookId: 'wh-1' } },
+      { room: 'channel:ch-old', event: 'webhook:messages_detached', payload: { channelId: 'ch-old', webhookId: 'wh-1' } },
+      { room: 'server:srv-1', event: 'webhook:changed', payload: { serverId: 'srv-1' } },
+    ]);
+  });
+
+  it('without purge: no channel id ever reaches the server room, and the hint still carries the server id alone', () => {
+    emitWebhookDeletion({ ...base, detachedChannelIds: ['ch-staff'] }, false);
+    for (const e of h.emitted.filter((x) => x.room.startsWith('server:'))) {
+      expect(e.payload).toEqual({ serverId: 'srv-1' });
+    }
+    expect(h.emitted.filter((x) => x.event === 'webhook:messages_detached').every((x) => x.room.startsWith('channel:'))).toBe(true);
+  });
+
+  it('with purge: no detached notice (the receipts are the notice)', () => {
+    emitWebhookDeletion({ ...base, detachedChannelIds: ['ch-1'], perChannel: [{ channelId: 'ch-1', count: 1 }] }, true);
+    expect(h.emitted.map((e) => e.event)).toEqual(['message:bulk_deleted', 'webhook:changed']);
+  });
+
+  it('a notice that cannot be sent is logged by message, the other channels still get theirs, the hint still goes, nothing throws', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      vi.mocked(getIO).mockImplementationOnce(() => { throw new Error('Socket.IO not initialized'); });
+      expect(() => emitWebhookDeletion({ ...base, detachedChannelIds: ['ch-1', 'ch-2'] }, false)).not.toThrow();
+      expect(error).toHaveBeenCalledWith(
+        '[Webhooks] The notice that the messages of deleted webhook wh-1 were detached was not sent to channel ch-1:',
+        'Socket.IO not initialized',
+      );
+      expect(h.emitted.map((e) => e.room)).toEqual(['channel:ch-2', 'server:srv-1']);
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it('with purge: one receipt per channel, each to its own room, then the hint LAST', () => {

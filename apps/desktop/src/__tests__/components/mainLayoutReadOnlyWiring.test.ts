@@ -50,7 +50,7 @@ describe('MainLayout and read-only conversations', () => {
 
   it('a pushed row of a conversation the list then holds read-only is dropped before any preview, count, sound or notification', () => {
     const body = handlerBody('dmMessageNew');
-    const fetch = body.indexOf('await dmStore.fetchConversations();');
+    const fetch = body.indexOf('await dmStore.fetchConversationsFor(message.conversationId);');
     const drop = body.indexOf('if (standsAsDeletedNow(message)) return;');
     expect(fetch).toBeGreaterThan(-1);
     // after the fetch that may say so, and after the session check that follows it

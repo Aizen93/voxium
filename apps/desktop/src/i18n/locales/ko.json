@@ -876,6 +876,11 @@
     "conversationStart": "다이렉트 메시지 기록의 시작입니다.",
     "welcomeMessage": "사이드바에서 대화를 선택하거나, 어느 스페이스에서든 멤버를 클릭하여 새 대화를 시작하세요.",
     "failedToLoadConversations": "대화를 불러오지 못했습니다",
+    "list": {
+      "loadMore": "대화 더 불러오기",
+      "loadMoreFailed": "대화를 더 불러오지 못했습니다.",
+      "loadMoreRetry": "다시 시도"
+    },
     "remove": {
       "action": "대화 삭제",
       "actionWith": "{{name}}님과의 대화 삭제",

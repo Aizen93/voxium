@@ -6,6 +6,7 @@ import {
   sampleExpiredLegacyRedemptions, deleteExpiredLegacyRedemptions,
   SWEEP_BATCH_SIZE,
 } from './sessionStore';
+import { describeCaughtError } from './loggableError';
 
 // Retention of the sign-in sessions (services/sessionService.ts), never their
 // authority: every refusal is decided by the renewal itself, on the
@@ -143,7 +144,7 @@ export async function runSessionSweep(): Promise<SessionSweepResult | null> {
     }
     return result;
   } catch (err) {
-    console.error('[Sessions] Session sweep failed:', err instanceof Error ? err.message : err);
+    console.error('[Sessions] Session sweep failed:', describeCaughtError(err));
     return null;
   } finally {
     scheduleNext(nextDelay);

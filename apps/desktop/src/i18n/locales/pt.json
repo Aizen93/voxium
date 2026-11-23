@@ -878,6 +878,11 @@
     "conversationStart": "Este é o início do seu histórico de mensagens diretas.",
     "welcomeMessage": "Selecione uma conversa na barra lateral ou clique em um membro de qualquer espaço para iniciar uma nova.",
     "failedToLoadConversations": "Não foi possível carregar as conversas",
+    "list": {
+      "loadMore": "Carregar mais conversas",
+      "loadMoreFailed": "Não foi possível carregar mais conversas.",
+      "loadMoreRetry": "Tentar novamente"
+    },
     "remove": {
       "action": "Remover conversa",
       "actionWith": "Remover a conversa com {{name}}",

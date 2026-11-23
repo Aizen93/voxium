@@ -14,6 +14,7 @@ import { extractMentionIds, resolveMentionsForServer, batchResolveMentions, atta
 import { hasChannelPermission } from '../utils/permissionCalculator';
 import { shapeMessageRow, isWebhookRow } from '../utils/messageAuthor';
 import { authorSelect, attachmentSelect, replyToSelect } from '../utils/messageSelect';
+import { describeStoreError } from '../utils/loggableError';
 
 export const messageRouter = Router({ mergeParams: true });
 
@@ -552,7 +553,7 @@ messageRouter.delete('/:messageId', rateLimitInteract, async (req: Request<{ cha
 
     // Fire-and-forget S3 cleanup
     if (message.attachments.length > 0) {
-      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete attachments on message delete:', err));
+      deleteMultipleFromS3(message.attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete attachments on message delete:', describeStoreError(err)));
     }
 
     getIO().to(`channel:${message.channelId!}`).emit('message:delete', {

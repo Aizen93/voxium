@@ -1329,14 +1329,14 @@ describe('Channel Routes', () => {
 
       it('a storage failure is logged and the delete still answers 200', async () => {
         prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
-        mockDeleteMultipleFromS3.mockRejectedValueOnce(new Error('S3 unavailable'));
+        mockDeleteMultipleFromS3.mockRejectedValueOnce(Object.assign(new Error('S3 unavailable'), { name: 'ServiceUnavailable', $metadata: { httpStatusCode: 503 } }));
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         try {
           const res = await deleteChannel();
 
           expect(res.status).toBe(200);
           await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
-            '[Channels] Attachment file cleanup failed for channel ch-1 (the orphan sweep will reclaim them):', 'S3 unavailable'));
+            '[Channels] Attachment file cleanup failed for channel ch-1 (the orphan sweep will reclaim them):', 'ServiceUnavailable, HTTP 503'));
         } finally {
           warn.mockRestore();
         }

@@ -196,6 +196,15 @@ export const DM_SIGNAL_MAX = 65_536;
  */
 export const DM_CLEARED_LIST_MAX = 200;
 
+/**
+ * The conversation list's pages (`GET /dm?limit=&cursor=`): a row carries the
+ * other participant and the newest message's preview, so a page is 50 rows by
+ * default (more than a list shows at once) and 100 at most. A request with
+ * neither parameter is the legacy list (one answer of at most 200 rows).
+ */
+export const DM_LIST_PAGE_DEFAULT = 50;
+export const DM_LIST_PAGE_MAX = 100;
+
 // ─── Screen-share annotations (sharer-drawn overlays, session-only) ──────────
 // Serialized-length caps use UTF-16 char counts (JSON.stringify().length),
 // matching the DM_SIGNAL_MAX convention. All must stay well under the 1MB
@@ -636,6 +645,9 @@ export const WS_EVENTS = {
   // a webhook's messages were purged from one channel in one statement.
   WEBHOOK_CHANGED: 'webhook:changed',
   MESSAGE_BULK_DELETED: 'message:bulk_deleted',
+  // A webhook was deleted WITHOUT purge: its rows in one channel now read as a
+  // deleted webhook's (sent to that channel's room, never the space room).
+  WEBHOOK_MESSAGES_DETACHED: 'webhook:messages_detached',
 } as const;
 
 export const THEME_COLOR_KEYS = [

@@ -1,5 +1,6 @@
 import type { AnnotationScene } from '@voxium/shared';
 import { getRedis } from './redis';
+import { describeCaughtError, describeCaughtErrorWithStack } from './loggableError';
 
 /**
  * Authoritative screen-share annotation scene, Redis-only. There is no owner
@@ -39,14 +40,14 @@ export async function getAnnotationState(channelId: string): Promise<StoredAnnot
     }
     return parsed;
   } catch (err) {
-    console.warn('[Annotations] Corrupt scene state dropped:', err instanceof Error ? err.message : err);
+    console.warn('[Annotations] Corrupt scene state dropped:', describeCaughtError(err));
     return null;
   }
 }
 
 /** Fire-and-forget delete (mirrorScreenShare style). */
 export function deleteAnnotationState(channelId: string): void {
-  getRedis().del(annotationKey(channelId)).catch((err) => console.warn('[Annotations] State delete failed:', err));
+  getRedis().del(annotationKey(channelId)).catch((err) => console.warn('[Annotations] State delete failed:', describeCaughtErrorWithStack(err)));
 }
 
 /**
@@ -63,7 +64,7 @@ export function initAnnotationState(channelId: string, sharerUserId: string): vo
   const seed: StoredAnnotationState = { rev: 0, sharerUserId, scene: { objects: [] } };
   getRedis()
     .set(annotationKey(channelId), JSON.stringify(seed), { EX: ANNOTATION_STATE_TTL_SECONDS })
-    .catch((err) => console.warn('[Annotations] State init failed:', err));
+    .catch((err) => console.warn('[Annotations] State init failed:', describeCaughtErrorWithStack(err)));
 }
 
 /**

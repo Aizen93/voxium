@@ -31,6 +31,7 @@ import { getTierThresholds, tierOf, nextTierFor } from '../utils/discoveryTiers'
 import { joinServerMember } from '../utils/serverJoin';
 import { serverSelect } from '../utils/serverSelect';
 import { emitToModerators } from '../utils/moderatorAudience';
+import { describeStoreError } from '../utils/loggableError';
 
 export const serverRouter = Router();
 
@@ -651,14 +652,14 @@ serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ se
       // The space never stored the adopted copy: nothing else will reference it
       if (adoptedIconKey) {
         const key = adoptedIconKey;
-        deleteFromS3(key).catch((delErr) => console.warn(`[S3] Failed to delete unreferenced icon copy ${key}:`, delErr instanceof Error ? delErr.message : delErr));
+        deleteFromS3(key).catch((delErr) => console.warn(`[S3] Failed to delete unreferenced icon copy ${key}:`, describeStoreError(delErr)));
       }
       throw err;
     }
 
     // Delete old icon from S3 after DB update confirmed
     if (updateData.iconUrl !== undefined && oldIconUrl && oldIconUrl !== updateData.iconUrl) {
-      deleteFromS3(oldIconUrl).catch((err) => console.warn('[S3] Failed to delete old asset:', err));
+      deleteFromS3(oldIconUrl).catch((err) => console.warn('[S3] Failed to delete old asset:', describeStoreError(err)));
     }
 
     // The name and the icon are on the Explore card (never throws)

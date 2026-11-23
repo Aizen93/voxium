@@ -3,6 +3,7 @@ import { getRedis } from './redis';
 import { bumpDiscoveryPageCache } from './discoveryPageCache';
 import { DISCOVERY_TIERS, DISCOVERY_TIER_TOP_FRACTION, DISCOVERY_TIER_MIN_POPULATION } from '@voxium/shared';
 import type { DiscoveryTier, DiscoveryTierThresholds } from '@voxium/shared';
+import { describeCaughtError } from './loggableError';
 
 // Activity badges (Bronze … Diamond) from the SAME score the Active sort uses
 // and nothing else: a badge is a RANK among the listed spaces that have any
@@ -71,7 +72,7 @@ export async function getTierThresholds(): Promise<DiscoveryTierThresholds | nul
     const parsed: unknown = JSON.parse(raw);
     return isThresholds(parsed) ? parsed : null;
   } catch (err) {
-    console.warn('[Discovery] Tier thresholds unavailable (no badges this request):', err instanceof Error ? err.message : err);
+    console.warn('[Discovery] Tier thresholds unavailable (no badges this request):', describeCaughtError(err));
     return null;
   }
 }

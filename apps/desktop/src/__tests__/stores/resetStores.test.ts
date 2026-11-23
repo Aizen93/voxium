@@ -96,6 +96,7 @@ import { arrivalMark, hasDueRows, noteSessionsAvailable, noteUndecrypted, syncWi
 import { registerE2ESessionUser } from '../../services/e2e/session';
 import { clearedFloorOf, isAtOrBelowClearedFloor } from '../../services/e2e/clearedFloors';
 import { applyClearedFloor, clearedHistoryPurgesSettled } from '../../services/dmClearedHistory';
+import { handleMessageBulkDeleted, isPurgedWebhookMessage, UNREAD_REFRESH_DEBOUNCE_MS } from '../../services/webhookSocketHandlers';
 import type { Server, ServerMember, Conversation, Friendship, Message } from '@voxium/shared';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -313,6 +314,40 @@ describe('resetAccountStores (HIGH-14b)', () => {
     expect(useChatStore.getState().addMessage(row('m-deleted'), ch)).toBe('added');
     expect(useChatStore.getState().addMessage(row('m-edited'), ch)).toBe('added');
     expect(useChatStore.getState().messages.find((m) => m.id === 'm-edited')?.content).toBe('m-edited');
+  });
+
+  it('forgets the webhooks it remembered as purged and the unread refresh still waiting', () => {
+    vi.useFakeTimers();
+    try {
+      const getMock = api.get as unknown as { mockClear: () => void; mock: { calls: unknown[][] } };
+      useServerStore.setState({ unreadCounts: { 'ch-1': 3 }, unreadChannelServers: { 'ch-1': 'srv-1' } });
+      handleMessageBulkDeleted({ channelId: 'ch-1', webhookId: 'wh-1', count: 2 }, () => false);
+      expect(isPurgedWebhookMessage({ webhookId: 'wh-1' })).toBe(true);
+      getMock.mockClear();
+
+      resetAccountStores();
+      vi.advanceTimersByTime(UNREAD_REFRESH_DEBOUNCE_MS * 2);
+
+      expect(isPurgedWebhookMessage({ webhookId: 'wh-1' })).toBe(false);
+      expect(getMock.mock.calls.filter((c) => String(c[0]).endsWith('/channels/unread'))).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an unread answer asked for before the logout applies nothing', async () => {
+    let resolve!: (v: unknown) => void;
+    useServerStore.setState({ unreadCounts: { 'ch-1': 3 }, serverUnreadCounts: { 'srv-1': 3 }, unreadChannelServers: { 'ch-1': 'srv-1' } });
+    (api.get as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    const run = useServerStore.getState().refreshChannelUnread(['ch-1']);
+
+    resetAccountStores();
+    // the next account has a count for the same channel id
+    useServerStore.setState({ unreadCounts: { 'ch-1': 8 }, serverUnreadCounts: { 'srv-1': 8 }, unreadChannelServers: { 'ch-1': 'srv-1' } });
+    resolve({ data: { data: [{ channelId: 'ch-1', serverId: 'srv-1', count: 1 }] } });
+    await run;
+
+    expect(useServerStore.getState().unreadCounts['ch-1']).toBe(8);
   });
 
   it('a chat page in flight at logout lands for nobody, the next account opening the same channel included', async () => {

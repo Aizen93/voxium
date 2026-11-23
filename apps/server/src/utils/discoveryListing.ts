@@ -1,5 +1,6 @@
 import { prisma } from './prisma';
 import { bumpDiscoveryPageCache } from './discoveryPageCache';
+import { describeCaughtError } from './loggableError';
 
 /**
  * The four inputs of `Server.discoveryListed`, the materialised column the
@@ -26,7 +27,7 @@ export function isDiscoveryListed(inputs: DiscoveryListingInputs): boolean {
 }
 
 function logFailure(what: string, err: unknown): void {
-  console.error(`[Discovery] ${what} — the nightly pass will correct the listing column:`, err instanceof Error ? err.message : err);
+  console.error(`[Discovery] ${what} — the nightly pass will correct the listing column:`, describeCaughtError(err));
 }
 
 /**

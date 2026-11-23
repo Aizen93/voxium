@@ -50,7 +50,7 @@ describe('MainLayout and a removed conversation', () => {
     const body = handlerBody('dmMessageNew');
     const gate = body.indexOf('message = shown;');
     const forget = body.indexOf('dmStore.forgetRemoval(message.conversationId);');
-    const fetch = body.indexOf('await dmStore.fetchConversations();');
+    const fetch = body.indexOf('await dmStore.fetchConversationsFor(message.conversationId);');
     expect(gate).toBeGreaterThan(-1);
     expect(forget).toBeGreaterThan(gate);
     expect(fetch).toBeGreaterThan(forget);

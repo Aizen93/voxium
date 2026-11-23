@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { AppError, TooManyRequestsError } from '../utils/errors';
 import { redactedPath } from '../utils/redactUrl';
-import { describeEmailError } from '../utils/email';
+import { loggableError } from '../utils/loggableError';
 
 /**
  * The client-error shape body-parser (via http-errors) throws: a numeric
@@ -40,75 +40,6 @@ const EXPOSED_ERROR_MESSAGES = new Map<string, string>([
   ['encoding.unsupported', 'Unsupported request encoding'],
 ]);
 
-interface LoggableError {
-  name: string | undefined;
-  code: string | undefined;
-  message: string;
-  stack: string | undefined;
-}
-
-/**
- * Prisma errors whose message (and so the first lines of the stack) prints
- * the call: its arguments verbatim, `where` values, `data` values (a password
- * hash, an e-mail address) and the source lines around the call. A panic's
- * message comes from a renderer nobody here has traced, so it is treated the
- * same way: name only, never its text.
- */
-const PRISMA_ARGUMENT_ERRORS = new Set([
-  'PrismaClientValidationError',
-  'PrismaClientKnownRequestError',
-  'PrismaClientUnknownRequestError',
-  'PrismaClientRustPanicError',
-]);
-
-/**
- * A Prisma error described without its arguments: the operation from the
- * message's first line (`Invalid \`prisma.user.update()\` invocation`, only
- * identifier characters kept) and the model Prisma names in `meta.modelName`.
- */
-function describePrismaError(message: unknown, meta: unknown): string {
-  const call = typeof message === 'string' ? /Invalid `[\w$]+\.([\w$.]+)\(\)` invocation/.exec(message)?.[1] : undefined;
-  const modelName = typeof meta === 'object' && meta !== null && typeof (meta as { modelName?: unknown }).modelName === 'string'
-    ? (meta as { modelName: string }).modelName
-    : undefined;
-  const parts = [
-    call ? `${call}()` : undefined,
-    modelName && /^\w+$/.test(modelName) ? `model ${modelName}` : undefined,
-  ].filter(Boolean);
-  return parts.length > 0 ? `${parts.join(', ')} failed (arguments not logged)` : 'Prisma query failed (arguments not logged)';
-}
-
-/**
- * The strings an unexpected error is logged with, read without touching
- * anything else on it: its name, a string `code` (ECONNREFUSED, P2025…), its
- * message and its stack. An SMTP error (nodemailer sets `command` or
- * `responseCode`) quotes the server's reply in its message, and a refused
- * recipient's reply names the address (`550 … <addr>`): it is described by
- * describeEmailError (its codes) instead, and its stack keeps only the frames,
- * whose first line would repeat that message. A Prisma validation or request
- * error prints the call's arguments in both: it is described by its name,
- * code, operation and model (describePrismaError), with the frames only.
- */
-function loggableError(err: unknown): LoggableError {
-  const fields = typeof err === 'object' && err !== null
-    ? err as { name?: unknown; code?: unknown; message?: unknown; stack?: unknown; command?: unknown; responseCode?: unknown; meta?: unknown }
-    : {};
-  const name = typeof fields.name === 'string' ? fields.name : undefined;
-  const code = typeof fields.code === 'string' ? fields.code : undefined;
-  const stack = typeof fields.stack === 'string' ? fields.stack : undefined;
-  const framesOnly = stack?.split('\n').filter((line) => /^\s+at \S/.test(line)).join('\n');
-  if (fields.command !== undefined || fields.responseCode !== undefined) {
-    return { name, code, message: describeEmailError(err), stack: framesOnly };
-  }
-  if (name !== undefined && PRISMA_ARGUMENT_ERRORS.has(name)) {
-    return { name, code, message: describePrismaError(fields.message, fields.meta), stack: framesOnly };
-  }
-  const message = typeof fields.message === 'string'
-    ? fields.message
-    : typeof err === 'string' ? err : `Non-error value thrown (${err === null ? 'null' : typeof err})`;
-  return { name, code, message, stack };
-}
-
 export function errorHandler(err: Error, req: Request, res: Response, _next: NextFunction) {
   if (err instanceof AppError) {
     // A limiter's refusal thrown from a service: the same shape as the middleware's
@@ -126,7 +57,8 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
     const message = (typeof err.type === 'string' && EXPOSED_ERROR_MESSAGES.get(err.type)) || 'Invalid request';
     // Path redacted (a webhook token or invite code is a credential in the
     // URL), query dropped; never the body
-    console.warn('[HTTP] Rejected request', { method: req.method, path: redactedPath(req.originalUrl ?? req.url), status: err.status });
+    const { status } = err;
+    console.warn('[HTTP] Rejected request', { method: req.method, path: redactedPath(req.originalUrl ?? req.url), status });
     return res.status(err.status).json({
       success: false,
       error: message,

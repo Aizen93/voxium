@@ -40,7 +40,7 @@ import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { SharePreflightModal } from '../voice/SharePreflightModal';
 import { discoverySocketHandlers } from '../../services/discoverySocketHandlers';
-import { handleMessageBulkDeleted } from '../../services/webhookSocketHandlers';
+import { handleMessageBulkDeleted, handleWebhookMessagesDetached, isPurgedWebhookMessage, withDetachedWebhookLabel } from '../../services/webhookSocketHandlers';
 import { handleAppResume } from '../../services/resume';
 import { isSecureChannelMessage as isSecureChannelMessageIn } from '../../utils/secureChannelGate';
 import { handleConversationReadOnly, standsAsDeletedNow } from '../../services/dmReadOnly';
@@ -193,6 +193,11 @@ export function MainLayout() {
     // Store function references so cleanup actually works
     const handlers = {
       messageNew: async (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
+        // A delivery that committed just before its webhook's purge: gone
+        if (isPurgedWebhookMessage(message)) return;
+        // One from a webhook deleted without purge a moment ago is served as a
+        // deleted webhook's row at the next fetch: the same shape now
+        message = withDetachedWebhookLabel(message);
         const view = viewNow();
         const scope = channelView(message.channelId);
         if (message.channelId && isSecureChannelMessage(message)) {
@@ -459,7 +464,7 @@ export function MainLayout() {
             // a new message in a conversation this account removed brings it
             // back: an earlier removal no longer keeps a list from showing it
             dmStore.forgetRemoval(message.conversationId);
-            await dmStore.fetchConversations();
+            await dmStore.fetchConversationsFor(message.conversationId);
             // another await: the session may have ended during it too
             if (signedInUser() !== session) return;
             // the list may hold it read-only (the other side's account was
@@ -788,6 +793,8 @@ export function MainLayout() {
       // A webhook deleted with purge (services/webhookSocketHandlers.ts):
       // acts only on the channel on screen, validates its payload
       ['message:bulk_deleted', (data: unknown) => handleMessageBulkDeleted(data, isViewingChannel)],
+      // A webhook deleted without purge: its loaded rows read as a deleted webhook's
+      ['webhook:messages_detached', handleWebhookMessagesDetached],
       ['typing:start', handlers.typingStart],
       ['typing:stop', handlers.typingStop],
       ['presence:update', handlers.presenceUpdate],

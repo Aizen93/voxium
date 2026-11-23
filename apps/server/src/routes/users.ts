@@ -8,6 +8,7 @@ import { sanitizeText, sanitizeLabel } from '../utils/sanitize';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { adoptImageAssetUpload } from '../utils/uploadVerification';
 import { rateLimitProfileUpdate } from '../middleware/rateLimiter';
+import { describeStoreError } from '../utils/loggableError';
 
 export const userRouter = Router();
 
@@ -128,14 +129,14 @@ userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res
       // The profile never stored the adopted copy: nothing else will reference it
       if (adoptedAvatarKey) {
         const key = adoptedAvatarKey;
-        deleteFromS3(key).catch((delErr) => console.warn(`[S3] Failed to delete unreferenced avatar copy ${key}:`, delErr instanceof Error ? delErr.message : delErr));
+        deleteFromS3(key).catch((delErr) => console.warn(`[S3] Failed to delete unreferenced avatar copy ${key}:`, describeStoreError(delErr)));
       }
       throw err;
     }
 
     // Delete old avatar from S3 after DB update confirmed
     if (avatarUrl !== undefined && oldAvatarUrl && oldAvatarUrl !== avatarUrl) {
-      deleteFromS3(oldAvatarUrl).catch((err) => console.warn('[S3] Failed to delete old avatar:', err));
+      deleteFromS3(oldAvatarUrl).catch((err) => console.warn('[S3] Failed to delete old avatar:', describeStoreError(err)));
     }
 
     // Broadcast profile change to all servers the user is in

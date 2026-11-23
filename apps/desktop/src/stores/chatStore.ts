@@ -331,6 +331,14 @@ interface ChatState {
    * a webhook deleted with purge), when the view is of that channel.
    */
   removeWebhookMessages: (channelId: string, webhookId: string) => void;
+  /**
+   * Re-labels every loaded row a webhook posted in a channel as a deleted
+   * webhook's (`webhook:messages_detached`, a webhook deleted without purge:
+   * the server keeps the rows and now shapes them `webhook:deleted`), when
+   * the view is of that channel. Nothing for another scope or none recorded:
+   * that view's next fetch brings the server's truth.
+   */
+  markWebhookDeleted: (channelId: string, webhookId: string) => void;
   clearMessages: () => void;
   clearTargetMessage: () => void;
   setTypingUser: (userId: string, username: string) => void;
@@ -802,6 +810,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? { ...m, replyTo: null, replyToId: null }
           : m)),
     }));
+  },
+
+  markWebhookDeleted: (channelId: string, webhookId: string) => {
+    if (!isViewOf(channelView(channelId))) return;
+    const liveId = WEBHOOK_AUTHOR_ID_PREFIX + webhookId;
+    const deletedId = WEBHOOK_AUTHOR_ID_PREFIX + 'deleted';
+    const relabelled = (author: MessageAuthor): MessageAuthor => ({ ...author, id: deletedId });
+    set((state) => {
+      let changed = false;
+      const messages = state.messages.map((m) => {
+        const own = m.channelId === channelId && m.webhookId === webhookId;
+        // A reply quoting one of those rows: the server's quote shape reads
+        // `webhook:deleted` too (a reply lives in its parent's channel)
+        const quotes = m.channelId === channelId && m.replyTo?.author.id === liveId;
+        if (!own && !quotes) return m;
+        changed = true;
+        return {
+          ...m,
+          ...(own ? { webhookId: null, author: relabelled(m.author) } : {}),
+          ...(quotes && m.replyTo ? { replyTo: { ...m.replyTo, author: relabelled(m.replyTo.author) } } : {}),
+        };
+      });
+      // untouched rows keep their identity, and so does the list when nothing matched
+      return changed ? { messages } : state;
+    });
   },
 
   clearMessages: () => {

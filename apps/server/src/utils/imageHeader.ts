@@ -1,3 +1,4 @@
+import { describeCaughtError } from './loggableError';
 /**
  * Header-only image dimension extraction for PNG / JPEG / WebP buffers.
  *
@@ -88,7 +89,7 @@ export function imageDimensions(buf: Buffer): ImageDimensions | null {
     }
     return null;
   } catch (err) {
-    console.warn('[ImageHeader] Dimension parse failed:', err instanceof Error ? err.message : err);
+    console.warn('[ImageHeader] Dimension parse failed:', describeCaughtError(err));
     return null;
   }
 }

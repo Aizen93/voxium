@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
-import { validateChannelName, WS_EVENTS, Permissions, permissionsFromString, hasPermission, DEFAULT_EVERYONE_PERMISSIONS, type AttachmentTarget, type Channel } from '@voxium/shared';
+import { validateChannelName, WS_EVENTS, Permissions, permissionsFromString, hasPermission, DEFAULT_EVERYONE_PERMISSIONS, type AttachmentTarget, type Channel, type UnreadCount } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { rateLimitCategoryManage, rateLimitMarkRead, rateLimitMemberRead } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
@@ -15,6 +15,7 @@ import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmen
 import { isSortPosition, MAX_SORT_POSITION, positionAfter } from '../utils/sortPosition';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { visibilityRequestMark, resyncRequestedSince, recheckVisibilityAfterJoin } from '../utils/channelVisibilityRooms';
+import { describeCaughtError } from '../utils/loggableError';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -26,7 +27,7 @@ const ROOM_FANOUT_BATCH = 500;
 
 /** A step after a channel's row delete committed failed: logged, never thrown. */
 function logChannelDeleteFanOutFailure(channelId: string, step: string, err: unknown): void {
-  console.error(`[Channels] Channel ${channelId} deleted, but ${step} failed:`, err instanceof Error ? err.message : err);
+  console.error(`[Channels] Channel ${channelId} deleted, but ${step} failed:`, describeCaughtError(err));
 }
 
 /**
@@ -285,6 +286,56 @@ channelRouter.get('/attachment-targets', rateLimitMemberRead, async (req: Reques
       )
       : [];
     const data: AttachmentTarget[] = allowed.map((c) => ({ id: c.id, name: c.name, categoryId: c.categoryId, position: c.position }));
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The caller's unread counts for the visible text channels of ONE space: what
+// unread:init computes at connect (same cap of 100 per channel, same
+// author_id IS DISTINCT FROM so a webhook-posted row counts), asked again by a
+// client whose counts a purge made stale. One statement for the whole space,
+// never one per channel. Channels with nothing unread are left out. Registered
+// before every /:channelId route, none of which is a GET; the read bucket is
+// the `memberRead` one the neighbouring reads share.
+channelRouter.get('/unread', rateLimitMemberRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const userId = req.user!.userId;
+
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId, serverId } },
+    });
+    if (!membership) throw new ForbiddenError('Not a member of this server');
+
+    const channels = await prisma.channel.findMany({
+      where: { serverId, type: 'text' },
+      // `secure` MUST be selected for the filter (it fails open without it)
+      select: { id: true, name: true, categoryId: true, position: true, type: true, secure: true },
+    });
+    const visible = channels.length > 0 ? await filterVisibleChannels(userId, serverId, channels) : [];
+    if (visible.length === 0) {
+      res.json({ success: true, data: [] as UnreadCount[] });
+      return;
+    }
+
+    const rows = await prisma.$queryRaw<Array<{ channel_id: string; cnt: number }>>`
+      SELECT c.id AS channel_id, cnt.val AS cnt
+      FROM channels c
+      LEFT JOIN channel_reads cr ON cr.channel_id = c.id AND cr.user_id = ${userId}
+      CROSS JOIN LATERAL (
+        SELECT COUNT(*)::int AS val FROM (
+          SELECT 1 FROM messages m
+          WHERE m.channel_id = c.id
+            AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
+            AND m.author_id IS DISTINCT FROM ${userId}
+          LIMIT 100
+        ) sub
+      ) cnt
+      WHERE c.id = ANY(${visible.map((c) => c.id)}::text[])
+        AND cnt.val > 0`;
+    const data: UnreadCount[] = rows.map((r) => ({ channelId: r.channel_id, serverId, count: r.cnt }));
     res.json({ success: true, data });
   } catch (err) {
     next(err);

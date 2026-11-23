@@ -26,6 +26,7 @@ import { listAllS3Objects, deleteMultipleFromS3, VALID_S3_KEY_RE, VALID_ATTACHME
 import { getRedis } from './redis';
 import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
 import { ORPHAN_GRACE_DAYS } from '@voxium/shared';
+import { describeCaughtError, describeCaughtErrorWithStack, storeCall } from './loggableError';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
@@ -107,7 +108,7 @@ function scheduleNext(afterRun: boolean) {
   console.log(`[OrphanSweep] Next sweep in ${Math.round(delay / 60000)} minutes`);
   timeoutId = setTimeout(() => {
     runScheduledOrphanCleanup()
-      .catch((err) => console.error('[OrphanSweep] Sweep failed:', err))
+      .catch((err) => console.error('[OrphanSweep] Sweep failed:', describeCaughtErrorWithStack(err)))
       .finally(() => scheduleNext(true));
   }, delay);
   timeoutId.unref?.();
@@ -124,7 +125,7 @@ export async function runScheduledOrphanCleanup(opts: { force?: boolean } = {}):
   } catch (err) {
     // Fail CLOSED: without the lock we cannot tell whether a peer is already
     // scanning, and a destructive sweep is not worth racing.
-    console.warn('[OrphanSweep] Could not claim the sweep lock — skipping this run:', err instanceof Error ? err.message : err);
+    console.warn('[OrphanSweep] Could not claim the sweep lock — skipping this run:', describeCaughtError(err));
     return { ...EMPTY, skipped: 'not-leader' };
   }
   if (claimed === null) return { ...EMPTY, skipped: 'not-leader' };
@@ -138,7 +139,7 @@ export async function runScheduledOrphanCleanup(opts: { force?: boolean } = {}):
     // TTL, and a blind DEL would then hand the next runner's lock away while it
     // is mid-scan.
     await releaseLockIfOwned(getRedis(), LOCK_KEY, owner).catch((err) =>
-      console.warn('[OrphanSweep] Lock release failed (it expires on its own):', err instanceof Error ? err.message : err));
+      console.warn('[OrphanSweep] Lock release failed (it expires on its own):', describeCaughtError(err)));
   }
 }
 
@@ -157,7 +158,7 @@ export async function runOrphanCleanup(
 
   // LIST first — anything written while this runs is caught by the DB reads
   // that follow, so it can never be classified as an orphan.
-  const objects = await listAllS3Objects();
+  const objects = await storeCall(() => listAllS3Objects());
   const referenced = await referencedKeys();
 
   let tooYoung = 0;
@@ -212,7 +213,7 @@ export async function runOrphanCleanup(
     // return value is what S3 ACCEPTED: reporting the candidate count instead
     // would log deleted=5000 every night while a missing s3:DeleteObject
     // permission quietly moved nothing.
-    deleted = await deleteMultipleFromS3(orphanKeys);
+    deleted = await storeCall(() => deleteMultipleFromS3(orphanKeys));
   }
 
   const result: OrphanSweepResult = {
