@@ -4,7 +4,7 @@ import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead, rateLimitDm
 import { prisma } from '../utils/prisma';
 import type { Prisma } from '../generated/prisma/client';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam, prismaErrorCode, violatesForeignKey } from '../utils/errors';
-import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, DM_CLEARED_LIST_MAX, CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
+import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, DM_CLEARED_LIST_MAX, DM_LIST_PAGE_DEFAULT, DM_LIST_PAGE_MAX, CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
@@ -30,6 +30,7 @@ import {
   writeConversationMessage,
 } from '../utils/conversationLifecycle';
 import { describeCaughtError, describeStoreError } from '../utils/loggableError';
+import { encodeDmListCursor, decodeDmListCursor } from '../utils/dmListCursor';
 
 /**
  * The early refusal of a write in a conversation whose other side's account
@@ -116,14 +117,43 @@ function sortUserIds(a: string, b: string): [string, string] {
 
 // ─── List conversations ──────────────────────────────────────────────────────
 
+/**
+ * `?limit=`: a whole number of 1 or more (above DM_LIST_PAGE_MAX it is the
+ * maximum). Anything else, an empty value included, is a 400.
+ */
+function parseDmListLimit(raw: unknown): number {
+  if (typeof raw !== 'string' || !/^\d{1,9}$/.test(raw)) throw new BadRequestError('limit must be a whole number of 1 or more');
+  const n = Number(raw);
+  if (n < 1) throw new BadRequestError('limit must be a whole number of 1 or more');
+  return Math.min(n, DM_LIST_PAGE_MAX);
+}
+
+// A request with neither `limit` nor `cursor` is the legacy list (what a 2.1.x
+// client reads: one answer of at most 200 rows, no `nextCursor`). Either
+// parameter enters the paged mode: a signed keyset cursor over (updatedAt, id)
+// (utils/dmListCursor.ts), `nextCursor` only when more rows exist, and the
+// `cleared` floors on the first page alone.
 dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
 
-    const [conversations, clearedReads] = await Promise.all([
+    const paged = req.query.limit !== undefined || req.query.cursor !== undefined;
+    const limit = paged && req.query.limit !== undefined ? parseDmListLimit(req.query.limit) : DM_LIST_PAGE_DEFAULT;
+    let after: { updatedAt: Date; id: string } | null = null;
+    if (req.query.cursor !== undefined) {
+      after = decodeDmListCursor(req.query.cursor, userId);
+      if (!after) throw new BadRequestError('Invalid cursor');
+    }
+
+    const [fetched, clearedReads] = await Promise.all([
       prisma.conversation.findMany({
         where: {
           OR: [{ user1Id: userId }, { user2Id: userId }],
+          // strictly after the last row of the previous page, in the order
+          // below (an explicit (key, id) predicate, never a Prisma cursor)
+          ...(after && {
+            AND: [{ OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { lt: after.id } }] }],
+          }),
           // removed by the caller: off their list until a message newer than
           // their floor or their own reopening brings it back
           reads: { none: { userId, hiddenAt: { not: null } } },
@@ -139,10 +169,12 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
           // the caller's floor, for the preview
           reads: { where: { userId }, select: { clearedAt: true } },
         },
-        orderBy: { updatedAt: 'desc' },
+        // id breaks ties: conversations touched in one statement share an
+        // updatedAt, and a page boundary inside a tie would skip or repeat rows
+        orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
         // Bounded: most-recently-active first. Each row costs a lastMessage
         // subquery — an unbounded list grows without limit over an account's life.
-        take: 200,
+        take: paged ? limit + 1 : 200,
       }),
       // The floors of the conversations the caller removed with their
       // history cleared, which the list above leaves out (hidden): every
@@ -152,12 +184,15 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
       // bounded. A conversation really deleted since has no read row left.
       // Every list answers them again, so a failure here never fails the
       // list: it is answered without them, and the next one teaches them.
-      prisma.conversationRead.findMany({
-        where: { userId, hiddenAt: { not: null }, clearedAt: { not: null } },
-        orderBy: { clearedAt: 'desc' },
-        take: DM_CLEARED_LIST_MAX,
-        select: { conversationId: true, clearedAt: true },
-      }).catch((err: unknown) => {
+      // Paged mode answers them on the first page only.
+      (after
+        ? Promise.resolve([] as Array<{ conversationId: string; clearedAt: Date | null }>)
+        : prisma.conversationRead.findMany({
+            where: { userId, hiddenAt: { not: null }, clearedAt: { not: null } },
+            orderBy: { clearedAt: 'desc' },
+            take: DM_CLEARED_LIST_MAX,
+            select: { conversationId: true, clearedAt: true },
+          })).catch((err: unknown) => {
         console.warn(
           '[DM] The conversation list is answered without the floors of removed conversations:',
           err instanceof Error ? err.name : typeof err,
@@ -166,6 +201,9 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
         return [] as Array<{ conversationId: string; clearedAt: Date | null }>;
       }),
     ]);
+    const hasMore = paged && fetched.length > limit;
+    const conversations = hasMore ? fetched.slice(0, limit) : fetched;
+    const lastRow = conversations[conversations.length - 1];
     const cleared = clearedReads.flatMap((r) =>
       r.clearedAt ? [{ conversationId: r.conversationId, clearedUntil: r.clearedAt.toISOString() }] : []);
 
@@ -198,6 +236,10 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
         // always set — conversations are born encrypted (plan §4.2)
         encryptedAt: c.encryptedAt.toISOString(),
         createdAt: c.createdAt.toISOString(),
+        // The list's own order key, paged mode only (the legacy body is
+        // unchanged): a client holding several pages compares it with the
+        // last row of a first page to tell what lies beyond that page
+        ...(paged && { updatedAt: c.updatedAt.toISOString() }),
         // the caller's floor (clearedFloorField): their device purges what
         // it cached up to it
         ...clearedFloorField(floor),
@@ -206,7 +248,12 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
 
     // `cleared` only when there is one: otherwise the body a 2.1.x client
     // reads today (it ignores the field either way)
-    res.json({ success: true, data, ...(cleared.length > 0 && { cleared }) });
+    res.json({
+      success: true,
+      data,
+      ...(cleared.length > 0 && { cleared }),
+      ...(hasMore && lastRow && { nextCursor: encodeDmListCursor(userId, lastRow) }),
+    });
   } catch (err) {
     next(err);
   }
@@ -314,6 +361,9 @@ dmRouter.post('/', rateLimitDmOpen, async (req: Request, res: Response, next: Ne
         lastMessage: null,
         encryptedAt: conversation.encryptedAt.toISOString(),
         createdAt: conversation.createdAt.toISOString(),
+        // the row's own list-order key (a reopen moves nothing on it), so a
+        // conversation opened here has a served place in a paged list
+        updatedAt: conversation.updatedAt.toISOString(),
         // reopened after a removal that cleared the caller's history
         ...clearedFloorField(floor),
       },

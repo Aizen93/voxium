@@ -446,6 +446,23 @@ describe('POST /dm — opening a conversation the caller removed', () => {
     expect(io.mockSocketsJoin).not.toHaveBeenCalled();
   });
 
+  it('the answer carries the row\'s own updatedAt, on the reopen path (nothing is written to move it) and on the create path', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ ...existing, updatedAt: new Date('2025-03-04T05:06:07.000Z') } as any);
+    const reopened = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+    expect(reopened.status).toBe(200);
+    expect(reopened.body.data.updatedAt).toBe('2025-03-04T05:06:07.000Z');
+    expect(prisma.conversation.update).not.toHaveBeenCalled();
+    expect(prisma.conversation.updateMany).not.toHaveBeenCalled();
+
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(null as any);
+    vi.mocked(prisma.conversation.create).mockResolvedValueOnce({ ...existing, id: 'conv-9', updatedAt: new Date('2026-01-02T03:04:05.000Z') } as any);
+    vi.mocked(prisma.conversationRead.createMany).mockResolvedValueOnce({ count: 2 } as any);
+    lifecycle.reopenConversationForUser.mockResolvedValueOnce('missing');
+    const created = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+    expect(created.status).toBe(201);
+    expect(created.body.data.updatedAt).toBe('2026-01-02T03:04:05.000Z');
+  });
+
   it('a new pair is created without a reopen', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(null);
     vi.mocked(prisma.conversation.create).mockResolvedValueOnce(existing as any);
@@ -475,7 +492,7 @@ describe('POST /dm — opening a conversation the caller removed', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.data.clearedUntil).toBe('2026-11-10T10:00:00.000Z');
-    expect(Object.keys(res.body.data)).toEqual(['id', 'user1Id', 'user2Id', 'participant', 'lastMessage', 'encryptedAt', 'createdAt', 'clearedUntil']);
+    expect(Object.keys(res.body.data)).toEqual(['id', 'user1Id', 'user2Id', 'participant', 'lastMessage', 'encryptedAt', 'createdAt', 'updatedAt', 'clearedUntil']);
   });
 
   it('no floor (no read row, or one that never cleared): no clearedUntil key at all', async () => {
