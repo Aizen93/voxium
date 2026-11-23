@@ -9,15 +9,37 @@ const TAURI_AVAILABLE = '__TAURI_INTERNALS__' in window;
 // It asks no server and there is nothing to update to: no dialog, an info line.
 const NO_FEED_ERROR = 'does not have any endpoints set';
 
+/** What a thrown value says: an Error's message, a string as it is (the plugin rejects with the text) */
+function describeError(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 function hasNoUpdateFeed(e: unknown): boolean {
-  return (e instanceof Error ? e.message : String(e)).includes(NO_FEED_ERROR);
+  return describeError(e).includes(NO_FEED_ERROR);
+}
+
+type FailureKey = 'updater.failed' | 'updater.failedNetwork';
+
+/**
+ * The sentence a person reads for a failed download or install. The plugin's
+ * text is Rust's own wording (English, with paths and addresses in it), so it
+ * only picks between a connection sentence, for transport failures named by
+ * narrow markers, and the generic one (a wrong specific claim is worse than a
+ * general one), and goes to the log.
+ */
+const NETWORK_MARKERS = /error sending request|operation timed out|request timed out|dns error|connection refused|connection reset|connection closed/;
+
+export function updateFailureKey(e: unknown): FailureKey {
+  const text = describeError(e).toLowerCase();
+  if (NETWORK_MARKERS.test(text)) return 'updater.failedNetwork';
+  return 'updater.failed';
 }
 
 type UpdatePhase =
   | { step: 'available'; version: string; doUpdate: () => void }
   | { step: 'downloading'; progress: number; total: number }
   | { step: 'ready' }
-  | { step: 'error'; message: string; retry: () => void };
+  | { step: 'error'; messageKey: FailureKey; retry: () => void };
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -69,9 +91,10 @@ export function UpdateChecker() {
 
             setPhase({ step: 'ready' });
           } catch (e) {
+            console.warn('[Updater] Update failed:', describeError(e));
             setPhase({
               step: 'error',
-              message: e instanceof Error ? e.message : String(e),
+              messageKey: updateFailureKey(e),
               retry: startUpdate,
             });
           }
@@ -87,7 +110,7 @@ export function UpdateChecker() {
           console.info('[Updater] This build has no update feed: no update check');
           return;
         }
-        console.warn('[Updater] Check failed:', e);
+        console.warn('[Updater] Check failed:', describeError(e));
       }
     })();
 
@@ -202,7 +225,7 @@ export function UpdateChecker() {
                   <AlertCircle size={20} className="text-red-400" />
                 </div>
                 <p className="text-sm text-vox-text-secondary">
-                  {phase.message || t('updater.failed')}
+                  {t(phase.messageKey)}
                 </p>
               </div>
               <div className="flex justify-end">

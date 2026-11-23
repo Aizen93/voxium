@@ -62,10 +62,10 @@ const DATE_FNS_FORMAT = /import\s*\{[^}]*\bformat\b[^}]*\}\s*from\s*'date-fns'/g
 export function findDateFormatting(src: string): string[] {
   const code = stripCommentsAndStrings(src);
   const hits: string[] = [];
-  for (const f of FORBIDDEN) for (const _ of code.matchAll(f.re)) hits.push(f.name);
+  for (const f of FORBIDDEN) hits.push(...[...code.matchAll(f.re)].map(() => f.name));
   // the import line itself holds a string, so read it from the original with comments removed
   const withStrings = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-  for (const _ of withStrings.matchAll(DATE_FNS_FORMAT)) hits.push("import { format } from 'date-fns'");
+  hits.push(...[...withStrings.matchAll(DATE_FNS_FORMAT)].map(() => "import { format } from 'date-fns'"));
   return hits;
 }
 
