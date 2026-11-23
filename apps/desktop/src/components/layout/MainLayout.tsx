@@ -465,7 +465,7 @@ export function MainLayout() {
             // a new message in a conversation this account removed brings it
             // back: an earlier removal no longer keeps a list from showing it
             dmStore.forgetRemoval(message.conversationId);
-            await dmStore.fetchConversations();
+            await dmStore.fetchConversationsFor(message.conversationId);
             // another await: the session may have ended during it too
             if (signedInUser() !== session) return;
             // the list may hold it read-only (the other side's account was

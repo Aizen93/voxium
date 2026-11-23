@@ -187,7 +187,7 @@ describe('the conversation on screen turns read-only', () => {
 
     await settle();
     expect(h.apiGet).toHaveBeenCalledTimes(1);
-    expect(h.apiGet).toHaveBeenCalledWith('/dm');
+    expect(h.apiGet).toHaveBeenCalledWith('/dm', { params: { limit: 50 } });
     // the refetched list served it read-only: confirmed, while the walk runs
     expect(useDMStore.getState().readOnlyConfirmed).toEqual({ c1: true });
     walk.finish();

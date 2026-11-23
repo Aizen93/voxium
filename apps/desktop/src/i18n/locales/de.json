@@ -878,6 +878,11 @@
     "conversationStart": "Dies ist der Beginn deines Direktnachrichtenverlaufs.",
     "welcomeMessage": "Wähle eine Unterhaltung in der Seitenleiste aus oder klicke auf ein Mitglied in einem beliebigen Space, um eine neue zu starten.",
     "failedToLoadConversations": "Unterhaltungen konnten nicht geladen werden",
+    "list": {
+      "loadMore": "Weitere Unterhaltungen laden",
+      "loadMoreFailed": "Weitere Unterhaltungen konnten nicht geladen werden.",
+      "loadMoreRetry": "Erneut versuchen"
+    },
     "remove": {
       "action": "Unterhaltung entfernen",
       "actionWith": "Unterhaltung mit {{name}} entfernen",

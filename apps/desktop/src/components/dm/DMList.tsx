@@ -11,6 +11,7 @@ import { clsx } from 'clsx';
 import { dmPreviewText } from '../../utils/dmPreview';
 import { dmNoticeTranslation } from '../../utils/systemNotices';
 import { DMVoicePanel } from '../voice/DMVoicePanel';
+import { DMListFooter } from './DMListFooter';
 import { toast } from '../../stores/toastStore';
 import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
@@ -243,6 +244,8 @@ export function DMList() {
             </div>
           );
         })}
+
+        <DMListFooter />
       </div>
 
       {pendingRemoval && (

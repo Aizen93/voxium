@@ -30,7 +30,7 @@ function IncomingCallContent({ incomingCall }: { incomingCall: { conversationId:
       // Ensure the conversation is in the local store (it may not be if this is a new DM)
       const dmStore = useDMStore.getState();
       if (!dmStore.conversations.some((c) => c.id === conversationId)) {
-        await dmStore.fetchConversations();
+        await dmStore.fetchConversationsFor(conversationId);
       }
       // A read-only conversation (the other side's account was deleted): the
       // accept was refused (voiceStore.joinDMCall), so there is no call to show

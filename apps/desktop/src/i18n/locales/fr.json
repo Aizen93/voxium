@@ -878,6 +878,11 @@
     "conversationStart": "Ceci est le début de votre historique de messages privés.",
     "welcomeMessage": "Sélectionnez une conversation dans la barre latérale, ou cliquez sur un membre dans n'importe quel espace pour en démarrer une nouvelle.",
     "failedToLoadConversations": "Impossible de charger les conversations",
+    "list": {
+      "loadMore": "Charger plus de conversations",
+      "loadMoreFailed": "Impossible de charger d’autres conversations.",
+      "loadMoreRetry": "Réessayer"
+    },
     "remove": {
       "action": "Retirer la conversation",
       "actionWith": "Retirer la conversation avec {{name}}",

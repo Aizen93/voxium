@@ -113,6 +113,7 @@ export const ENGLISH_ON_PURPOSE: EnglishGroup[] = [
       'the publish call build them): a request that reaches the server with one of these is not from the official screens',
     sentences: [
       'Message must be ${LIMITS.SUPPORT_MESSAGE_MIN}-${LIMITS.SUPPORT_MESSAGE_MAX} characters',
+      'limit must be a whole number of 1 or more',
       'reportedContent must be at most ${LIMITS.MESSAGE_MAX} characters',
       'ids must name 1 to ${MEMBER_LIST.LOOKUP_MAX_IDS} users',
       'Each order entry needs a category id and a whole-number position from 0 to ${MAX_SORT_POSITION}',
