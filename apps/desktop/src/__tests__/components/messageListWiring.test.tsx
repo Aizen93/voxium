@@ -77,6 +77,7 @@ vi.mock('../../stores/serverStore', () => {
 
 import { MessageList } from '../../components/chat/MessageList';
 import { resetServerPermissionsCache } from '../../hooks/useServerPermissions';
+import { resetChannelPermissionsCache } from '../../services/channelPermissionsCache';
 import { MESSAGE_GROUP_WINDOW_MS } from '../../utils/messageGrouping';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -117,6 +118,7 @@ const headers = () => Object.fromEntries(
 beforeEach(() => {
   vi.clearAllMocks();
   resetServerPermissionsCache();
+  resetChannelPermissionsCache();
   serverState.activeServerId = 'srv-1';
   serverState.activeChannelId = 'ch-1';
   serverState.channels = [{ id: 'ch-1', name: 'general', type: 'text', serverId: 'srv-1', categoryId: null, position: 0, createdAt: '2026-01-01T00:00:00.000Z' }];

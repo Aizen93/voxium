@@ -34,6 +34,7 @@ import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { ErrorBoundary } from './ErrorBoundary';
 import { initNotifications, notify } from '../../services/notifications';
+import { invalidateChannelPermissions } from '../../services/channelPermissionsCache';
 import { notificationAuthorName } from '../../utils/notificationAuthor';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
@@ -718,6 +719,9 @@ export function MainLayout() {
         useServerStore.getState().handleNicknameUpdated(serverId, userId, nickname);
       },
       channelPermissionsUpdated: ({ serverId }: { serverId: string }) => {
+        // An override moved a bit in some channel: the viewer's per-channel
+        // answers for the space are stale (the store holds no overrides)
+        invalidateChannelPermissions(serverId);
         // Re-fetch server detail to get updated channel visibility
         const state = useServerStore.getState();
         if (state.activeServerId === serverId) {

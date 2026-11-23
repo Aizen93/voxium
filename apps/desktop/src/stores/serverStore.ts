@@ -6,6 +6,7 @@ import { toast } from './toastStore';
 import i18n from '../i18n';
 import { pinSecure, isPinnedSecure, claimDowngradeWarning } from '../utils/securePins';
 import { compareRoles } from '../utils/roleOrder';
+import { forgetSpaceChannelPermissions } from '../services/channelPermissionsCache';
 import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST, OPAQUE_ID_RE, ALL_PERMISSIONS, permissionsToString } from '@voxium/shared';
 import type { DiscoveryTier } from '@voxium/shared';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode, CreateRoleRequest, UpdateRoleRequest, SetChannelPermissionOverrideRequest } from '@voxium/shared';
@@ -642,6 +643,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   leaveServer: async (serverId: string) => {
     await api.post(`/servers/${serverId}/leave`);
+    forgetSpaceChannelPermissions(serverId);
     set((state) => ({
       servers: state.servers.filter((s) => s.id !== serverId),
       activeServerId: state.activeServerId === serverId ? null : state.activeServerId,
@@ -1161,6 +1163,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   handleMemberKicked: (serverId: string) => {
+    forgetSpaceChannelPermissions(serverId);
     if (get().activeServerId === serverId) resetMemberLookupState();
     if (get().directory.serverId === serverId) retireDirectory();
     set((state) => ({
@@ -1177,6 +1180,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   handleServerDeleted: (serverId: string) => {
+    forgetSpaceChannelPermissions(serverId);
     set((state) => {
       const isActive = state.activeServerId === serverId;
 
