@@ -61,6 +61,7 @@ import {
   type DeviceListState,
   type HistoryPullMarker,
   type InboundGroupSessionRecord,
+  type KeyBackupWrites,
   type MessagePosition,
   type OutboundGroupSessionRecord,
   type PendingKeyShare,
@@ -79,6 +80,7 @@ import {
 import { pinSecure, securePinGeneration } from '../../utils/securePins';
 import { currentE2ESessionUser, isE2ESessionEnded } from './session';
 import { isAtOrBelowClearedFloor } from './clearedFloors';
+import { sha256Hex } from '../../utils/sha256';
 
 interface OneTimeKeyPair {
   keyId: string;
@@ -372,6 +374,8 @@ export interface E2EServiceOptions {
   deviceListCacheMs?: number;
   /** Test hook: how long dispose() waits for a key-share claim in flight (ms). */
   teardownDeadlineMs?: number;
+  /** Test hook: the deadline of a key-backup read (ms; KEY_BACKUP_READ_TIMEOUT_MS by default). */
+  keyBackupReadTimeoutMs?: number;
   /** Test hook: the page-level ownership of the vault; by default this page's (vaultOwnership.ts). */
   ownership?: VaultOwnershipHandle;
 }
@@ -461,6 +465,22 @@ export const FALLBACK_ROTATION_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
  * claim that times out is a claim whose answer was lost.
  */
 const KEYSHARE_REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * Deadline of the key-backup reads that judge a write (createKeyBackup,
+ * resolveKeyBackupWrite): the api sets none. The reads around a write and the
+ * judging of a record run on the serial queue and hold it; the judging of the
+ * digests alone runs off it. The write itself keeps none, so that it is not
+ * given up on while the server may still be storing it.
+ */
+const KEY_BACKUP_READ_TIMEOUT_MS = 15_000;
+/**
+ * A write of the key backup that got no usable answer can still land later
+ * (spec §15.7). Its record is cleared on 'unchanged' only by a check made at
+ * least this long after a check first found the server still holding the
+ * baseline: until then every check says 'unchanged' and the panel keeps
+ * advising to check again.
+ */
+export const KEY_BACKUP_WRITE_SETTLE_MS = 10 * 60 * 1000;
 /**
  * A claim whose answer never came (a network error, its deadline) may have
  * leased its page on the server all the same, and no claim gets those shares
@@ -681,6 +701,141 @@ export class E2ERecoveryKeyFormatError extends Error {
   }
 }
 
+/** Whether the account has a key backup on the server, and when it was last written. */
+export interface E2EKeyBackupState {
+  exists: boolean;
+  updatedAt: string | null;
+}
+
+/** A read of the key backup: its blob (`null` for none) and its state. */
+interface KeyBackupRead {
+  blob: string | null;
+  state: E2EKeyBackupState;
+}
+
+/**
+ * What a check of the key backup found (spec §15.7). With a write not
+ * confirmed pending, the backup is judged against the BASELINE: the backup
+ * the person last held a recovery key for, as far as this device knows (what
+ * the server held when the chain of unconfirmed writes began, none on a first
+ * setup), kept by every retry and every check of that chain.
+ * - 'unchanged': the server holds the baseline. The write had not landed when
+ *   the read was answered; it can still land later.
+ * - 'changed': no recovery key shown to the person opens what is stored: a
+ *   blob this device sealed in a write never confirmed (recognised for good,
+ *   with or without a record), or no backup any more where there was one.
+ * - 'elsewhere': the stored backup is neither the baseline nor one of this
+ *   device's recent writes. Another device of the account may have written it
+ *   and shown its key; nothing here tells whether it did.
+ * - 'unknown': the read failed, so any of them may be true.
+ */
+export type E2EKeyBackupReplaceOutcome = 'unchanged' | 'changed' | 'elsewhere' | 'unknown';
+
+/**
+ * A check of this device's key backup writes (resolveKeyBackupWrite). Its
+ * outcome is 'settled' when the server still held the baseline a full
+ * KEY_BACKUP_WRITE_SETTLE_MS after a check first found it so: the record is
+ * gone and nothing is pending any more.
+ */
+export interface E2EKeyBackupWriteCheck {
+  outcome: E2EKeyBackupReplaceOutcome | 'settled';
+  /** The baseline is "none": the chain began on a first setup. */
+  firstSetup: boolean;
+  /** What the read found, `null` when it failed. */
+  stored: E2EKeyBackupState | null;
+}
+
+/**
+ * A write of the key backup got no usable answer (no response, a 5xx), and
+ * the server does not hold the backup it sealed, or could not be asked. Its
+ * recovery key is never shown: nothing proves it opens what is stored. The
+ * vault keeps the record of the write and the digest of its blob, so every
+ * later check judges the backup against the same baseline and recognises a
+ * late landing. Carries the outcome, whether the baseline is "none" and what
+ * the read found (`null` when it failed); never the key.
+ */
+export class E2EKeyBackupUnconfirmedError extends Error {
+  constructor(
+    readonly outcome: E2EKeyBackupReplaceOutcome,
+    readonly firstSetup: boolean,
+    readonly stored: E2EKeyBackupState | null
+  ) {
+    super(`The key backup write was not confirmed (${outcome})`);
+    this.name = 'E2EKeyBackupUnconfirmedError';
+  }
+}
+
+/**
+ * This device cannot make a key backup at all: it does not hold the account
+ * key, or the account publishes a different one. Typed so that the account
+ * recovery panel says so instead of a generic failure.
+ */
+export class E2EKeyBackupUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'E2EKeyBackupUnavailableError';
+  }
+}
+
+/** The identity of a backup blob as the vault keeps it: a SHA-256, `null` for none. */
+function backupDigest(blob: string | null): string | null {
+  return blob === null ? null : sha256Hex(blob);
+}
+
+/**
+ * The digests of blobs this device sealed in writes never confirmed are kept
+ * at most this many, oldest out first. Each is one write that got no usable
+ * answer, and a person retries a handful of times in one chain: 32 keeps the
+ * writes of several chains (a late landing of an older one is still
+ * recognised) for about 2 KB of the vault.
+ */
+export const KEY_BACKUP_UNCONFIRMED_MAX = 32;
+
+/** The baseline of a record this code never wrote: not a digest, so no backup matches it. */
+const UNREADABLE_BASELINE = 'unreadable';
+
+/** The vault's `key_backup_writes` value, read into its shape; anything this code never writes reads as a record no backup matches. */
+function keyBackupWritesFrom(value: unknown): KeyBackupWrites {
+  if (value === undefined) return { unconfirmed: [] };
+  const raw = (value ?? {}) as { pending?: unknown; unconfirmed?: unknown; confirmed?: unknown };
+  if (typeof value !== 'object' || value === null) return { pending: { baseline: UNREADABLE_BASELINE }, unconfirmed: [] };
+  const unconfirmed = Array.isArray(raw.unconfirmed)
+    ? raw.unconfirmed.filter((d): d is string => typeof d === 'string').slice(-KEY_BACKUP_UNCONFIRMED_MAX)
+    : [];
+  const writes: KeyBackupWrites = { unconfirmed };
+  if (typeof raw.confirmed === 'string') writes.confirmed = raw.confirmed;
+  if (raw.pending !== undefined) {
+    const pending = (raw.pending ?? {}) as { baseline?: unknown; checkedAt?: unknown };
+    const baseline = pending.baseline === null || typeof pending.baseline === 'string' ? pending.baseline : UNREADABLE_BASELINE;
+    writes.pending = typeof pending.checkedAt === 'number' ? { baseline, checkedAt: pending.checkedAt } : { baseline };
+  }
+  return writes;
+}
+
+/** The same writes with this blob among the ones sealed and not confirmed, last, the oldest dropped past the bound. */
+function withUnconfirmed(writes: KeyBackupWrites, digest: string): string[] {
+  return [...writes.unconfirmed.filter((d) => d !== digest), digest].slice(-KEY_BACKUP_UNCONFIRMED_MAX);
+}
+
+/** The writes with no record pending: the digests stay. */
+function withoutPending(writes: KeyBackupWrites): KeyBackupWrites {
+  return writes.confirmed === undefined
+    ? { unconfirmed: writes.unconfirmed }
+    : { unconfirmed: writes.unconfirmed, confirmed: writes.confirmed };
+}
+
+/**
+ * A write whose effect on the server is unknown: no answer reached this device
+ * (a network error, a deadline), or the server answered with a 5xx, which a
+ * gateway in front of it sends while the request may still run there. A 4xx,
+ * 429 included, refused the write before anything was stored.
+ */
+function writeOutcomeUnknown(err: unknown): boolean {
+  if (answerLost(err)) return true;
+  const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
+  return typeof status === 'number' && status >= 500;
+}
+
 export class E2EService {
   private readonly api: typeof defaultApi;
   /** The unguarded client: only for the key-share claim's GET (see claimKeyShares). */
@@ -709,6 +864,13 @@ export class E2EService {
   private readonly wasmInput?: BufferSource;
   private readonly deviceListCacheMs: number;
   private readonly teardownDeadlineMs: number;
+  private readonly keyBackupReadTimeoutMs: number;
+  /**
+   * The digest of the backup blob whose recovery key this service showed last
+   * (spec §15.7). The vault keeps it too; this copy covers a confirmation the
+   * vault could not store, for the rest of the session.
+   */
+  private keyBackupConfirmedThisSession: string | null = null;
 
   private account: EngineAccount | null = null;
   /** This account's cross-signing master key — only if THIS device holds it. */
@@ -875,6 +1037,7 @@ export class E2EService {
     this.wasmInput = opts.wasmInput;
     this.deviceListCacheMs = opts.deviceListCacheMs ?? DEVICE_LIST_CACHE_MS;
     this.teardownDeadlineMs = opts.teardownDeadlineMs ?? TEARDOWN_DEADLINE_MS;
+    this.keyBackupReadTimeoutMs = opts.keyBackupReadTimeoutMs ?? KEY_BACKUP_READ_TIMEOUT_MS;
   }
 
   /**
@@ -2144,10 +2307,119 @@ export class E2EService {
   // ─── Encrypted key backup (spec §15) ──────────────────────────────────────
 
   /** Does this account have a backup, and when was it last written? */
-  async keyBackupInfo(): Promise<{ exists: boolean; updatedAt: string | null }> {
+  async keyBackupInfo(): Promise<E2EKeyBackupState> {
     const res = await this.api.get('/e2e/backup');
     const data = res.data.data as { exists?: boolean; updatedAt?: string | null };
     return { exists: data.exists === true, updatedAt: data.updatedAt ?? null };
+  }
+
+  /**
+   * The backup as the server holds it: its blob (`null` for none) and its
+   * state. The blob is what tells two backups apart: each is sealed under a
+   * fresh nonce, so no two writes store the same string. The deadline is a
+   * signal of the request's own: a request with a signal is never joined to
+   * another one in flight (services/api.ts), so nothing can widen it.
+   */
+  private async readKeyBackup(): Promise<KeyBackupRead> {
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), this.keyBackupReadTimeoutMs);
+    try {
+      const res = await this.api.get('/e2e/backup', { signal: deadline.signal });
+      const data = res.data.data as { exists?: boolean; blob?: unknown; updatedAt?: string | null };
+      const exists = data.exists === true;
+      if (exists && typeof data.blob !== 'string') {
+        throw new Error('The server answered the key backup read without its blob');
+      }
+      return {
+        blob: exists ? (data.blob as string) : null,
+        state: { exists, updatedAt: data.updatedAt ?? null },
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** This device's key backup writes as the vault holds them (spec §15.7), read into their shape. */
+  private async keyBackupWrites(vault: E2EVault = this.vault): Promise<KeyBackupWrites> {
+    return keyBackupWritesFrom(await vault.getKeyBackupWrites());
+  }
+
+  /** Stores the writes as one fenced write; a failure is logged, and the next check judges again. */
+  private async storeKeyBackupWrites(writes: KeyBackupWrites, what: string): Promise<void> {
+    try {
+      await this.vault.putKeyBackupWrites(writes);
+    } catch (err) {
+      if (isE2ESessionEnded(err)) throw err;
+      console.warn(`e2e: ${what} could not be recorded:`, errText(err));
+    }
+  }
+
+  /**
+   * A blob this device sealed in a write that was never confirmed: that write
+   * landed after this device stopped waiting, and its key was never shown. The
+   * blob confirmed in this session is never one, even when its confirmation
+   * could not be stored.
+   */
+  private isOwnUnconfirmedLanding(writes: KeyBackupWrites, digest: string | null): boolean {
+    return digest !== null && digest !== this.keyBackupConfirmedThisSession && writes.unconfirmed.includes(digest);
+  }
+
+  /**
+   * Judge what the server holds (spec §15.7). A blob of this device's own
+   * unconfirmed writes is 'changed' whatever happened since. With a record:
+   * the baseline is 'unchanged' (the first check to find it starts the settle
+   * window, a time read from the record that is ahead of the clock starts it
+   * again, and one made a full window later clears the record: 'settled'); the
+   * blob whose key this device showed last ends a record left behind by a
+   * confirmation that could not be stored (nothing to warn about); no backup
+   * where there was one is 'changed'; anything else is 'elsewhere'. Without a
+   * record there is nothing else to say.
+   */
+  private async judgeKeyBackupWrites(writes: KeyBackupWrites, found: KeyBackupRead): Promise<E2EKeyBackupWriteCheck | null> {
+    const digest = backupDigest(found.blob);
+    const pending = writes.pending;
+    const firstSetup = pending?.baseline === null;
+    if (this.isOwnUnconfirmedLanding(writes, digest)) return { outcome: 'changed', firstSetup, stored: found.state };
+    if (!pending) return null;
+    // a record this code never wrote: no backup can match it, so ask for a new key
+    if (pending.baseline === UNREADABLE_BASELINE) return { outcome: 'changed', firstSetup, stored: found.state };
+    if (digest === pending.baseline) {
+      const now = Date.now();
+      const at = pending.checkedAt;
+      if (at === undefined || !Number.isFinite(at) || at > now) {
+        await this.storeKeyBackupWrites(
+          { ...writes, pending: { baseline: pending.baseline, checkedAt: now } },
+          'the time of a key backup check'
+        );
+        return { outcome: 'unchanged', firstSetup, stored: found.state };
+      }
+      if (isYoungerThan(at, KEY_BACKUP_WRITE_SETTLE_MS)) return { outcome: 'unchanged', firstSetup, stored: found.state };
+      await this.storeKeyBackupWrites(withoutPending(writes), 'the end of a settled key backup write');
+      return { outcome: 'settled', firstSetup, stored: found.state };
+    }
+    const confirmed = this.keyBackupConfirmedThisSession ?? writes.confirmed;
+    if (digest !== null && digest === confirmed) {
+      // the confirmation the vault missed, stored now: the record goes, the blob
+      // leaves the list and is the confirmed one, so no later check reads it as a landing
+      await this.storeKeyBackupWrites(
+        { unconfirmed: writes.unconfirmed.filter((d) => d !== digest), confirmed: digest },
+        'the end of a confirmed key backup write'
+      );
+      return null;
+    }
+    return { outcome: digest === null ? 'changed' : 'elsewhere', firstSetup, stored: found.state };
+  }
+
+  /** Recovery is off: nothing is pending against the backup any more. */
+  private async forgetPendingKeyBackupWrite(): Promise<void> {
+    try {
+      const writes = await this.keyBackupWrites();
+      if (writes.pending) await this.vault.putKeyBackupWrites(withoutPending(writes));
+    } catch (err) {
+      if (isE2ESessionEnded(err)) throw err;
+      // the next check judges the record again
+      console.warn('e2e: the record of a key backup write could not be cleared:', errText(err));
+    }
   }
 
   /**
@@ -2157,11 +2429,20 @@ export class E2EService {
    *
    * Only a device that holds the account key can do this, which is what stops
    * an attacker with a session token from minting a backup of a key nobody has.
+   *
+   * A write that gets no usable answer (no response, a 5xx) may have replaced
+   * the backup all the same (spec §15.7). Before it leaves, the vault records
+   * it (the baseline it is judged against) and the digest of its blob; the
+   * backup is read again after a lost answer, and the key is returned only
+   * when the server holds exactly the blob sealed for it, which confirms that
+   * blob and clears the record. Anything else throws
+   * E2EKeyBackupUnconfirmedError and keeps both. A refusal (4xx) propagates as
+   * itself, the vault as it was.
    */
   async createKeyBackup(): Promise<string> {
     return this.enqueue(async () => {
       const master = this.masterKey;
-      if (!master) throw new Error('This device does not hold the account key');
+      if (!master) throw new E2EKeyBackupUnavailableError('This device does not hold the account key');
       // Mirror of the restore-side rule (§15.4): back up only a key the account
       // actually publishes. Holding one is not the same as it being live — a
       // bootstrap that minted a key and then failed to publish it would
@@ -2170,20 +2451,123 @@ export class E2EService {
       const list = await this.fetchDeviceList(this.userId, true);
       const published = this.servedOwnMasterKey ?? list.masterKey;
       if (published && published !== master.publicKey()) {
-        throw new Error('This account publishes a different key — resolve that before backing up');
+        throw new E2EKeyBackupUnavailableError('This account publishes a different key — resolve that before backing up');
       }
+      // A write not confirmed before this one keeps its baseline: what the
+      // server holds now may be a backup no key shown to the person opens.
+      // Otherwise the baseline is what it holds now. A failed read sends nothing.
+      const writes = await this.keyBackupWrites();
+      const baseline = writes.pending ? writes.pending.baseline : backupDigest((await this.readKeyBackup()).blob);
+      const firstSetup = baseline === null;
       const recoveryKey = generateRecoveryKey();
       // Sealed in the engine: the private half never becomes a JS string, and
       // neither does the recovery key beyond the one we hand back to be shown.
       const blob = master.sealForBackup(recoveryKey);
-      await this.api.put('/e2e/backup', { blob });
+      const sealed = sha256Hex(blob);
+      // Recorded BEFORE the write leaves, in one fenced write: the record, with
+      // no check time since this write may land later, and the digest of this
+      // blob among those sealed and never confirmed. A write taken after this
+      // device stopped waiting (an answer lost, the session ended, the page
+      // closed) is still judged, and recognised, at every later check. A record
+      // that cannot be written sends nothing.
+      const attempt: KeyBackupWrites = { ...writes, pending: { baseline }, unconfirmed: withUnconfirmed(writes, sealed) };
+      await this.vault.putKeyBackupWrites(attempt);
+      try {
+        await this.api.put('/e2e/backup', { blob });
+      } catch (err) {
+        if (isE2ESessionEnded(err)) throw err;
+        if (!writeOutcomeUnknown(err)) {
+          // Refused before anything was stored: this blob can never land
+          await this.storeKeyBackupWrites(writes, 'the state before a refused key backup write');
+          throw err;
+        }
+        console.warn('e2e: the key backup write got no answer, reading the backup again:', errText(err));
+        let found: KeyBackupRead;
+        try {
+          found = await this.readKeyBackup();
+        } catch (readErr) {
+          if (isE2ESessionEnded(readErr)) throw readErr;
+          console.warn('e2e: the key backup could not be read after its write:', errText(readErr));
+          throw new E2EKeyBackupUnconfirmedError('unknown', firstSetup, null);
+        }
+        // The sealed string itself is the proof that the recovery key opens
+        // what is stored: no other write holds it.
+        if (found.blob !== blob) {
+          const check = await this.judgeKeyBackupWrites(attempt, found);
+          // the record has no check time yet, so this check cannot settle it
+          const outcome = check === null || check.outcome === 'settled' ? 'unchanged' : check.outcome;
+          throw new E2EKeyBackupUnconfirmedError(outcome, firstSetup, found.state);
+        }
+      }
+      // A key is shown for the stored backup: this blob is confirmed and
+      // nothing is pending. Kept in memory too, so that a confirmation the
+      // vault could not store raises no alarm in this session.
+      this.keyBackupConfirmedThisSession = sealed;
+      await this.storeKeyBackupWrites(
+        { unconfirmed: attempt.unconfirmed.filter((d) => d !== sealed), confirmed: sealed },
+        'the confirmation of a key backup write'
+      );
       return recoveryKey;
     });
   }
 
-  /** Forget the backup. The recovery key that opened it becomes useless. */
+  /**
+   * Judge this device's key backup writes (spec §15.7): when the account
+   * recovery panel opens, and on "Check again". `null` when there is nothing
+   * to say. Nothing pending and nothing sealed answers off the queue with one
+   * vault read and no request, so a panel that opens never waits behind a
+   * write, a backup pass or a claim run; only the blobs sealed and never
+   * confirmed are a read and a comparison, off the queue too; a record is
+   * judged on the queue. A read that fails is the 'unknown' outcome when a
+   * record is pending; with none it rejects, since the check found nothing out.
+   */
+  async resolveKeyBackupWrite(): Promise<E2EKeyBackupWriteCheck | null> {
+    const known = await this.keyBackupWrites(this.liveVault);
+    if (!known.pending && known.unconfirmed.length === 0) return null;
+    if (!known.pending) {
+      const found = await this.readKeyBackup();
+      return this.isOwnUnconfirmedLanding(known, backupDigest(found.blob))
+        ? { outcome: 'changed', firstSetup: false, stored: found.state }
+        : null;
+    }
+    return this.enqueue(async () => {
+      const writes = await this.keyBackupWrites();
+      let found: KeyBackupRead;
+      try {
+        found = await this.readKeyBackup();
+      } catch (err) {
+        // the record went while this waited: no record, no answer
+        if (isE2ESessionEnded(err) || !writes.pending) throw err;
+        console.warn('e2e: the key backup could not be read to judge a write not confirmed:', errText(err));
+        return { outcome: 'unknown', firstSetup: writes.pending.baseline === null, stored: null };
+      }
+      return this.judgeKeyBackupWrites(writes, found);
+    });
+  }
+
+  /**
+   * The person dismissed the notice of a write not confirmed (spec §15.7):
+   * the record goes and nothing else. The digests stay, so a blob of this
+   * device's own is still recognised. Errors propagate: the notice stays.
+   */
+  async dismissKeyBackupWrite(): Promise<void> {
+    await this.enqueue(async () => {
+      const writes = await this.keyBackupWrites();
+      if (writes.pending) await this.vault.putKeyBackupWrites(withoutPending(writes));
+    });
+  }
+
+  /**
+   * Forget the backup. The recovery key that opened it becomes useless, and
+   * nothing is pending against it any more: the record of a write not
+   * confirmed goes with it. The digests of blobs sealed and never confirmed
+   * stay, so that one landing after this is still recognised.
+   */
   async deleteKeyBackup(): Promise<void> {
-    await this.api.delete('/e2e/backup');
+    await this.enqueue(async () => {
+      await this.api.delete('/e2e/backup');
+      await this.forgetPendingKeyBackupWrite();
+    });
   }
 
   /**

@@ -23,6 +23,13 @@
 //   ptpurge:{mark}:{scope}           a purge of the `pt:` entries of a scope that ended (purgeCachedPlaintexts);
 //                                    under `cleared`, with the floor it purged up to
 //   claim_sent                       when a claim of the key-share inbox last left (its page may still be leased)
+//   key_backup_writes                this device's key backup writes (§15.7): the record of one not confirmed yet
+//                                    (the digest of the backup it is judged against, when a check first found that
+//                                    backup still there), the digests of the blobs it sealed in writes never
+//                                    confirmed (kept for good, bounded) and the digest of the one it confirmed last;
+//                                    written before each write is sent, the record cleared once a key was shown for
+//                                    the stored backup, a check a full window later found it unchanged, the notice
+//                                    was dismissed, or recovery was turned off
 //   repair:{name}                    a repair that ran on this vault (E2EService), and when; `fallback-key-uploaded`:
 //                                    when this device last made a fallback key to be sent (written before the
 //                                    request that may send it, and again once the server took it)
@@ -248,6 +255,32 @@ export interface HistoryPullMarker {
   masterKey: string;
   cursor: string | null;
   pages: number;
+}
+
+/**
+ * A write of the key backup that was not confirmed (spec §15.7): the
+ * baseline it is judged against (a SHA-256 of a blob, `null` for none) and
+ * when a check first found the server still holding it after the latest
+ * write (absent until then).
+ */
+export interface KeyBackupWriteRecord {
+  baseline: string | null;
+  checkedAt?: number;
+}
+
+/**
+ * This device's writes of the key backup (`key_backup_writes`, spec §15.7),
+ * kept in one value so that each change is one fenced write: the record of a
+ * write not confirmed yet, the SHA-256 of every blob this device sealed in a
+ * write that was never confirmed (oldest first, bounded; kept when the record
+ * goes, so that a late landing is recognised for good) and that of the blob
+ * whose recovery key it showed last. Digests only: no recovery key, no master
+ * secret.
+ */
+export interface KeyBackupWrites {
+  pending?: KeyBackupWriteRecord;
+  unconfirmed: string[];
+  confirmed?: string;
 }
 
 export interface CachedPlaintext {
@@ -997,6 +1030,15 @@ export class E2EVault {
   }
   putRepair(name: string): Promise<void> {
     return this.put(`repair:${name}`, { at: Date.now() });
+  }
+
+  // ── This device's key backup writes (key_backup_writes, spec §15.7) ──
+  /** As stored, unread: E2EService checks the shape. */
+  getKeyBackupWrites(): Promise<unknown> {
+    return this.get('key_backup_writes');
+  }
+  putKeyBackupWrites(writes: KeyBackupWrites): Promise<void> {
+    return this.put('key_backup_writes', writes);
   }
 
   // ── When a claim of the key-share inbox last left (claim_sent: when, nothing else) ──

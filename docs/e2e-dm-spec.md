@@ -374,6 +374,7 @@ plain name:
 | `ptpurge:read-only:{conversationId}` | `{at}`: when the purge of a read-only conversation's `pt:` entries ended, after a conversation list confirmed it read-only; cleared when a list serves the conversation live (§9.1) |
 | `ptpurge:cleared:{conversationId}` | `{at, level}`: when the purge of a cleared history ended, and the floor it purged up to (`level`, milliseconds since the epoch); a record never moves back (§9.1) |
 | `claim_sent` | `{at}`: when a claim of the key-share inbox last left; its page may still be leased (§7.4) |
+| `key_backup_writes` | `{pending?: {baseline, checkedAt?}, unconfirmed, confirmed?}`: this device's key backup writes: the record of one not confirmed yet (the SHA-256 of the baseline blob, `null` for none, and when a check first found it still stored), the SHA-256 of every blob it sealed in a write never confirmed (the last 32, kept when the record goes) and that of the blob whose recovery key it showed last; written before each write is sent (§15.7) |
 | `repair:{name}` | `{at}`: when a repair ran on this vault: `repair:outbound-sessions-rotated` once; `repair:fallback-key-uploaded` when this device last made a fallback key to be sent, written before the request that may send it and again once the server took it (§7.4) |
 | `vault_owner` | the random token of the page that owns the vault; every write checks it in its own transaction (§7.4) |
 
@@ -1836,8 +1837,12 @@ every peer warning about the device that just recovered.
 ### 15.5 Server surface
 
 `PUT /e2e/backup` (store or replace), `GET /e2e/backup`, `DELETE /e2e/backup` —
-own-account only, one row per account, size-capped (`KEY_BACKUP_MAX`), rate
-limited with the approve limiter. The server stores ciphertext and a timestamp.
+own-account only, one row per account, size-capped (`KEY_BACKUP_MAX`). `PUT`
+and `DELETE` are rate limited with the approval limiter (`e2eApprove`, shared
+with device approvals and the master-key publication); `GET` with the status
+limiter (`e2eStatus`, shared with the device-list reads and the message-key
+backup reads), so the reads that judge a write spend none of the approval
+budget. The server stores ciphertext and a timestamp.
 There is no server-side recovery, no passphrase hint, and no escrow: an operator
 with the whole database learns only that a backup exists.
 
@@ -1875,12 +1880,117 @@ orphan-cleanup migration on a live database and is left as a follow-up.
   This is a deliberate floor: any mechanism that could rescue them could also
   rescue an attacker who compromises the account.
 - The blob is one row per account; there is no versioning or rollback, so a
-  replaced backup invalidates the previous recovery key immediately. If the
-  replacing request commits but its response is lost, the new recovery key is
-  gone with the failed call while the old one no longer opens what is stored —
-  the user has to create another backup. Fixing that properly needs either a
-  two-phase write or showing the key before the write is confirmed, and both
-  trade a worse failure for this one.
+  replaced backup invalidates the previous recovery key immediately.
+- **A write whose answer is lost.** Each write of the backup is judged against
+  a BASELINE, identified by its blob (`GET /e2e/backup` returns it; each blob
+  is sealed under a fresh nonce, so the string identifies one write;
+  timestamps are never compared). The baseline stands for the backup the
+  person last held a recovery key for, which is an assumption: with no write
+  pending it is simply what the server holds when the write begins (another
+  device may have written it), and on a first setup it is "none".
+  - **What the vault keeps** (`key_backup_writes`, one value, so each change is
+    one fenced write on the serial queue): the record of a write not confirmed
+    (the SHA-256 of the baseline blob or "none", and when a check first found
+    the baseline still stored), the SHA-256 of every blob this device sealed in
+    a write that was never confirmed (the last 32, oldest out first), and that
+    of the blob whose key it showed last. Digests only, never a recovery key or
+    the master secret. It survives a logout and goes with the vault when the
+    account is deleted on this device.
+  - **Before the `PUT` leaves**, one write stores the record and adds this
+    blob's digest to the list; when it cannot be written, nothing is sent. With
+    a record present (an earlier write of the chain was not confirmed), the
+    record's baseline is kept, whatever the server holds now. A 4xx is a
+    refusal, reported as one, and puts the value back as it was.
+  - **Judging.** When the `PUT` gets no usable answer (no response, or a 5xx),
+    the client reads the backup again. The blob this attempt sealed means the
+    write landed: the new recovery key is shown as after an answered write,
+    its digest leaves the list and becomes the confirmed one; only this proves
+    the key opens what is stored. Otherwise, and at every later check:
+    - a blob whose digest is in the list is `changed`, with or without a
+      record and whatever happened since (a settle, recovery turned off and on,
+      a later answered write that it overtook): it is this device's own write,
+      and its key was never shown;
+    - with a record, the baseline is `unchanged`; the confirmed blob ends a
+      record left behind by a confirmation the vault could not store (nothing
+      to warn about; the blob confirmed in the running session counts too);
+      no backup where there was one is `changed`; any other blob is
+      `elsewhere`: not written by this device's recent attempts. Another
+      device of the account may have written it and shown its key, or not;
+      this device cannot tell which;
+    - a failed read is `unknown` while a record is pending; without one the
+      check fails, since it found nothing out, and gives no outcome;
+    - without a record and without a blob from the list there is nothing to
+      say.
+  - **When it is judged.** After the write, when the account recovery panel
+    opens and on "Check again", and at no other time: the backup is read only
+    when the panel opens or the person asks. Opening the panel never
+    waits on the serial queue for nothing: no record and no digest answer from
+    one vault read with no request, digests alone are a read and a comparison
+    off the queue, and only a record is judged on the queue, while the panel
+    already shows the backup state; the notice joins when the judging answers.
+  - **The line that says recovery is set up** shows only once, during the
+    panel load under way, a judging (the load's own, a "Check again", or the
+    read after a write) has answered from a successful read, or a key was
+    shown during that load for what is stored. From the start of each load
+    until its judging answers, while that judging waits on the queue, and
+    after it failed, the line is absent and nothing else is added; a judging
+    that fails keeps the notice there was. A load with no record and no
+    digest is judged from one vault read, so its line comes back as soon as
+    the backup state is read. Loads and checks apply in the order they were
+    asked: what an earlier one read is dropped once a later one was asked.
+    The notice of a write that got no usable answer, a dismiss and turning
+    recovery off each apply over every load asked before they answered.
+  - **What the person is told.** `unchanged`: what was found when this device
+    checked, that the write may still land, and to check again in ten minutes
+    before counting on the recovery key they saved; never that the key works
+    now. `changed`: a recovery key saved before no longer works (or, with no
+    backup stored, opens nothing), and a new one should be made now; on a
+    first setup, that a backup is stored whose key this device never showed.
+    `elsewhere`: the stored backup was not written by this device's recent
+    attempts; if another device of the account made it and showed a recovery
+    key, that key opens it, and otherwise a new one should be made.
+    `unknown`: the outcome is unknown and a saved key may no longer work.
+    While the outcome is `changed`, `unknown` or `elsewhere` the panel does
+    not say the backup is set up. "Check again" is offered for `unchanged`,
+    `unknown` and `elsewhere`; when it ends with nothing pending and a backup
+    stored it says recovery is set up. "Make a new recovery key" is offered
+    for every outcome, behind the replace confirmation when a key may still
+    open what is stored (`unchanged` and `unknown` on a replace, `elsewhere`
+    always), at once otherwise. A device that cannot make a key (it does not
+    hold the key the account publishes) says so instead. `elsewhere` and a
+    backup that is gone can be dismissed, and so can `unchanged` and
+    `unknown` on a device that cannot make a key. A `changed` notice while a
+    backup is stored can never be dismissed, on any device.
+  - **The record is cleared** when a key is shown for the stored backup, when
+    recovery is turned off, when the notice is dismissed (which drops the
+    record and nothing else), or by a check made at least ten minutes after a
+    check first found the baseline still stored (a time read from the record
+    that lies ahead of the clock starts that window again; a new write of the
+    chain restarts it). None of these empties the list: a key shown moves only
+    its own blob out of it, so a landing of this device's own is still
+    recognised after any of them.
+
+  What remains: a write still running on the server can land after any check and
+  after a later answered write, so a key that write showed can stop opening what
+  is stored; only the device that made a write can recognise its landing, and
+  another device of the account knows nothing of this one's record. These are
+  accepted limits:
+  - With no record, a stored backup that is not one of this device's last 32
+    unconfirmed writes shows as set up. That is right when its key was shown,
+    on this device or another, and wrong for another device's write whose key
+    was never shown, for a write of this device older than those 32, and for a
+    vault that lost its list.
+  - A notice lives only in the settings panel.
+  - A confirmation the vault could not store reads as `changed` after a
+    restart when no check in the same session stored it (a check right after
+    the key was shown does), until the stored backup changes (a new key made,
+    recovery turned off).
+
+  The two complete fixes stay unchosen, each trading a worse failure for this
+  one: a two-phase write (the new blob staged, then promoted by a confirm call
+  once the key was shown, so the old key keeps working until the confirm, which
+  is wrong when it leaked), or the key shown before the write and the blob read
+  back (the person may write down a key whose upload then fails).
 
 ## 16. Message-key backup (Phase 2 of the always-on plan)
 
