@@ -9,6 +9,7 @@ import { toast } from '../../stores/toastStore';
 import { clsx } from 'clsx';
 import { LIMITS } from '@voxium/shared';
 import { supportNoticeTranslation } from '../../utils/systemNotices';
+import { formatDate } from '../../utils/formatDate';
 
 export function SupportTicketView() {
   const { t } = useTranslation();
@@ -134,7 +135,7 @@ export function SupportTicketView() {
                   </span>
                   {isStaff && <StaffBadge />}
                   <span className="text-[10px] text-vox-text-muted">
-                    {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    {formatDate('time', msg.createdAt)}
                   </span>
                 </div>
                 <p className="text-sm text-vox-text-secondary whitespace-pre-wrap break-words">{msg.content}</p>

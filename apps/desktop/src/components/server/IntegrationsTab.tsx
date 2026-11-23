@@ -22,6 +22,7 @@ import { WebhookCreateDialog } from './WebhookCreateDialog';
 import { WebhookCreatedPanel } from './WebhookCreatedPanel';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { WebhookEditDialog, type WebhookEditPatch } from './WebhookEditDialog';
+import { formatDate } from '../../utils/formatDate';
 
 interface Props {
   serverId: string;
@@ -281,9 +282,7 @@ export function IntegrationsTab({ serverId }: Props) {
    * Intl.DateTimeFormat throws on NaN too.
    */
   const day = (iso: string): string | null => {
-    const at = new Date(iso).getTime();
-    if (!Number.isFinite(at)) return null;
-    return new Intl.DateTimeFormat(i18n?.language, { dateStyle: 'medium' }).format(at);
+    return formatDate('date', iso, { language: i18n?.language }) || null;
   };
 
   const typeLabel = (type: WebhookType) => (type === 'github' ? t('webhooks.typeGithub') : t('webhooks.typeGeneric'));

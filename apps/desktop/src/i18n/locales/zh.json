@@ -2205,7 +2205,23 @@
     "installed": "更新已安装。重启 Voxium 即可生效。",
     "restartNow": "立即重启",
     "failed": "更新过程中出现问题。",
-    "retry": "重试"
+    "retry": "重试",
+    "failedNetwork": "无法下载更新。请检查网络连接后重试。"
+  },
+  "emojiPickerLabels": {
+    "category": {
+      "suggested": "常用",
+      "smileys_people": "表情与人物",
+      "animals_nature": "动物与自然",
+      "food_drink": "食物与饮料",
+      "travel_places": "旅行与地点",
+      "activities": "活动",
+      "objects": "物体",
+      "symbols": "符号",
+      "flags": "旗帜"
+    },
+    "defaultCaption": "你的心情如何？",
+    "clearSearch": "清除"
   },
   "themes": {
     "builtIn": {

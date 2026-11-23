@@ -5,6 +5,7 @@ import { useServerStore, NO_BANS } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { Avatar } from '../common/Avatar';
+import { formatDate } from '../../utils/formatDate';
 
 /**
  * Server settings → Members → Banned (KICK_MEMBERS). Every removal is a ban;
@@ -68,7 +69,7 @@ export function BannedSection({ serverId }: { serverId: string }) {
                   {b.reason || t('server.banned.noReason')}
                 </p>
                 <p className="mt-0.5 text-[11px] text-vox-text-muted">
-                  {t('server.banned.at', { when: new Date(b.createdAt).toLocaleString() })}
+                  {t('server.banned.at', { when: formatDate('dateTime', b.createdAt) })}
                   {b.bannedBy ? ` · ${t('server.banned.by', { name: b.bannedBy.displayName })}` : ''}
                 </p>
               </div>

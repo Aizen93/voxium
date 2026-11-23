@@ -9,6 +9,7 @@ import { toast } from '../../stores/toastStore';
 import { listSessions, revokeSession } from '../../services/sessions';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { WebhookDialog } from '../server/WebhookDialog';
+import { formatDate } from '../../utils/formatDate';
 
 /**
  * "Where you're signed in" (Settings → Security): every session of the
@@ -44,14 +45,8 @@ const OS_KEYS: Record<string, string> = {
 
 const hasOwn = (map: Record<string, string>, key: string) => Object.prototype.hasOwnProperty.call(map, key);
 
-function formatDate(date: Date, language: string, timeZone?: string): string {
-  const options: Intl.DateTimeFormatOptions = { dateStyle: 'medium', ...(timeZone ? { timeZone } : {}) };
-  try {
-    return new Intl.DateTimeFormat(language, options).format(date);
-  } catch {
-    // An unusable language tag: the runtime's own default
-    return new Intl.DateTimeFormat(undefined, options).format(date);
-  }
+function sessionDate(date: Date, language: string, timeZone?: string): string {
+  return formatDate('date', date, { language, timeZone });
 }
 
 /** Whole calendar days from `then` to `now` in LOCAL time (0 = the same day). */
@@ -121,14 +116,14 @@ export function SessionsSection() {
     const days = localDaysBetween(last, new Date());
     if (days <= 0) return t('settings.security.sessions.activeToday');
     if (days === 1) return t('settings.security.sessions.activeYesterday');
-    return t('settings.security.sessions.activeOn', { date: formatDate(last, language) });
+    return t('settings.security.sessions.activeOn', { date: sessionDate(last, language) });
   };
 
   const signedInLabel = (session: SessionSummary) => {
     const at = new Date(session.signedInAt);
     if (Number.isNaN(at.getTime())) return null;
     // The server sends UTC midnight of the sign-in day: a local format could show the day before
-    return t('settings.security.sessions.signedInOn', { date: formatDate(at, language, 'UTC') });
+    return t('settings.security.sessions.signedInOn', { date: sessionDate(at, language, 'UTC') });
   };
 
   const handleSubmit = async (e: FormEvent) => {

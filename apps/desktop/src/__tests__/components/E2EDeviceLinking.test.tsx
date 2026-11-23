@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import i18n from 'i18next';
 import type { User } from '@voxium/shared';
 
 /**
@@ -319,7 +320,10 @@ describe('E2EDevicesSection — approving by code', () => {
     expect(confirmText).toContain('e2e.linkConfirmTitle');
     expect(confirmText, 'the confirmation does not say WHICH device').toContain('new-la…e-id');
     expect(confirmText, 'the confirmation does not say when it registered').toContain(
-      new Date(LINKED.createdAt).toLocaleString()
+      // the app's date and time form, in the app's language (none set in this suite: the runtime's)
+      new Intl.DateTimeFormat(i18n.language || undefined, {
+        dateStyle: 'medium', timeStyle: 'short',
+      }).format(new Date(LINKED.createdAt))
     );
     expect(confirmText).toContain('e2e.linkConfirmExplainer');
   });

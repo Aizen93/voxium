@@ -2215,7 +2215,23 @@
     "installed": "Update installiert. Starte Voxium neu, um es anzuwenden.",
     "restartNow": "Jetzt neu starten",
     "failed": "Beim Update ist etwas schiefgelaufen.",
-    "retry": "Erneut versuchen"
+    "retry": "Erneut versuchen",
+    "failedNetwork": "Das Update konnte nicht heruntergeladen werden. Prüfe deine Verbindung und versuche es erneut."
+  },
+  "emojiPickerLabels": {
+    "category": {
+      "suggested": "Häufig verwendet",
+      "smileys_people": "Smileys & Personen",
+      "animals_nature": "Tiere & Natur",
+      "food_drink": "Essen & Trinken",
+      "travel_places": "Reisen & Orte",
+      "activities": "Aktivitäten",
+      "objects": "Objekte",
+      "symbols": "Symbole",
+      "flags": "Flaggen"
+    },
+    "defaultCaption": "Wie ist deine Stimmung?",
+    "clearSearch": "Löschen"
   },
   "themes": {
     "builtIn": {

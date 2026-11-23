@@ -2205,7 +2205,23 @@
     "installed": "アップデートをインストールしました。Voxium を再起動すると適用されます。",
     "restartNow": "今すぐ再起動",
     "failed": "アップデート中に問題が発生しました。",
-    "retry": "再試行"
+    "retry": "再試行",
+    "failedNetwork": "アップデートをダウンロードできませんでした。接続を確認して、もう一度お試しください。"
+  },
+  "emojiPickerLabels": {
+    "category": {
+      "suggested": "よく使う",
+      "smileys_people": "顔文字と人",
+      "animals_nature": "動物と自然",
+      "food_drink": "食べ物と飲み物",
+      "travel_places": "旅行と場所",
+      "activities": "アクティビティ",
+      "objects": "オブジェクト",
+      "symbols": "記号",
+      "flags": "旗"
+    },
+    "defaultCaption": "今の気分は？",
+    "clearSearch": "クリア"
   },
   "themes": {
     "builtIn": {

@@ -2215,7 +2215,23 @@
     "installed": "Mise à jour installée. Redémarrez Voxium pour l'appliquer.",
     "restartNow": "Redémarrer maintenant",
     "failed": "Un problème est survenu pendant la mise à jour.",
-    "retry": "Réessayer"
+    "retry": "Réessayer",
+    "failedNetwork": "La mise à jour n’a pas pu être téléchargée. Vérifiez votre connexion, puis réessayez."
+  },
+  "emojiPickerLabels": {
+    "category": {
+      "suggested": "Utilisés fréquemment",
+      "smileys_people": "Smileys et personnes",
+      "animals_nature": "Animaux et nature",
+      "food_drink": "Nourriture et boissons",
+      "travel_places": "Voyages et lieux",
+      "activities": "Activités",
+      "objects": "Objets",
+      "symbols": "Symboles",
+      "flags": "Drapeaux"
+    },
+    "defaultCaption": "Quelle est votre humeur ?",
+    "clearSearch": "Effacer"
   },
   "themes": {
     "builtIn": {

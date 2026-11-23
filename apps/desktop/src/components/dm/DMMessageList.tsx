@@ -7,7 +7,7 @@ import { MessageItem } from '../chat/MessageItem';
 import { DeletedMessageRow } from './DeletedParticipant';
 import { isDeletedMessageRow } from '../../services/e2e/displayGate';
 import { Phone, ArrowDown, Lock } from 'lucide-react';
-import { format, isToday, isYesterday } from 'date-fns';
+import { formatMessageStamp } from '../../utils/formatDate';
 import { dmNoticeTranslation } from '../../utils/systemNotices';
 
 interface Props {
@@ -235,12 +235,7 @@ export function DMMessageList({ conversationId, readOnly = false }: Props) {
 
             // System messages (call started/ended)
             if (message.type === 'system') {
-              const date = new Date(message.createdAt);
-              const timeStr = isToday(date)
-                ? t('messageItem.todayAt', { time: format(date, 'h:mm a') })
-                : isYesterday(date)
-                  ? t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') })
-                  : format(date, 'MM/dd/yyyy h:mm a');
+              const timeStr = formatMessageStamp(message.createdAt, t);
 
               const isEncryptionNotice = message.content.toLowerCase().includes('encryption');
               // Display only, after the gate: the two listed call sentences read in

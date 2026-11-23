@@ -12,7 +12,7 @@ import { useFriendStore } from '../../stores/friendStore';
 import { Avatar } from './Avatar';
 import { Volume2, Crown, Shield, MessageSquare, UserPlus, UserMinus, Check, X, Clock, Flag } from 'lucide-react';
 import { toast } from '../../stores/toastStore';
-import { format } from 'date-fns';
+import { formatDate } from '../../utils/formatDate';
 import { clsx } from 'clsx';
 import { api } from '../../services/api';
 import { StaffBadge } from './StaffBadge';
@@ -375,7 +375,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
             <div>
               <h4 className="text-[10px] font-bold uppercase tracking-wide text-vox-text-muted mb-1">{t('userProfile.memberSince')}</h4>
               <p className="text-xs text-vox-text-secondary">
-                {format(new Date(user.createdAt), 'MMM d, yyyy')}
+                {formatDate('date', user.createdAt)}
               </p>
             </div>
           )}
@@ -383,7 +383,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
             <div>
               <h4 className="text-[10px] font-bold uppercase tracking-wide text-vox-text-muted mb-1">{t('userProfile.joinedServer')}</h4>
               <p className="text-xs text-vox-text-secondary">
-                {format(new Date(joinedAt), 'MMM d, yyyy')}
+                {formatDate('date', joinedAt)}
               </p>
             </div>
           )}

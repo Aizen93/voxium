@@ -116,4 +116,53 @@ describe('UpdateChecker', () => {
     await vi.waitFor(() => expect(container.textContent).toContain('updater.titleReady'));
     expect(downloadAndInstall).toHaveBeenCalledTimes(1);
   });
+
+  describe('a failed download or install', () => {
+    async function failWith(reason: unknown) {
+      const downloadAndInstall = vi.fn().mockRejectedValue(reason);
+      checkMock.mockResolvedValue({ version: '9.9.9', downloadAndInstall });
+      await renderChecker();
+      await act(async () => {
+        container.querySelector('button')!.click();
+      });
+      await vi.waitFor(() => expect(container.textContent).toContain('updater.titleFailed'));
+      return downloadAndInstall;
+    }
+
+    it.each([
+      ['a transport failure', 'error sending request for url (https://example.invalid/latest.json)', 'updater.failedNetwork'],
+      ['a TLS failure inside a request error is never a signature claim', 'error sending request: certificate verify failed', 'updater.failedNetwork'],
+      ['a timeout', 'operation Timed Out', 'updater.failedNetwork'],
+      ['a request that timed out', 'Request timed out after 30s', 'updater.failedNetwork'],
+      ['an installer that timed out is not a connection failure', 'installer timed out waiting for process', 'updater.failed'],
+      ['a refused download status', 'Download request failed with status: 404', 'updater.failed'],
+      ['a failed installer', 'the installer exited with status 1', 'updater.failed'],
+      ['an install that could not move the file', 'failed to move the downloaded installer into place', 'updater.failed'],
+      ['a signature text', 'The signature could not be verified', 'updater.failed'],
+      ['anything else', 'something nobody planned for', 'updater.failed'],
+    ])('%s shows its translated sentence, never the raw text, and logs the message', async (_name, raw, key) => {
+      await failWith(raw);
+      expect(container.querySelector('p')?.textContent).toBe(key);
+      expect(container.textContent).not.toContain(raw);
+      expect(warn).toHaveBeenCalledWith('[Updater] Update failed:', raw);
+    });
+
+    it('an Error is read by its message, and Retry runs the update again', async () => {
+      const downloadAndInstall = await failWith(new Error('error sending request'));
+      expect(container.textContent).toContain('updater.failedNetwork');
+      expect(warn).toHaveBeenCalledWith('[Updater] Update failed:', 'error sending request');
+      downloadAndInstall.mockResolvedValueOnce(undefined);
+      await act(async () => {
+        Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'updater.retry')!.click();
+      });
+      await vi.waitFor(() => expect(container.textContent).toContain('updater.titleReady'));
+      expect(downloadAndInstall).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('a failed check logs the message of an Error, not the object', async () => {
+    checkMock.mockRejectedValue(new Error('Could not fetch a valid release JSON'));
+    await renderChecker();
+    expect(warn).toHaveBeenCalledWith('[Updater] Check failed:', 'Could not fetch a valid release JSON');
+  });
 });
