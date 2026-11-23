@@ -1240,10 +1240,22 @@ export interface Report {
   type: ReportType;
   status: ReportStatus;
   reason: string;
-  reporterId: string;
-  reporterUsername: string;
-  reportedUserId: string;
+  /** null once the reporter's account is deleted (the report outlives it: `reporterDeletedAt`). */
+  reporterId: string | null;
+  reporterUsername: string | null;
+  /** null once the reported account is deleted (`reportedUserDeletedAt`); `reportedUsername` is kept. */
+  reportedUserId: string | null;
   reportedUsername: string;
+  /** When the reporter's account was deleted. Optional: a server older than this field does not send it. */
+  reporterDeletedAt?: string | null;
+  /** When the reported account was deleted; such a report cannot ban anyone. Optional, as above. */
+  reportedUserDeletedAt?: string | null;
+  /**
+   * When the report will be deleted: REPORT_RETENTION_MONTHS after the
+   * earlier deletion of its accounts; null while neither is deleted.
+   * Optional, as above.
+   */
+  expiresAt?: string | null;
   messageId: string | null;
   messageContent: string | null;
   /**

@@ -2857,6 +2857,9 @@ adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response,
 
 // ─── Reports / Moderation Queue ──────────────────────────────────────────────
 
+/** A ban asked of a report whose reported account was deleted: the report outlives it, nobody is left to ban. */
+const REPORTED_ACCOUNT_DELETED_MESSAGE = 'The reported account has been deleted and cannot be banned';
+
 adminRouter.get('/reports', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
@@ -2888,10 +2891,14 @@ adminRouter.get('/reports', async (req: Request, res: Response, next: NextFuncti
       type: r.type,
       status: r.status,
       reason: r.reason,
+      // A side whose account was deleted is NULL (#48): the reporter is then
+      // shown as a deleted account, the reported account by the username the
+      // report keeps. A report filed by a server older than that column has
+      // no username yet, while its account lives: the account names it.
       reporterId: r.reporterId,
-      reporterUsername: r.reporter.username,
+      reporterUsername: r.reporter?.username ?? null,
       reportedUserId: r.reportedUserId,
-      reportedUsername: r.reportedUser.username,
+      reportedUsername: r.reportedUser?.username ?? r.reportedUsername ?? '',
       messageId: r.messageId,
       messageContent: r.messageContent,
       contentSource: r.contentSource,
@@ -2928,6 +2935,9 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
     // the report untouched and gives the admin explicit feedback.
     let banTarget: { id: string; role: string } | null = null;
     if (action === 'ban') {
+      // A report kept after its reported account was deleted names nobody to
+      // ban (#48)
+      if (report.reportedUserId === null) throw new BadRequestError(REPORTED_ACCOUNT_DELETED_MESSAGE);
       if (report.reportedUserId === req.user!.userId) throw new ForbiddenError('Cannot ban yourself');
       banTarget = await prisma.user.findUnique({
         where: { id: report.reportedUserId },

@@ -855,3 +855,81 @@ describe('GET /admin/reports — evidence provenance', () => {
     expect(res.body.data[0].contentSource).toBe('server');
   });
 });
+
+// ─── A report that outlives a deleted account (#48) ─────────────────────────
+
+describe('GET /admin/reports — a side whose account was deleted', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.report.count.mockResolvedValue(1);
+    mockUsers({ 'admin-1': { role: 'admin' } });
+  });
+
+  const row = (overrides: Record<string, unknown>) => ({
+    id: 'rep-1', type: 'user', status: 'pending', reason: 'abuse in a space',
+    reporterId: 'user-2', reporter: { username: 'reporter' },
+    reportedUserId: 'user-3', reportedUser: { username: 'accused' }, reportedUsername: 'accused',
+    reporterDeletedAt: null, reportedUserDeletedAt: null,
+    messageId: null, messageContent: null, contentSource: 'server',
+    channelId: null, conversationId: null, serverId: null,
+    resolvedById: null, resolvedBy: null, resolution: null,
+    createdAt: new Date('2026-07-30'), resolvedAt: null,
+    ...overrides,
+  });
+
+  const list = () => request(createApp()).get('/api/v1/admin/reports').set('Authorization', `Bearer ${makeToken()}`);
+
+  it('a deleted reporter is served with no id and no name', async () => {
+    prismaMock.report.findMany.mockResolvedValue([row({ reporterId: null, reporter: null })]);
+
+    const res = await list();
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0]).toMatchObject({ reporterId: null, reporterUsername: null, reportedUserId: 'user-3', reportedUsername: 'accused' });
+  });
+
+  it('a deleted reported account is served by the username the report kept', async () => {
+    prismaMock.report.findMany.mockResolvedValue([row({ reportedUserId: null, reportedUser: null, reportedUsername: 'gone-user' })]);
+
+    const res = await list();
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0]).toMatchObject({ reportedUserId: null, reportedUsername: 'gone-user', reporterUsername: 'reporter' });
+  });
+
+  it('a report filed by a server older than the username column is named by its live account', async () => {
+    prismaMock.report.findMany.mockResolvedValue([row({ reportedUsername: null })]);
+
+    const res = await list();
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].reportedUsername).toBe('accused');
+  });
+});
+
+describe('POST /admin/reports/:id/resolve — a ban on a report whose reported account was deleted', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.report.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.report.count.mockResolvedValue(0);
+    mockUsers({ 'admin-1': { role: 'admin' } });
+  });
+
+  it('is refused with its own 400 before anything is read or written', async () => {
+    prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: null, reporterId: 'reporter-9', messageId: null });
+    prismaMock.$queryRaw.mockClear();
+
+    const res = await request(createApp())
+      .post('/api/v1/admin/reports/rep-1/resolve')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ resolution: 'Spam', action: 'ban' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'The reported account has been deleted and cannot be banned' });
+    // the account lookup never ran with a null id, and no transaction opened
+    expect(prismaMock.user.findUnique.mock.calls.some(([args]: any[]) => args.where.id === null)).toBe(false);
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.report.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+  });
+});
