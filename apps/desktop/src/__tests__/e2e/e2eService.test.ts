@@ -69,6 +69,7 @@ import { decryptMessageForDisplay, decryptMessagesForDisplay, DECRYPT_FAILED_CON
 import { useChatStore, conversationView } from '../../stores/chatStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
+import { useE2EStore } from '../../stores/e2eStore';
 import type { Message } from '@voxium/shared';
 import { generateRecoveryKey } from '../../services/e2e/engine';
 import { initEngine, EngineAccount, EngineMasterKey, EngineGroupSession } from '../../services/e2e/engine';
@@ -9374,6 +9375,7 @@ describe('E2EService — a key backup write that gets no usable answer (spec §1
     let nextWrite: { stored: boolean; error: Error } | null = null;
     let duringWrite: (() => void) | null = null;
     let failNextRead: Error | null = null;
+    let failNextJudgingRead: Error | null = null;
     let blobless = false;
     let writeFailed = false;
     let beforeReread: (() => void) | null = null;
@@ -9402,6 +9404,12 @@ describe('E2EService — a key backup write that gets no usable answer (spec §1
           if (failNextRead) {
             const error = failNextRead;
             failNextRead = null;
+            throw error;
+          }
+          // the reads that judge a write carry their own deadline; keyBackupInfo's does not
+          if (failNextJudgingRead && (options as { signal?: AbortSignal } | undefined)?.signal) {
+            const error = failNextJudgingRead;
+            failNextJudgingRead = null;
             throw error;
           }
           if (blobless) {
@@ -9464,6 +9472,8 @@ describe('E2EService — a key backup write that gets no usable answer (spec §1
       failNextWrite: (stored: boolean, error: Error) => (nextWrite = { stored, error }),
       duringNextWrite: (step: () => void) => (duringWrite = step),
       failNextRead: (error: Error) => (failNextRead = error),
+      /** The next read that judges a write fails; a keyBackupInfo read before it is answered. */
+      failNextJudgingRead: (error: Error) => (failNextJudgingRead = error),
       answerNextReadWithoutBlob: () => (blobless = true),
       hangNextRead: () => (hangNextRead = true),
       /** A failed write the server takes after all, late (the last one by default). */
@@ -10325,6 +10335,34 @@ describe('E2EService — a key backup write that gets no usable answer (spec §1
       expect(await d.record()).toBeUndefined();
       expect((await d.vaultWrites())?.unconfirmed).toEqual(sealed);
       expect((await d.service.resolveKeyBackupWrite())?.outcome).toBe('changed');
+    });
+  });
+
+  describe("the account recovery panel's load, through the store, over this service", () => {
+    afterEach(() => {
+      display.service = null;
+      useE2EStore.setState({ keyBackup: null, keyBackupAttempt: null, keyBackupJudged: false });
+    });
+
+    it("keeps the 'changed' notice of a landing of its own when the panel loads again and the judging's read fails", async () => {
+      const d = await backupDevice();
+      d.failNextWrite(false, networkError());
+      await unconfirmed(d.service.createKeyBackup());
+      // no record left, and this device's own write lands
+      await d.service.deleteKeyBackup();
+      d.landFailedWrite();
+      display.service = d.service;
+      await useE2EStore.getState().loadKeyBackup(d.userId);
+      expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+
+      // the panel opens again: the backup state is read, the judging's read fails
+      d.failNextJudgingRead(networkError());
+      await useE2EStore.getState().loadKeyBackup(d.userId);
+
+      const state = useE2EStore.getState();
+      expect(state.keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+      expect(state.keyBackup).toEqual(expect.objectContaining({ exists: true }));
+      expect(state.keyBackupJudged).toBe(false);
     });
   });
 

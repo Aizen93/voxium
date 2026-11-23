@@ -1,5 +1,13 @@
 import { create } from 'zustand';
-import { getE2EService, E2EIdentityChangedError, type E2EOwnDevices } from '../services/e2e/e2eService';
+import {
+  getE2EService,
+  E2EIdentityChangedError,
+  E2EKeyBackupUnconfirmedError,
+  type E2EKeyBackupReplaceOutcome,
+  type E2EKeyBackupState,
+  type E2EKeyBackupWriteCheck,
+  type E2EOwnDevices,
+} from '../services/e2e/e2eService';
 import { watchKeyArrivals } from '../services/e2e/redecryptOnKeyArrival';
 import { isE2ESessionEnded } from '../services/e2e/session';
 
@@ -43,6 +51,26 @@ function sessionCheck(): () => boolean {
 }
 
 /**
+ * The order of what was asked about the key backup (spec §15.7). A panel load
+ * and a "Check again" take a number when they are asked, and what one of them
+ * read is applied to the store only while no later number was taken: an
+ * answer that arrives after a later one was asked describes an earlier
+ * moment, and applying it could remove the notice the later one showed and
+ * let the panel say recovery is set up over it. A write that got no usable
+ * answer takes its number when its own read answers: that read is later than
+ * anything a load asked before then has read, so its notice applies and those
+ * loads no longer do. A dismiss and turning recovery off do the same when
+ * they are answered: a load asked before them read what they changed.
+ */
+let keyBackupAsk = 0;
+
+/** Takes the next number; answers whether it is still the latest taken. */
+function keyBackupAsked(): () => boolean {
+  const ask = ++keyBackupAsk;
+  return () => ask === keyBackupAsk;
+}
+
+/**
  * The own-account slice of a device-list status, in one place: every caller
  * that recomputes it has to agree on which device is "this" one, or the badge
  * ends up warning about the device the user is sitting in front of (or worse,
@@ -60,6 +88,20 @@ function ownStatusPatch(
     canApprove: service.canApproveDevices(),
     masterKeyConflict: service.hasMasterKeyConflict(),
   };
+}
+
+/**
+ * The store's view of a check of a key backup write not confirmed: its
+ * notice (none once settled or when nothing is pending), the backup state
+ * the check read when it read one, and whether it judged (every answer but
+ * 'unknown', whose read failed).
+ */
+function keyBackupCheckPatch(check: E2EKeyBackupWriteCheck | null): Partial<E2EState> {
+  if (!check) return { keyBackupAttempt: null, keyBackupJudged: true };
+  const keyBackupAttempt =
+    check.outcome === 'settled' ? null : { outcome: check.outcome, firstSetup: check.firstSetup };
+  const patch = { keyBackupAttempt, keyBackupJudged: check.outcome !== 'unknown' };
+  return check.stored ? { ...patch, keyBackup: check.stored } : patch;
 }
 
 /**
@@ -167,7 +209,25 @@ interface E2EState {
    *
    * The recovery key itself is never held here — see createKeyBackup.
    */
-  keyBackup: { exists: boolean; updatedAt: string | null } | null;
+  keyBackup: E2EKeyBackupState | null;
+  /**
+   * A write of the key backup that was not confirmed (spec §15.7), as the last
+   * check judged it, for the signed-in account: the account recovery panel
+   * shows its notice until a key is shown for the stored backup, a later
+   * check settles it, or recovery is turned off. The service keeps the record
+   * that outlives this store (the vault's `key_backup_writes`); this is only
+   * what the last check said. Never a recovery key.
+   */
+  keyBackupAttempt: { outcome: E2EKeyBackupReplaceOutcome; firstSetup: boolean } | null;
+  /**
+   * During the panel load under way, a judging of the key backup writes (the
+   * load's own, a "Check again", or the read after a write) answered from a
+   * successful read (spec §15.7), or a key was shown for what is stored.
+   * False from the start of each load until its judging answers, and after a
+   * judging that failed: the panel says recovery is set up only when it is
+   * true.
+   */
+  keyBackupJudged: boolean;
 
   initialize: (userId: string) => Promise<void>;
   flagIdentityChanged: (peerUserId: string) => void;
@@ -184,6 +244,8 @@ interface E2EState {
   resetAccountIdentity: (userId: string) => Promise<void>;
   loadKeyBackup: (userId: string) => Promise<void>;
   createKeyBackup: (userId: string) => Promise<string>;
+  checkKeyBackupWrite: (userId: string) => Promise<E2EKeyBackupWriteCheck['outcome'] | null>;
+  dismissKeyBackupWrite: (userId: string) => Promise<void>;
   deleteKeyBackup: (userId: string) => Promise<void>;
   restoreKeyBackup: (userId: string, recoveryKey: string) => Promise<void>;
 }
@@ -206,6 +268,8 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   ownDevicesLoading: false,
   ownDevicesError: false,
   keyBackup: null,
+  keyBackupAttempt: null,
+  keyBackupJudged: false,
 
   initialize: async (userId: string) => {
     if (get().ready || get().initializing) return;
@@ -524,13 +588,31 @@ export const useE2EStore = create<E2EState>((set, get) => ({
    */
   loadKeyBackup: async (userId: string) => {
     const live = sessionCheck();
+    const latest = keyBackupAsked();
+    const service = getE2EService(userId);
+    // This device's key backup writes are judged beside the read (spec §15.7):
+    // with nothing pending the service answers at once, with a record it waits
+    // for the serial queue, and the panel must not wait with it. The backup
+    // state shows when it is read and the notice joins when the judging
+    // answers. Until then the load is not judged, and a check that fails
+    // leaves it so and keeps the notice there was.
+    set({ keyBackupJudged: false });
+    const judging = service.resolveKeyBackupWrite().then(
+      (check) => ({ check }),
+      (err: unknown) => {
+        console.warn('e2e: judging a key backup write not confirmed failed:', err instanceof Error ? err.message : err);
+        return null;
+      }
+    );
     try {
-      const keyBackup = await getE2EService(userId).keyBackupInfo();
-      if (!live()) return;
-      set({ keyBackup });
+      const keyBackup = await service.keyBackupInfo();
+      if (live() && latest()) set({ keyBackup });
     } catch (err) {
       console.warn('e2e: reading key backup state failed:', err instanceof Error ? err.message : err);
     }
+    const judged = await judging;
+    if (!judged || !live() || !latest()) return;
+    set(keyBackupCheckPatch(judged.check));
   },
 
   /**
@@ -545,16 +627,65 @@ export const useE2EStore = create<E2EState>((set, get) => ({
    */
   createKeyBackup: async (userId: string) => {
     const live = sessionCheck();
-    const recoveryKey = await getE2EService(userId).createKeyBackup();
+    let recoveryKey: string;
+    try {
+      recoveryKey = await getE2EService(userId).createKeyBackup();
+    } catch (err) {
+      // A write nobody confirmed (spec §15.7): the panel shows its notice and
+      // the backup the read after it found, never the one the write may or may
+      // not have left.
+      if (err instanceof E2EKeyBackupUnconfirmedError && live()) {
+        // this write's own read is later than anything a load asked before
+        // now has read: its notice applies, and those loads no longer do
+        keyBackupAsk += 1;
+        set(keyBackupCheckPatch(err));
+      }
+      throw err;
+    }
     // The key still goes back to the caller that asked for it; only the store
     // belongs to the next session now.
     if (!live()) return recoveryKey;
     // Optimistic before the re-read: the blob IS on the server now, so a failed
     // refresh must not leave the panel saying "no recovery set up" in the same
-    // breath as we show the user their recovery key.
-    set({ keyBackup: { exists: true, updatedAt: new Date().toISOString() } });
-    await get().loadKeyBackup(userId);
+    // breath as we show the user their recovery key. A key shown for the stored
+    // backup ends whatever write was pending before it, and counts as judged
+    // even when the judging of the re-read fails.
+    set({ keyBackup: { exists: true, updatedAt: new Date().toISOString() }, keyBackupAttempt: null });
+    const reloading = get().loadKeyBackup(userId);
+    // the reload took its number before its first await: a load asked after
+    // it judges for itself, and the key shown no longer speaks for the panel
+    const reload = keyBackupAsk;
+    await reloading;
+    if (live() && reload === keyBackupAsk) set({ keyBackupJudged: true });
     return recoveryKey;
+  },
+
+  /**
+   * Judge a key backup write not confirmed again (spec §15.7), on "Check
+   * again". Records the notice and the backup state the check read, and
+   * answers its outcome ('settled': nothing pending any more; `null`:
+   * nothing was). Errors propagate, and the store keeps what it showed.
+   */
+  checkKeyBackupWrite: async (userId: string) => {
+    const live = sessionCheck();
+    const latest = keyBackupAsked();
+    const check = await getE2EService(userId).resolveKeyBackupWrite();
+    if (live() && latest()) set(keyBackupCheckPatch(check));
+    return check?.outcome ?? null;
+  },
+
+  /**
+   * The person dismissed the notice of a key backup write not confirmed
+   * (spec §15.7): the service drops its record, and the notice goes. Errors
+   * propagate: the notice stays.
+   */
+  dismissKeyBackupWrite: async (userId: string) => {
+    const live = sessionCheck();
+    await getE2EService(userId).dismissKeyBackupWrite();
+    if (!live()) return;
+    // a load asked before now read the record this dropped
+    keyBackupAsk += 1;
+    set({ keyBackupAttempt: null });
   },
 
   /** Forget the backup. The recovery key that opened it is useless from here. */
@@ -562,7 +693,10 @@ export const useE2EStore = create<E2EState>((set, get) => ({
     const live = sessionCheck();
     await getE2EService(userId).deleteKeyBackup();
     if (!live()) return;
-    set({ keyBackup: { exists: false, updatedAt: null } });
+    // the service dropped the record of a write not confirmed with it, and a
+    // load asked before now read the backup that is gone
+    keyBackupAsk += 1;
+    set({ keyBackup: { exists: false, updatedAt: null }, keyBackupAttempt: null });
   },
 
   /**

@@ -12,9 +12,14 @@ import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import {
   getE2EService,
+  E2EKeyBackupUnavailableError,
+  E2EKeyBackupUnconfirmedError,
   E2ERecoveryKeyFormatError,
+  type E2EKeyBackupReplaceOutcome,
+  type E2EKeyBackupState,
   type E2EOwnDevices,
 } from '../../services/e2e/e2eService';
+import { isE2ESessionEnded } from '../../services/e2e/session';
 import { shortDeviceId } from '../../utils/deviceId';
 import { copyToClipboard } from '../../utils/clipboard';
 
@@ -437,6 +442,55 @@ function DeviceLinkingSection({
 }
 
 /**
+ * What the panel says about this device's key backup writes (spec §15.7), by
+ * what the last check found and by whether the person held a recovery key
+ * before the write (a replace) or not (a first setup).
+ */
+const UNCONFIRMED_BACKUP_TEXT: Record<'replace' | 'setup', Record<E2EKeyBackupReplaceOutcome, string>> = {
+  replace: {
+    unchanged: 'e2e.backupReplaceUnchanged',
+    changed: 'e2e.backupReplaceChanged',
+    elsewhere: 'e2e.backupStoredElsewhere',
+    unknown: 'e2e.backupReplaceUnknown',
+  },
+  setup: {
+    unchanged: 'e2e.backupSetupUnchanged',
+    changed: 'e2e.backupSetupChanged',
+    elsewhere: 'e2e.backupStoredElsewhere',
+    unknown: 'e2e.backupSetupUnknown',
+  },
+};
+
+/**
+ * A polite status region that is mounted before its text: it renders empty
+ * and takes the text after it is in the page, so a screen reader announces a
+ * notice that is already there when the panel opens, not only one that
+ * appears later.
+ */
+function PoliteNotice({ text }: { text: string | null }) {
+  const [shown, setShown] = useState<string | null>(null);
+  useEffect(() => {
+    setShown(text);
+  }, [text]);
+  return (
+    <p role="status" className={shown ? 'mb-2' : undefined}>
+      {shown}
+    </p>
+  );
+}
+
+/** The notice's sentence. A replaced backup that is gone has its own: no key opens what is not there. */
+function unconfirmedBackupText(
+  attempt: { outcome: E2EKeyBackupReplaceOutcome; firstSetup: boolean },
+  keyBackup: E2EKeyBackupState | null
+): string {
+  if (attempt.outcome === 'changed' && !attempt.firstSetup && keyBackup?.exists === false) {
+    return 'e2e.backupReplaceGone';
+  }
+  return UNCONFIRMED_BACKUP_TEXT[attempt.firstSetup ? 'setup' : 'replace'][attempt.outcome];
+}
+
+/**
  * Account recovery (spec §15): the only thing standing between "lost every
  * device" and the identity reset below, which costs every contact a
  * re-verification. Restoring keeps the account key, so nobody is prompted —
@@ -453,9 +507,20 @@ function KeyBackupSection({
 }) {
   const { t } = useTranslation();
   const keyBackup = useE2EStore((s) => s.keyBackup);
+  /** A write of the backup nobody confirmed, as the last check judged it (the store's, so it outlives this panel). */
+  const attempt = useE2EStore((s) => s.keyBackupAttempt);
+  /** This panel load's judging answered from a successful read, or a key was shown for what is stored. */
+  const judged = useE2EStore((s) => s.keyBackupJudged);
   const canApprove = useE2EStore((s) => s.canApprove);
+  const masterKeyConflict = useE2EStore((s) => s.masterKeyConflict);
   const [confirming, setConfirming] = useState<'replace' | 'delete' | null>(null);
   const [busy, setBusy] = useState(false);
+  /** A new recovery key was refused here: the device does not hold the key the account publishes. */
+  const [makeKeyRefused, setMakeKeyRefused] = useState(false);
+  // what the device holds was read again: asking once more is worth it
+  useEffect(() => {
+    setMakeKeyRefused(false);
+  }, [masterKeyConflict, canApprove]);
   /**
    * The recovery key lives HERE and nowhere else: component state dies with the
    * dialog, whereas the store survives the modal, the route and any state dump
@@ -464,15 +529,72 @@ function KeyBackupSection({
   const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
   const [restoreInput, setRestoreInput] = useState('');
   const [restoreError, setRestoreError] = useState<'malformed' | 'failed' | null>(null);
-
   const handleCreate = async () => {
+    if (busy) return;
     setBusy(true);
     try {
       setRecoveryKey(await useE2EStore.getState().createKeyBackup(userId));
       setConfirming(null);
     } catch (err) {
+      // Signed out meanwhile: nothing of this attempt is shown any more (the
+      // vault keeps its record, judged when the panel opens next).
+      if (isE2ESessionEnded(err)) return;
       console.warn('e2e: creating the key backup failed:', err instanceof Error ? err.message : err);
-      toast.error(t('e2e.backupCreateFailed'));
+      if (err instanceof E2EKeyBackupUnconfirmedError) {
+        // a write nobody confirmed: the store holds its notice now
+        setConfirming(null);
+      } else if (err instanceof E2EKeyBackupUnavailableError && attempt) {
+        // the notice says why, instead of a failure that explains nothing
+        setMakeKeyRefused(true);
+        setConfirming(null);
+      } else {
+        toast.error(t('e2e.backupCreateFailed'));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCheckAgain = async () => {
+    if (busy || !attempt) return;
+    const { outcome: shown, firstSetup } = attempt;
+    setBusy(true);
+    try {
+      const outcome = await useE2EStore.getState().checkKeyBackupWrite(userId);
+      // what the panel shows now: a later load may have judged meanwhile
+      const after = useE2EStore.getState();
+      if (outcome === 'settled') {
+        // Nothing is pending any more, and the notice is gone: say what that
+        // means for the person's recovery key.
+        if (firstSetup) toast.error(t('e2e.backupCreateFailed'));
+        else toast.success(t('e2e.backupCheckSettled'));
+      } else if (outcome === 'unknown') {
+        toast.error(t('e2e.backupCheckFailed'));
+      } else if (outcome === 'unchanged' && shown === 'unchanged') {
+        // the notice reads as before: the click still gets an answer
+        toast.info(t('e2e.backupCheckNoChange'));
+      } else if (outcome === null && after.keyBackupAttempt === null && after.keyBackupJudged && after.keyBackup?.exists === true) {
+        // nothing pending any more: what the backup row now says
+        toast.success(t('e2e.backupSetUp'));
+      }
+    } catch (err) {
+      if (isE2ESessionEnded(err)) return;
+      console.warn('e2e: checking the key backup again failed:', err instanceof Error ? err.message : err);
+      toast.error(t('e2e.backupCheckFailed'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDismiss = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await useE2EStore.getState().dismissKeyBackupWrite(userId);
+    } catch (err) {
+      if (isE2ESessionEnded(err)) return;
+      console.warn('e2e: dismissing a key backup notice failed:', err instanceof Error ? err.message : err);
+      toast.error(t('e2e.backupDismissFailed'));
     } finally {
       setBusy(false);
     }
@@ -481,6 +603,7 @@ function KeyBackupSection({
   const handleDelete = async () => {
     setBusy(true);
     try {
+      // the store drops the notice of a write not confirmed with it
       await useE2EStore.getState().deleteKeyBackup(userId);
       toast.success(t('e2e.backupDeleted'));
       setConfirming(null);
@@ -517,16 +640,65 @@ function KeyBackupSection({
   };
 
   // Unknown state: say nothing rather than offer an action that is wrong in one
-  // direction or the other (see shouldOfferKeyBackupRestore).
-  if (!keyBackup) return null;
+  // direction or the other (see shouldOfferKeyBackupRestore). A write nobody
+  // confirmed is the exception: its notice shows even when the backup could
+  // not be read (offline when the panel opened), since that is when it matters.
+  if (!keyBackup && !attempt) return null;
   const canRestore = shouldOfferKeyBackupRestore({ keyBackup, canApprove });
   // Nothing to offer and nothing worth saying: a second device waiting for an
   // ordinary approval — the most common state in the whole flow — does not need
   // to be told about a backup that does not exist. That line earns its place
   // only next to the reset, where it is the reason the reset is the way out.
-  if (!canApprove && !canRestore && !noBackupNotice) return null;
+  if (!canApprove && !canRestore && !noBackupNotice && !attempt) return null;
+
+  // What the notice of a write nobody confirmed offers (spec §15.7)
+  const canMakeKey = canApprove && !masterKeyConflict && !makeKeyRefused;
+  const gone = attempt?.outcome === 'changed' && !attempt.firstSetup && keyBackup?.exists === false;
+  const politeOutcome = attempt?.outcome === 'unchanged' || attempt?.outcome === 'elsewhere';
+  const noticeText = attempt ? unconfirmedBackupText(attempt, keyBackup) : null;
+  // A key may still open what is stored: the saved one on a replace, or the
+  // one another device showed, on a first setup too. Replacing it asks first,
+  // as the ordinary replace does
+  const makeKeyAsks =
+    !!attempt &&
+    (attempt.outcome === 'elsewhere' ||
+      (!attempt.firstSetup && (attempt.outcome === 'unchanged' || attempt.outcome === 'unknown')));
+  // Dismiss never hides a 'changed' notice while a backup is stored: no key
+  // shown opens it, and the warning stays while it is true
+  const canDismiss =
+    !!attempt && (attempt.outcome === 'changed' ? gone : attempt.outcome === 'elsewhere' || !canMakeKey);
+  // While no recovery key shown may open what is stored ('changed', 'unknown',
+  // 'elsewhere'), the backup row claims nothing
+  const doubtful = !!attempt && attempt.outcome !== 'unchanged';
+
+  const handleMakeKey = () => {
+    if (busy) return;
+    if (makeKeyAsks) setConfirming('replace');
+    else void handleCreate();
+  };
+
+  const replaceConfirmation = (
+    <>
+      <p className="mb-2 text-vox-accent-warning">{t('e2e.backupReplaceConfirm')}</p>
+      <div className="flex gap-2">
+        <button
+          onClick={handleCreate}
+          disabled={busy}
+          className="rounded bg-vox-accent-warning px-2 py-1 font-medium text-black hover:opacity-90 disabled:opacity-50"
+        >
+          {busy ? t('common.loading') : t('e2e.backupReplaceAction')}
+        </button>
+        <button onClick={() => setConfirming(null)} className="rounded px-2 py-1 hover:text-vox-text-primary">
+          {t('common.cancel')}
+        </button>
+      </div>
+    </>
+  );
 
   const body = () => {
+    // asked for from the notice too, and shown even when the backup could not be read
+    if (canApprove && confirming === 'replace') return replaceConfirmation;
+    if (!keyBackup) return null;
     if (!canApprove) {
       if (!canRestore) {
         // Named explicitly: it is the reason the reset below is the only way
@@ -566,26 +738,6 @@ function KeyBackupSection({
       );
     }
 
-    if (confirming === 'replace') {
-      return (
-        <>
-          <p className="mb-2 text-vox-accent-warning">{t('e2e.backupReplaceConfirm')}</p>
-          <div className="flex gap-2">
-            <button
-              onClick={handleCreate}
-              disabled={busy}
-              className="rounded bg-vox-accent-warning px-2 py-1 font-medium text-black hover:opacity-90 disabled:opacity-50"
-            >
-              {busy ? t('common.loading') : t('e2e.backupReplaceAction')}
-            </button>
-            <button onClick={() => setConfirming(null)} className="rounded px-2 py-1 hover:text-vox-text-primary">
-              {t('common.cancel')}
-            </button>
-          </div>
-        </>
-      );
-    }
-
     if (confirming === 'delete') {
       return (
         <>
@@ -609,10 +761,12 @@ function KeyBackupSection({
     if (keyBackup.exists) {
       return (
         <>
-          <p className="mb-1 flex items-center gap-1.5 font-medium text-vox-accent-success">
-            <ShieldCheck size={14} />
-            {t('e2e.backupSetUp')}
-          </p>
+          {judged && !doubtful && (
+            <p className="mb-1 flex items-center gap-1.5 font-medium text-vox-accent-success">
+              <ShieldCheck size={14} />
+              {t('e2e.backupSetUp')}
+            </p>
+          )}
           {keyBackup.updatedAt && (
             <p className="mb-2">
               {t('e2e.backupUpdatedAt', { date: new Date(keyBackup.updatedAt).toLocaleDateString() })}
@@ -658,6 +812,60 @@ function KeyBackupSection({
       <p className="mb-1.5 font-medium text-vox-text-secondary">
         {canRestore ? t('e2e.backupRestoreTitle') : t('e2e.backupTitle')}
       </p>
+      <div
+        data-testid="e2e-backup-unconfirmed"
+        data-outcome={attempt?.outcome}
+        className={clsx(
+          attempt && 'mb-2 rounded border p-2',
+          politeOutcome && 'border-vox-border text-vox-text-secondary',
+          attempt?.outcome === 'changed' && 'border-vox-accent-danger/40 text-vox-accent-danger',
+          attempt?.outcome === 'unknown' && 'border-vox-accent-warning/40 text-vox-accent-warning'
+        )}
+      >
+        {/* 'unchanged' and 'elsewhere' are announced politely, the two others are alerts */}
+        <PoliteNotice text={politeOutcome && noticeText ? t(noticeText) : null} />
+        {attempt && !politeOutcome && noticeText && (
+          <p role="alert" className="mb-2">
+            {t(noticeText)}
+          </p>
+        )}
+        {attempt && !canMakeKey && (
+          <p className="mb-2" data-testid="e2e-backup-cannot-make">
+            {t('e2e.backupCannotMakeKey')}
+          </p>
+        )}
+        {attempt && (
+          <div className="flex flex-wrap gap-2">
+            {attempt.outcome !== 'changed' && (
+              <button
+                onClick={handleCheckAgain}
+                disabled={busy}
+                className="rounded border border-vox-border px-2 py-1 font-medium text-vox-text-secondary hover:bg-vox-bg-hover disabled:opacity-50"
+              >
+                {busy ? t('common.loading') : t('e2e.backupCheckAgain')}
+              </button>
+            )}
+            {canMakeKey && (
+              <button
+                onClick={handleMakeKey}
+                disabled={busy}
+                className="rounded bg-vox-accent-primary px-2 py-1 font-medium text-white hover:opacity-90 disabled:opacity-50"
+              >
+                {t('e2e.backupMakeNewKey')}
+              </button>
+            )}
+            {canDismiss && (
+              <button
+                onClick={handleDismiss}
+                disabled={busy}
+                className="rounded px-2 py-1 font-medium hover:text-vox-text-primary disabled:opacity-50"
+              >
+                {t('e2e.backupDismiss')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
       {body()}
       {recoveryKey && (
         <RecoveryKeyDialog recoveryKey={recoveryKey} onAcknowledge={() => setRecoveryKey(null)} />
@@ -715,9 +923,8 @@ export function E2EDevicesSection() {
     if (!user?.id) return;
     void useE2EStore.getState().loadOwnDevices(user.id);
     // Read once per open rather than folded into loadOwnDevices: that runs
-    // again after every approve/revoke, and GET /e2e/backup shares the 30/hour
-    // approval bucket — spending it on a row that device actions cannot change
-    // is how a multi-device setup ends in a 429 mid-approval.
+    // again after every approve/revoke, and device actions cannot change this
+    // row. The read also judges a key backup write not confirmed (§15.7).
     void useE2EStore.getState().loadKeyBackup(user.id);
   }, [user?.id]);
 
