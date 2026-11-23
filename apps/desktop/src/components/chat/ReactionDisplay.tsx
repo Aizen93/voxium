@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { Plus } from 'lucide-react';
@@ -22,6 +22,12 @@ export function ReactionDisplay({ reactions, messageId, channelId, conversationI
   const [showPicker, setShowPicker] = useState(false);
   const userId = useAuthStore((s) => s.user?.id);
   const addBtnRef = useRef<HTMLButtonElement>(null);
+
+  // the add control goes away (read-only, or no ADD_REACTIONS): its picker
+  // state goes with it, so it does not reopen when the control comes back
+  useEffect(() => {
+    if (readOnly) setShowPicker(false);
+  }, [readOnly]);
 
   if (reactions.length === 0 && (!showPicker || readOnly)) return null;
 
