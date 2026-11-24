@@ -103,9 +103,10 @@ vi.mock('../../middleware/rateLimiter', () => {
 });
 
 // S3
+const mockDeleteMultipleFromS3 = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/s3', () => ({
   VALID_ATTACHMENT_KEY_RE: /^attachments\//,
-  deleteMultipleFromS3: vi.fn().mockResolvedValue(undefined),
+  deleteMultipleFromS3: mockDeleteMultipleFromS3,
 }));
 
 // Upload read-back (its own unit tests cover the S3 side)
@@ -1027,6 +1028,45 @@ describe('Message Routes', () => {
       expect(mockEmit).toHaveBeenCalledWith('message:delete', {
         messageId: 'msg-1',
         channelId: 'ch-1',
+      });
+    });
+
+    describe('a message that is gone when the delete runs', () => {
+      const attachments = [{ s3Key: 'attachments/ch-1/a-photo.png' }];
+      const del = () => request(app)
+        .delete('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${makeToken()}`);
+
+      beforeEach(() => {
+        prismaMock.message.findUnique.mockResolvedValue(makeMockMessage({ attachments }));
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+        mockDeleteMultipleFromS3.mockReset().mockResolvedValue(undefined);
+      });
+
+      it('P2025 answers the missing-message 404 and announces and deletes nothing', async () => {
+        prismaMock.message.delete.mockRejectedValueOnce(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+
+        const res = await del();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Message not found');
+        expect(mockEmit).not.toHaveBeenCalledWith('message:delete', expect.anything());
+        expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      });
+
+      it('any other error still surfaces as a 500, announcing nothing', async () => {
+        const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          prismaMock.message.delete.mockRejectedValueOnce(new Error('db gone'));
+
+          const res = await del();
+
+          expect(res.status).toBe(500);
+          expect(mockEmit).not.toHaveBeenCalledWith('message:delete', expect.anything());
+          expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+        } finally {
+          errorLog.mockRestore();
+        }
       });
     });
   });
