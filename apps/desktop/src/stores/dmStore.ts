@@ -6,6 +6,7 @@ import i18n from '../i18n';
 import { DELETED_MESSAGE_TYPE, DM_LIST_PAGE_DEFAULT, isDeletedParticipantId, isDMSystemNotice } from '@voxium/shared';
 import type { Conversation, DMUnreadCount, UserStatus } from '@voxium/shared';
 import { deletedParticipantAuthor } from '../services/e2e/displayGate';
+import { isYoungerThan } from '../utils/age';
 import { isParticipantDeleted, isHeldReadOnly } from '../utils/dmParticipant';
 import { currentE2ESessionUser } from '../services/e2e/session';
 import { clearedFloorOf, isAtOrBelowClearedFloor, parseServerTime } from '../services/e2e/clearedFloors';
@@ -236,6 +237,7 @@ function isInvalidCursorAnswer(err: unknown): boolean {
 // Dedup: prevent redundant mark-as-read API calls (same pattern as serverStore)
 let _lastMarkedConv = '';
 let _lastMarkedConvAt = 0;
+const MARK_READ_DEDUP_MS = 2000;
 
 /**
  * An encrypted last message's text is the server's word until this client
@@ -782,7 +784,7 @@ export const useDMStore = create<DMState>((set, get) => ({
   markConversationRead: (conversationId: string) => {
     // Dedup: skip if same conversation was marked within the last 2s
     const now = Date.now();
-    if (conversationId === _lastMarkedConv && now - _lastMarkedConvAt < 2000) return;
+    if (conversationId === _lastMarkedConv && isYoungerThan(_lastMarkedConvAt, MARK_READ_DEDUP_MS)) return;
     _lastMarkedConv = conversationId;
     _lastMarkedConvAt = now;
     // Retry once on failure to prevent stale lastReadAt causing phantom unreads on reconnect
