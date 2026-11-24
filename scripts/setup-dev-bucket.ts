@@ -50,9 +50,10 @@ if (!bucket.startsWith('dev-')) {
 /**
  * The origins a developer actually serves the client from, plus whatever
  * CORS_ORIGIN in apps/server/.env allows (the origins the server's boot check
- * looks for). Tauri gets its own scheme: https://tauri.localhost on Windows,
- * tauri://localhost on macOS, http://tauri.localhost on Linux — all three are
- * listed so an installed desktop build can upload on any platform.
+ * looks for). Tauri gets its own origin: http://tauri.localhost on Windows,
+ * tauri://localhost on macOS and Linux. https://tauri.localhost is used by no
+ * current build and stays listed as a harmless extra, so an installed desktop
+ * build can upload on any platform.
  */
 const DEV_ORIGINS = [
   'http://localhost:8080',

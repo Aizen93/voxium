@@ -5,7 +5,7 @@
 //
 // - In a browser the page IS the web client: its own origin.
 // - The desktop app's page is the webview's internal origin
-//   (https://tauri.localhost, tauri://localhost), which nobody else can open,
+//   (http://tauri.localhost, tauri://localhost), which nobody else can open,
 //   so the build has to be told: VITE_CLIENT_URL, compiled in like the other
 //   VITE_* settings.
 // - `tauri dev` loads the Vite dev server, which serves the web client: its
