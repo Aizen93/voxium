@@ -4,8 +4,7 @@ import { describeCaughtError } from './loggableError';
 
 /**
  * The four inputs of `Server.discoveryListed`, the materialised column the
- * directory filters on so the listing query never joins
- * (docs/local/server-discovery-plan.html, "What is listed").
+ * directory filters on so the listing query never joins.
  */
 export interface DiscoveryListingInputs {
   discoverable: boolean;

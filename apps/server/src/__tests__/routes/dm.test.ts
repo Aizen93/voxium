@@ -849,7 +849,7 @@ describe('DM routes — encrypted conversation message enforcement', () => {
     }
   });
 
-  // This rejection is the ENTIRE mitigation for an un-updated client (plan D2):
+  // This rejection is the ENTIRE mitigation for an un-updated client (docs/e2e-always-on-plan.md §3, D2):
   // no minimum client version was built, so this string is what an old build
   // shows its user instead of silently downgrading to plaintext. Asserted
   // verbatim — the wording is the feature.

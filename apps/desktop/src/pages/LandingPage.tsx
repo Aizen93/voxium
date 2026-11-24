@@ -1243,7 +1243,7 @@ function ComparisonTable() {
     { feature: t('landing.comparison.encryptedChannels'), voxium: true,                discord: false,          teamspeak: false,          matrix: true },
     // Incoming webhooks shipped in 2.1.0 (routes/webhooks.ts, webhookExecute.ts): their own row.
     // TeamSpeak: checked 2026-11-08 against the official TS6 server README and
-    // CONFIG.md and the feature pages — no webhook feature; the server offers a
+    // configuration reference and the feature pages — no webhook feature; the server offers a
     // request/response query API and metrics only. Matrix: inbound webhooks are
     // the Hookshot bridge (matrix.org), which a homeserver admin deploys — not a
     // built-in feature of a free account, hence "Via Hookshot". Agents / bots

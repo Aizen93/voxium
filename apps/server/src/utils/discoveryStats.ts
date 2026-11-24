@@ -6,8 +6,7 @@ import { bumpDiscoveryPageCache } from './discoveryPageCache';
 import { DISCOVERY_SCORE_WEIGHTS, JOIN_REQUEST_DECLINE_COOLDOWN_DAYS, JOIN_REQUEST_PENDING_TTL_DAYS } from '@voxium/shared';
 import { describeCaughtError } from './loggableError';
 
-// The directory's activity figures on a daily cycle
-// (docs/local/server-discovery-plan.html, "Statistics, daily cycle").
+// The directory's activity figures on a daily cycle.
 //
 // The directory does not need live figures: a day-old number is fine, two
 // days under backlog is fine, and a server not yet refreshed ranks on what it

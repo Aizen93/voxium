@@ -56,7 +56,7 @@ describe('Server discovery — shared constants', () => {
     }
   });
 
-  it('paging, depth, total cap and search bounds are the plan\'s numbers and mutually consistent', () => {
+  it('paging, depth, total cap and search bounds are fixed numbers and mutually consistent', () => {
     expect(DISCOVERY_PAGE_SIZE).toBe(24);
     expect(DISCOVERY_MAX_PAGE_SIZE).toBe(48);
     expect(DISCOVERY_PAGE_SIZE).toBeLessThanOrEqual(DISCOVERY_MAX_PAGE_SIZE);

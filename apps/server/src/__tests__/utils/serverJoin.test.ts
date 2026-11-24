@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// joinServerMember — the ONE path that makes an existing user a server member
-// (docs/local/server-discovery-plan.html). Invite joins, direct discovery joins
+// joinServerMember — the ONE path that makes an existing user a server member. Invite joins, direct discovery joins
 // and approved join requests all run through it, so the ban check, the member
 // limit, the duplicate check and the inline member count are tested here once.
 

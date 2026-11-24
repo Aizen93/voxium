@@ -8,8 +8,7 @@ import type { ServerMember } from '@voxium/shared';
 /**
  * The server's member search for a picker: null while the text is empty (the
  * caller shows the rows it holds), the matching rows once it settled. The
- * rows the client holds are only a slice of a big server (CLAUDE.md "Server
- * Membership"), so a picker filtering them locally would miss most members.
+ * rows the client holds are only a slice of a big server, so a picker filtering them locally would miss most members.
  *
  * A failed search (the search limiter, the network) is ALSO null: the caller
  * falls back to filtering its own rows with memberMatches, which on a small

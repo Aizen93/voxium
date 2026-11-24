@@ -17,7 +17,7 @@ describe('stunUrl — where DM calls send their STUN binding requests', () => {
     expect(deriveStunUrl(undefined)).toBe('stun:localhost:3478');
   });
 
-  // A dedicated coturn node (infra plan §8.6) needs the client to be pointed
+  // A STUN server that is not on the API's host needs the client to be pointed
   // at it; the value is compiled in, so it is an env var, not a setting.
   it('honours a well-formed VITE_STUN_URL override, trimmed, in either scheme', () => {
     expect(resolveStunUrl({ VITE_STUN_URL: 'stun:stun.voxium.app:3478', VITE_WS_URL: 'https://voxium.app' }))

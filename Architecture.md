@@ -1397,7 +1397,7 @@ sequenceDiagram
 | Password Reset | SHA-256 hashed tokens, 1hr expiry, single-use, anti-enumeration |
 | Email Verification | SHA-256 hashed tokens, 24hr expiry, single-use, format validation (64 hex chars, lowercase normalized), `requireVerifiedEmail` on all functional routes + attachment proxy + Socket.IO, StrictMode double-POST guard, migration preflight duplicate check |
 | Registration | Generic "Username or email already in use" error prevents email enumeration; email normalized to lowercase; Nodemailer structured address prevents header injection; full anti-bot pipeline (see Registration Abuse Defenses below) |
-| CORS | Explicit origin whitelist (must include Tauri origins: `https://tauri.localhost` Win, `tauri://localhost` macOS, `http://tauri.localhost` Linux). No `withCredentials` on client (Bearer tokens, not cookies) — avoids strict CORS mode that breaks on custom protocol origins. Server CORS echoes first allowed origin on null-origin requests instead of `*` |
+| CORS | Explicit origin whitelist (must include Tauri origins: `http://tauri.localhost` Windows, `tauri://localhost` macOS and Linux, `https://tauri.localhost` only for a build that sets Tauri's `useHttpsScheme`). No `withCredentials` on client (Bearer tokens, not cookies) — avoids strict CORS mode that breaks on custom protocol origins. Server CORS echoes first allowed origin on null-origin requests instead of `*` |
 | Input | Server-side validation on all endpoints + runtime type validation on all Socket.IO payloads |
 | SQL Injection | Prisma parameterized queries |
 | IDOR | Message edit/delete verify channelId match + server membership; cross-channel manipulation blocked |

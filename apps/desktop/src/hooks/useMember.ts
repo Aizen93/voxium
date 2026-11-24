@@ -5,8 +5,8 @@ import type { ServerMember } from '@voxium/shared';
 /**
  * The active server's row for a user, fetched when the client has none.
  *
- * The People panel's slice is not the whole membership on a big server
- * (CLAUDE.md "Server Membership"), so a message author, a voice participant
+ * The People panel's slice is not the whole membership on a big server,
+ * so a message author, a voice participant
  * or a profile popup can name someone with no row here. The lookup is
  * batched and remembers misses; while it is in flight — or when the user
  * turns out not to be a member — this is undefined, and the caller falls

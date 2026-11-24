@@ -105,7 +105,7 @@ function keyBackupCheckPatch(check: E2EKeyBackupWriteCheck | null): Partial<E2ES
 }
 
 /**
- * A linking code that names no device of this account (spec §17, plan §4.3).
+ * A linking code that names no device of this account (spec §17, docs/e2e-always-on-plan.md §4.3).
  *
  * Typed rather than a message so the UI never string-matches: "nothing is
  * showing that code" is the answer to a typo or to a code read off someone
@@ -522,7 +522,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   },
 
   /**
-   * Resolve a linking code to the device that is showing it (plan §4.3) —
+   * Resolve a linking code to the device that is showing it (docs/e2e-always-on-plan.md §4.3) —
    * and STOP there. Nothing is approved, nothing is signed, no key moves.
    *
    * The split is the whole security story of this flow. The code itself is not
