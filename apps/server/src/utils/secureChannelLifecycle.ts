@@ -5,6 +5,7 @@ import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs'
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from './transactionRetry';
 import { WS_EVENTS, e2eChannelScope } from '@voxium/shared';
 import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websocket/voiceCluster';
+import { prismaErrorCode } from './errors';
 import { describeCaughtError, describeCaughtErrorWithStack } from './loggableError';
 
 /**
@@ -278,31 +279,63 @@ export async function broadcastSecureMembersUpdated(channelId: string, serverId:
  *
  * Returns false if the channel does not exist or is not secure (callers treat
  * that as not-found — this helper must never delete a plaintext channel).
+ *
+ * The cascade takes the channel's messages, reactions, attachments and reply
+ * links with the row, so it can meet a transaction holding some of them (an
+ * account deletion's final delete) and lose the deadlock: the attempt runs
+ * again (retryOnTransactionConflict). One attempt = `authorize`, then ONE
+ * transaction that locks the channel row FIRST (the order every transaction
+ * in the channel takes), reads the member list the notices go to, and deletes
+ * the row; a member added meanwhile queues on that lock, so the list is the
+ * one the delete committed against. `authorize` is the caller's decision
+ * (the levers, the opacity answers), made once before the keys are read and
+ * again on every attempt on the shared client BEFORE the transaction opens;
+ * it throws to refuse.
+ * The attachment keys are read once, before the first attempt; the files, the
+ * notices, the room leaves and the voice teardown run once, after the retry
+ * returned.
  */
-export async function deleteSecureChannel(channelId: string): Promise<boolean> {
-  const channel = await prisma.channel.findUnique({
-    where: { id: channelId },
-    select: {
-      id: true,
-      secure: true,
-      serverId: true,
-      members: { select: { userId: true } },
-    },
-  });
-  if (!channel || !channel.secure) return false;
-
-  const memberIds = channel.members.map((m) => m.userId);
+export async function deleteSecureChannel(
+  channelId: string,
+  authorize?: () => Promise<void>,
+): Promise<boolean> {
+  // The early refusal: a caller without a lever costs no key read
+  if (authorize) {
+    await authorize();
+  } else if (!await prisma.channel.findFirst({ where: { id: channelId, secure: true }, select: { id: true } })) {
+    // Never reads the keys of a plaintext or a missing channel
+    return false;
+  }
   // Read in bounded batches (utils/attachmentBlobs.ts), not as one nested
   // load of every message with an attachment the channel ever had
   const s3Keys = await collectAttachmentKeys({ channelId });
 
-  await prisma.channel.delete({ where: { id: channelId } });
+  const deleted = await retryOnTransactionConflict(async () => {
+    if (authorize) await authorize();
+    return prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<{ serverId: string }[]>`
+        SELECT server_id AS "serverId" FROM channels
+        WHERE id = ${channelId} AND secure = true FOR UPDATE`;
+      // Not there, or not secure: nothing is deleted
+      if (rows.length === 0) return null;
+      const members = await tx.channelMember.findMany({ where: { channelId }, select: { userId: true } });
+      try {
+        await tx.channel.delete({ where: { id: channelId } });
+      } catch (err) {
+        // The row went between the lock and the delete: a missing channel
+        if (prismaErrorCode(err) === 'P2025') return null;
+        throw err;
+      }
+      return { serverId: rows[0].serverId, memberIds: members.map((m) => m.userId) };
+    }, LOCK_WAIT_TRANSACTION_OPTIONS);
+  }, `[SecureChannel] The delete of channel ${channelId}`);
+  if (!deleted) return false;
 
   // Started right after the row, ahead of the events: a fan-out step that
   // throws below must not skip it. Never awaited, never throws.
   deleteAttachmentBlobs(s3Keys, '[SecureChannel]', `deleted channel ${channelId}`);
 
-  await announceSecureChannelDeleted(channelId, channel.serverId, memberIds);
+  await announceSecureChannelDeleted(channelId, deleted.serverId, deleted.memberIds);
   return true;
 }
 
