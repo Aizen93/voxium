@@ -466,7 +466,7 @@ interface ServerState {
   fetchSecureChannelCount: (serverId: string) => Promise<number>;
   handleChannelMembersUpdated: (payload: { channelId?: unknown; serverId?: unknown; members?: unknown }) => void;
 
-  // Server discovery — the owner side (docs/local/server-discovery-plan.html).
+  // Server discovery — the owner side.
   // Profile changes land through server:updated, never the PATCH response.
   /** Pending join requests per server, for the Members tab badge (moderators only). */
   joinRequestCounts: Record<string, number>;

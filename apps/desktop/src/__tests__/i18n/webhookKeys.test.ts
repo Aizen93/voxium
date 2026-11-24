@@ -9,8 +9,7 @@ import { WEBHOOK_ERROR_KEYS } from '../../utils/serverErrors';
 // A missing translation does not throw — i18next renders the raw key, so a
 // non-English moderator would see "webhooks.reveal.copyNow" exactly where
 // the one warning that the URL is shown once lives. Sibling of
-// discoveryKeys.test.ts, scoped to the incoming-webhooks surface
-// (docs/local/webhooks-plan.html): the Integrations tab and its dialogs, the
+// discoveryKeys.test.ts, scoped to the incoming-webhooks surface: the Integrations tab and its dialogs, the
 // tab label and limit row, the mapped server errors, and the two message-row
 // labels a webhook-authored message carries.
 

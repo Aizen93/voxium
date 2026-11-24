@@ -483,7 +483,7 @@ export async function prepareOutgoingDM(
   const conversation = useDMStore.getState().conversations.find((c) => c.id === conversationId);
   // The peer id drives the session fanout, so a conversation the store has not
   // loaded cannot be encrypted to anyone — and must not degrade to a plaintext
-  // send the server would reject anyway (plan §4.2).
+  // send the server would reject anyway (docs/e2e-always-on-plan.md §4.2).
   if (!conversation) throw new Error(`Conversation ${conversationId} is not loaded`);
   // the other side's account is gone: nothing is encrypted to its placeholder
   if (isParticipantDeleted(conversation)) throw new DMConversationReadOnlyError(conversationId);

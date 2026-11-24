@@ -16,8 +16,8 @@ const NO_ROWS: ServerMember[] = [];
 /**
  * Server settings → Members: the DIRECTORY. Unlike the People panel, which
  * shows who is around, this is every member of the server — paged by the
- * server in owner, admins, join-date order, searched and filtered server-side
- * (CLAUDE.md "Server Membership"). The rows are the store's directory state,
+ * server in owner, admins, join-date order, searched and filtered server-side.
+ * The rows are the store's directory state,
  * so a kick, a role or nickname change and a join land here live.
  */
 export function MembersDirectory({ serverId }: { serverId: string }) {

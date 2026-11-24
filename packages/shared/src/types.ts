@@ -253,7 +253,7 @@ export interface Server {
   invitesLocked: boolean;
   ownerId: string;
   createdAt: string;
-  // Directory profile (docs/local/server-discovery-plan.html). Every select
+  // Directory profile. Every select
   // that spells out invitesLocked/ownerId/createdAt carries these too.
   description: string | null;
   tags: string[];

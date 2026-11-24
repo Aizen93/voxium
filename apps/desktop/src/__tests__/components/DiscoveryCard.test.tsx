@@ -6,7 +6,7 @@ import type { DiscoveryServer } from '@voxium/shared';
 /**
  * The directory card is ONE component for Explore and for the owner's
  * preview. What matters is that the single button follows the server's join
- * mode and the viewer's state exactly as the plan's table says, and that the
+ * mode and the viewer's state exactly as the join rules require, and that the
  * three ranking inputs and the tags are printed.
  */
 

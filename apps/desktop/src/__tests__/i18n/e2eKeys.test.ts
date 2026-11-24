@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 // BOTH halves of the E2E surface. The account-level UI (devices, linking,
 // recovery key, identity reset) moved out of the DM modal into Settings →
-// Security (plan §4.5) and took most of these strings with it — scanning only
+// Security (docs/e2e-always-on-plan.md §4.5) and took most of these strings with it — scanning only
 // the file it left behind would quietly stop covering exactly the keys that
 // relocated, which is the failure this test exists to prevent.
 const SOURCES = [

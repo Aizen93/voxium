@@ -10,8 +10,7 @@ import { DISCOVERY_ERROR_KEYS } from '../../utils/serverErrors';
 // A missing translation does not throw — i18next renders the raw key, so a
 // non-English owner would see "discovery.settings.blockedByAdmin" exactly
 // where the one notice that explains an admin block lives. Sibling of
-// secureChannelKeys.test.ts, scoped to the server-discovery surface
-// (docs/local/server-discovery-plan.html, "i18n").
+// secureChannelKeys.test.ts, scoped to the server-discovery surface.
 
 const SOURCES = [
   fileURLToPath(new URL('../../components/discovery/DiscoveryCard.tsx', import.meta.url)),
@@ -34,7 +33,7 @@ const SOURCES = [
 ];
 const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url));
 
-/** The discovery surface's prefixes: the plan's namespaces plus the tab label. */
+/** The discovery surface's prefixes: the discovery namespaces plus the tab label. */
 const PREFIX = String.raw`(?:discovery\.|server\.joinRequests\.|server\.banned\.|server\.removeAndBan|server\.banReason|serverSettings\.tabs\.discovery|chat\.report\.reportSpace)`;
 
 /** Every static key the surface can reach, via t() or i18n.t(). */

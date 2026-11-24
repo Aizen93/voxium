@@ -6,7 +6,7 @@ import type { Channel, Role, ServerMember, VoiceUser } from '@voxium/shared';
 import type { PeopleState } from '../../stores/serverStore';
 
 /**
- * The People panel is a PRESENCE view (CLAUDE.md "Server Membership"): on a
+ * The People panel is a PRESENCE view: on a
  * small server every member is loaded and the Offline section lists them; on
  * a big one the rows are the online slice, the Offline section is a count
  * and a way into the directory, and a slice cut at the cap says how many

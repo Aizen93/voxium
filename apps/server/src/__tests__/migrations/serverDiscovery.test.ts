@@ -3,8 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
- * The server_discovery migration (docs/local/server-discovery-plan.html,
- * "Data model") has two things a schema diff alone would not carry, and they
+ * The server_discovery migration has two things a schema diff alone would not carry, and they
  * are what these tests pin:
  *
  * - the two BACKFILLS, after the columns exist — without them every existing

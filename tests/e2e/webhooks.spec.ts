@@ -7,7 +7,7 @@ import { testUser, injectAuth } from './helpers/auth';
 import { API_URL, PAGE_API_URL, registerUser, createServer, createChannel, deleteServer } from './helpers/api';
 import { deleteSeededUsers, deleteServersNamed } from './helpers/db';
 
-// Live test of incoming webhooks (docs/local/webhooks-plan.html, step 4):
+// Live test of incoming webhooks:
 // one owner, one server, one text channel kept OPEN in one page for the whole
 // run, so every message (and every purge) is seen arriving live:
 //   1. a generic webhook is created from Space settings → Integrations; the

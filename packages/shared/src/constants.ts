@@ -78,12 +78,12 @@ export const LIMITS = {
   THEME_MAX_PER_USER: 10,
   THEMES_PER_PAGE: 20,
   THEME_SVG_MAX_SIZE: 10_000, // 10KB max for custom SVG patterns
-  // Server discovery (docs/local/server-discovery-plan.html)
+  // Server discovery
   SERVER_DESCRIPTION_MAX: 300,
   DISCOVERY_MAX_TAGS: 5,
   SERVER_BAN_REASON_MAX: 300,
   JOIN_REQUEST_MESSAGE_MAX: 300,
-  // Incoming webhooks (docs/local/webhooks-plan.html)
+  // Incoming webhooks
   MAX_WEBHOOKS_PER_SERVER: 10,
   /** secure (invite-only E2E) channels per space, counted apart from MAX_CHANNELS_PER_SERVER */
   MAX_SECURE_CHANNELS_PER_SERVER: 5,
@@ -290,7 +290,6 @@ export const ANNOTATION_FADE_AFTER_MS = 3_000;
 export const ANNOTATION_FADE_OUT_MS = 800;
 
 // ─── Server discovery ────────────────────────────────────────────────────────
-// Decisions and reasons: docs/local/server-discovery-plan.html.
 
 /** The tag vocabulary. Fixed and lowercase on purpose: free-text tags need
  *  moderation and cannot be translated or indexed cleanly. Grows by PR, and

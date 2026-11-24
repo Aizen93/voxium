@@ -12,7 +12,7 @@ import type { Conversation, UserStatus, VoiceUser } from '@voxium/shared';
  * aggregated unread), and a space with people in voice carries a live mark
  * wherever it is. Everything else is one click away in the spaces menu.
  *
- * Issue 6 (docs/local/spaces-dm-navigation-plan.html, Concept E): the way to
+ * The way to
  * Direct Messages is a LABELLED tab in both contexts with the three most
  * recent people next to it; "New space" is a labelled tab after the tab row;
  * and the whole strip can fold into a notch that slides out a chamfered panel

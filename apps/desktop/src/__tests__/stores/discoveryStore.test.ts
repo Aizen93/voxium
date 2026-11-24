@@ -11,8 +11,7 @@ import { useDiscoveryStore, searchableQuery, resetDiscoveryModuleState } from '.
 import { useServerStore } from '../../stores/serverStore';
 
 /**
- * Explore's store: the browse state and the viewer's actions
- * (docs/local/server-discovery-plan.html, "Desktop client → Explore").
+ * Explore's store: the browse state and the viewer's actions.
  */
 
 const mockGet = api.get as unknown as Mock;

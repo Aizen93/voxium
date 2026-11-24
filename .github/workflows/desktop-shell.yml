@@ -83,7 +83,7 @@ jobs:
 
       # share_bar.rs links webview2-com and windows-core at the versions wry
       # links; a second copy of webview2-com in the graph means two incompatible
-      # sets of COM bindings (CLAUDE.md, Tauri). `cargo tree -i` prints one
+      # sets of COM bindings. `cargo tree -i` prints one
       # root line per version present.
       - name: One webview2-com in the dependency graph
         run: |

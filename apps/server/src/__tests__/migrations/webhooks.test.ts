@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
- * The webhooks migration (docs/local/webhooks-plan.html, "Data model") is
+ * The webhooks migration is
  * hand-written from `prisma migrate diff`, with the dev database's unrelated
  * drift removed. What these pin is what a review would otherwise have to
  * re-derive: the one column made nullable, the ON DELETE behaviour of every
