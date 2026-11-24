@@ -81,6 +81,7 @@ import { pinSecure, securePinGeneration } from '../../utils/securePins';
 import { currentE2ESessionUser, isE2ESessionEnded } from './session';
 import { isAtOrBelowClearedFloor } from './clearedFloors';
 import { sha256Hex } from '../../utils/sha256';
+import { isYoungerThan } from '../../utils/age';
 
 interface OneTimeKeyPair {
   keyId: string;
@@ -653,18 +654,6 @@ function deviceSetFingerprint(devices: Array<{ deviceId: string; curve25519Key: 
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * Whether `at`, a time this device's clock wrote, lies less than `maxAgeMs`
- * behind the clock now. An age below zero (the clock was set back since) or
- * one that is not a finite number never is: what `at` dates counts as
- * expired, never as fresh until the clock catches up with it.
- */
-function isYoungerThan(at: number | undefined, maxAgeMs: number): boolean {
-  if (typeof at !== 'number') return false;
-  const age = Date.now() - at;
-  return Number.isFinite(age) && age >= 0 && age < maxAgeMs;
 }
 
 /**

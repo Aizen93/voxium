@@ -622,7 +622,29 @@ channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request
     // read now and the files deleted once the row is gone
     const attachmentKeys = await collectAttachmentKeys({ channelId });
 
-    await prisma.channel.delete({ where: { id: channelId } });
+    // The cascade takes the channel's messages, reactions, attachments and
+    // reply links with the row, so it can meet a transaction holding some of
+    // them (an account deletion) and lose the deadlock: it runs again, every
+    // check made before it made again first (one attempt = checks, then the
+    // delete; the steps below run once, after the retry returned).
+    await retryOnTransactionConflict(async () => {
+      const [current, mayManage] = await Promise.all([
+        prisma.channel.findFirst({ where: { id: channelId, serverId }, select: { id: true, secure: true } }),
+        hasServerPermission(userId, serverId, Permissions.MANAGE_CHANNELS),
+      ]);
+      if (!mayManage) throw new ForbiddenError('You do not have permission to delete channels');
+      if (!current || current.secure) throw new NotFoundError('Channel');
+      if (!await hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
+        throw new NotFoundError('Channel');
+      }
+      try {
+        await prisma.channel.delete({ where: { id: channelId } });
+      } catch (err) {
+        // The row went between the check and the delete: a missing channel
+        if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Channel');
+        throw err;
+      }
+    }, `[Channels] The delete of channel ${channelId}`);
     deleteAttachmentBlobs(attachmentKeys, '[Channels]', `channel ${channelId}`);
 
     // The row is gone: every step below is best effort, each on its own, so
