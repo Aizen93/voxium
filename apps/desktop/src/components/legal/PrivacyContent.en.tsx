@@ -1,4 +1,4 @@
-import { MINIMUM_AGE, SESSIONS, SIGNUP } from '@voxium/shared';
+import { MINIMUM_AGE, REPORT_RETENTION_MONTHS, SESSIONS, SIGNUP } from '@voxium/shared';
 import { LEGAL_OPERATOR, PRIVACY_POLICY_DATES, publisherOf } from './operator';
 import { formatLegalDate } from './legalDates';
 import { MailLink } from './MailLink';
@@ -248,9 +248,23 @@ export function PrivacyContentEn() {
             <li><strong className="text-vox-text-primary">Removals from a space</strong> are recorded as a ban on that space until one of its moderators lifts it</li>
             <li><strong className="text-vox-text-primary">Undelivered encryption key material</strong> is deleted after 30 days</li>
             <li>
-              <strong className="text-vox-text-primary">Support conversations and reports</strong> have no automatic
-              expiry: they are kept for support and moderation, and are deleted with the account that opened or
-              filed them, or that a report concerns
+              <strong className="text-vox-text-primary">Support conversations</strong> have no automatic expiry: they
+              are kept for support, and are deleted with the account that opened them
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Reports.</strong> A report is kept for moderation and, while
+              the accounts it concerns exist, has no automatic expiry. Until{' '}
+              {formatLegalDate(PRIVACY_POLICY_DATES.reportsKeptFrom, 'en')}, deleting your account deletes the reports
+              you filed and the reports that concern you. From{' '}
+              {formatLegalDate(PRIVACY_POLICY_DATES.reportsKeptFrom, 'en')}, it keeps them, so that a report does not
+              disappear when the person it concerns deletes their account. A kept report is no longer linked to the
+              deleted account. The report keeps the username of the reported account (for a report about a space, that of its
+              owner), the reason given, the copy of the reported message (or of the reported space&apos;s name and
+              description), the identifier of the channel, conversation or space it concerns, and the decision taken on it, if any. It is
+              deleted {REPORT_RETENTION_MONTHS} months after the deletion of that account, or, when the account that
+              filed it and the reported account are both deleted, {REPORT_RETENTION_MONTHS} months after the earlier of
+              the two deletions. A report you filed about someone else is therefore deleted {REPORT_RETENTION_MONTHS}{' '}
+              months after you delete your account, even if the other account still exists
             </li>
             <li>
               <strong className="text-vox-text-primary">Incoming webhooks</strong> store their name, the channel they
@@ -283,7 +297,8 @@ export function PrivacyContentEn() {
             <li>
               <strong className="text-vox-text-primary">After you delete your account</strong>, some data remains:
               records of moderation and administrative actions, no longer linked to your account (an entry can still
-              hold the identifier or username it recorded); webhooks you created in a space, no longer linked to
+              hold the identifier or username it recorded); reports, in the cases described under
+              &ldquo;Reports&rdquo; above; webhooks you created in a space, no longer linked to
               you; IP addresses on our block list, until the block is lifted; files you uploaded, until a daily
               clean-up removes them once nothing refers to them and they are at least 7 days old; and our server
               logs and encrypted backups, until they are replaced after a limited period

@@ -1,4 +1,4 @@
-import { MINIMUM_AGE, SESSIONS, SIGNUP } from '@voxium/shared';
+import { MINIMUM_AGE, REPORT_RETENTION_MONTHS, SESSIONS, SIGNUP } from '@voxium/shared';
 import { LEGAL_OPERATOR, PRIVACY_POLICY_DATES, publisherOf } from './operator';
 import { formatLegalDate } from './legalDates';
 import { MailLink } from './MailLink';
@@ -263,9 +263,26 @@ export function PrivacyContentFr() {
             <li><strong className="text-vox-text-primary">Les membres retirés d’un espace</strong> y sont enregistrés comme bannis jusqu’à ce que l’un de ses modérateurs lève ce bannissement</li>
             <li><strong className="text-vox-text-primary">Les éléments de clé de chiffrement non remis</strong> sont supprimés après 30&nbsp;jours</li>
             <li>
-              <strong className="text-vox-text-primary">Les conversations de support et les signalements</strong>{' '}
-              n’expirent pas automatiquement&nbsp;: ils sont conservés pour le support et la modération, et sont
-              supprimés avec le compte qui les a ouverts ou effectués, ou que concerne un signalement
+              <strong className="text-vox-text-primary">Les conversations de support</strong> n’expirent pas
+              automatiquement&nbsp;: elles sont conservées pour le support, et sont supprimées avec le compte qui les
+              a ouvertes
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Les signalements.</strong> Un signalement est conservé pour la
+              modération et, tant que les comptes qu’il concerne existent, n’expire pas automatiquement. Jusqu’au{' '}
+              {formatLegalDate(PRIVACY_POLICY_DATES.reportsKeptFrom, 'fr')}, la suppression de votre compte supprime
+              les signalements que vous avez effectués et ceux qui vous concernent. À partir du{' '}
+              {formatLegalDate(PRIVACY_POLICY_DATES.reportsKeptFrom, 'fr')}, elle les conserve, afin qu’un signalement
+              ne disparaisse pas lorsque la personne qu’il concerne supprime son compte. Un signalement conservé n’est
+              plus lié au compte supprimé. Le signalement conserve le nom d’utilisateur du compte signalé (pour un signalement
+              visant un espace, celui de son propriétaire), le motif indiqué, la copie du message signalé (ou du nom et
+              de la description de l’espace signalé), l’identifiant du salon, de la conversation ou de l’espace qu’il concerne, et la décision
+              prise à son sujet, le cas échéant. Il est supprimé {REPORT_RETENTION_MONTHS}&nbsp;mois après la
+              suppression de ce compte, ou, lorsque le compte qui l’a effectué et le compte signalé sont tous deux
+              supprimés, {REPORT_RETENTION_MONTHS}&nbsp;mois après la plus ancienne des deux suppressions. Un
+              signalement que vous avez effectué au sujet d’une autre personne est donc supprimé{' '}
+              {REPORT_RETENTION_MONTHS}&nbsp;mois après la suppression de votre compte, même si l’autre compte existe
+              encore
             </li>
             <li>
               <strong className="text-vox-text-primary">Les webhooks entrants</strong> conservent leur nom, le salon
@@ -301,7 +318,8 @@ export function PrivacyContentFr() {
               <strong className="text-vox-text-primary">Après la suppression de votre compte</strong>, certaines
               données subsistent&nbsp;: les traces des actions de modération et d’administration, qui ne sont plus
               liées à votre compte (une entrée peut encore contenir l’identifiant ou le nom d’utilisateur qu’elle a
-              enregistré)&nbsp;; les webhooks que vous avez créés dans un espace, qui ne vous sont plus liés&nbsp;;
+              enregistré)&nbsp;; les signalements, dans les cas décrits sous
+              «&nbsp;Les signalements&nbsp;» ci-dessus&nbsp;; les webhooks que vous avez créés dans un espace, qui ne vous sont plus liés&nbsp;;
               les adresses IP figurant sur notre liste de blocage, jusqu’à la levée du blocage&nbsp;; les fichiers que
               vous avez envoyés, jusqu’à ce qu’un nettoyage quotidien les supprime, une fois que plus rien n’y fait
               référence et qu’ils datent d’au moins 7&nbsp;jours&nbsp;; et nos journaux serveur et nos sauvegardes
