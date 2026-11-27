@@ -173,6 +173,17 @@ describe('E2E key-share acknowledgement limiter', () => {
   });
 });
 
+describe('E2E cached scope states limiter', () => {
+  it('has a row of its own, per user, no block, sized for every device of an account running twice in an hour', () => {
+    // a device asks at most 20 requests a run (CACHE_SWEEP_MAX_REQUESTS), once a day,
+    // again at its next start after a failure; up to E2E_LIMITS.MAX_DEVICES (5) devices
+    const states = getAllRateLimits().find((l) => l.name === 'e2eScopeStates');
+    expect(states).toMatchObject({ keyPrefix: 'rl:e2escope', points: 200, duration: 3600, blockDuration: 0, keyType: 'userId' });
+    const prefixes = getAllRateLimits().filter((l) => l.keyPrefix === 'rl:e2escope');
+    expect(prefixes).toHaveLength(1);
+  });
+});
+
 describe('getAllRateLimits (key types)', () => {
   it('includes the interact limiter keyed by userId (P2 — NAT-shared IP budgets)', () => {
     const limits = getAllRateLimits();

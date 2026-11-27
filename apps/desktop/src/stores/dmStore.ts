@@ -594,6 +594,16 @@ export const useDMStore = create<DMState>((set, get) => ({
       };
     });
 
+    // The device's sweep of its plaintext cache (services/cacheSweep.ts) waits
+    // for a first page of the session: it keeps whatever the list holds
+    if (!more) {
+      void import('../services/cacheSweep')
+        .then(({ noteConversationListApplied }) => noteConversationListApplied(askedBy))
+        .catch((err) => {
+          console.warn('dm: could not start the cache sweep:', err instanceof Error ? err.message : err);
+        });
+    }
+
     // Read-only conversations (the other side's account was deleted): the ones
     // that turned so since the last list are brought into line (the view on
     // screen, a call, open popups), whether or not `dm:conversation:read_only`
