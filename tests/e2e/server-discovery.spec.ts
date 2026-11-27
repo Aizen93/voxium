@@ -9,8 +9,7 @@ import { clearRateLimits, clearDiscoveryPageCache } from './helpers/rateLimits';
 
 const ADMIN_URL = 'http://localhost:8082';
 
-// Live two/three-client test of server discovery (docs/local/server-discovery-plan.html,
-// "Playwright server-discovery.spec.ts"):
+// Live two/three-client test of server discovery:
 //   (a) the owner fills the card and opens the server → a newcomer finds it in
 //       Explore by search and by tag, joins, and messages flow live (the room
 //       invariant) → the owner removes them (a ban) → Join and a fresh invite

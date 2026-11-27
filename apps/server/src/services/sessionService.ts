@@ -101,7 +101,7 @@ export interface SessionLabel {
   os: SessionClientOs;
 }
 
-/** The origins of the desktop app's webview (Windows/Linux and macOS). */
+/** The origins of the desktop app's webview (Windows, with either scheme; macOS and Linux). */
 const DESKTOP_ORIGINS = new Set(['https://tauri.localhost', 'http://tauri.localhost', 'tauri://localhost']);
 
 /** Never read past this much of a user agent: the label needs its first words. */

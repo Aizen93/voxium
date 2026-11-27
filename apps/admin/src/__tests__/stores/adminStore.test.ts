@@ -389,6 +389,20 @@ describe('adminStore — support and report actions report their failures', () =
     expect(useAdminStore.getState().activeTicketMessages).toHaveLength(1);
   });
 
+  it('a ban refused because the reported account was deleted (#48) toasts the server\'s sentence, resolves false and refetches nothing', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sentence = 'The reported account has been deleted and cannot be banned';
+    api.post.mockRejectedValueOnce(new AxiosError('Request failed', 'ERR_BAD_REQUEST', undefined, undefined, {
+      status: 400, statusText: '', headers: {}, config: { headers: new AxiosHeaders() }, data: { success: false, error: sentence },
+    }));
+
+    await expect(useAdminStore.getState().resolveReport('r-1', { resolution: 'ok', action: 'ban' })).resolves.toBe(false);
+
+    expect(api.post).toHaveBeenCalledWith('/admin/reports/r-1/resolve', { resolution: 'ok', action: 'ban' });
+    expect(toast.error).toHaveBeenCalledWith(sentence);
+    expect(api.get).not.toHaveBeenCalled();
+  });
+
   it('a resolved or dismissed report resolves true, refetches, and a failing refetch only warns', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     api.post.mockResolvedValue({ data: {} });

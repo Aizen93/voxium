@@ -428,7 +428,8 @@ PORT=3001
 # CORS_ORIGIN must match the URL where your frontend is hosted.
 # For local testing with the dev frontend, use: http://localhost:8080
 # Add the Tauri desktop origins so the native apps can connect too:
-# https://tauri.localhost (Windows), tauri://localhost (macOS), http://tauri.localhost (Linux)
+# http://tauri.localhost (Windows), tauri://localhost (macOS and Linux); https://tauri.localhost
+# only for a build that sets Tauri's `useHttpsScheme`
 CORS_ORIGIN=https://chat.example.com,https://tauri.localhost,tauri://localhost,http://tauri.localhost
 # The object-storage bucket must allow PUT with the `content-type` header from every client origin
 # (GET is optional): avatars, space icons and attachments are uploaded straight from the client to

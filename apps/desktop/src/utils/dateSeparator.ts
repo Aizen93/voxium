@@ -1,12 +1,14 @@
-import { isSameDay, isToday, isYesterday, format } from 'date-fns';
+import { isSameDay, isToday, isYesterday } from 'date-fns';
+import { formatDate, type FormatDateOptions } from './formatDate';
 
 /**
  * Date-separator helpers for the message list (2026 redesign): a hairline
  * "Today / Yesterday / July 14, 2026" divider between messages from different
  * calendar days.
  *
- * Kept as pure functions (no i18n, no React) so they are unit-testable; the
- * component maps the discriminant to a translated label.
+ * Kept as plain functions (no React) so they are unit-testable; the component
+ * maps the discriminant to a translated label. The dated label is in the
+ * language of the app (or the one given).
  */
 
 export type DaySeparator =
@@ -24,10 +26,10 @@ export function isNewDay(prevIso: string | undefined, currIso: string): boolean 
 }
 
 /** Which separator to render above a message sent at `iso`. */
-export function daySeparatorFor(iso: string): DaySeparator {
+export function daySeparatorFor(iso: string, options: FormatDateOptions = {}): DaySeparator {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return { kind: 'date', label: '' };
   if (isToday(date)) return { kind: 'today' };
   if (isYesterday(date)) return { kind: 'yesterday' };
-  return { kind: 'date', label: format(date, 'MMMM d, yyyy') };
+  return { kind: 'date', label: formatDate('longDate', date, options) };
 }

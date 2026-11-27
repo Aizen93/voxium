@@ -1,7 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { getAccessToken, holdsAnotherSessionOf } from './tokenStorage';
-import { bumpRequestGeneration } from './requestGeneration';
 import { loginReasonOf } from '../utils/loginReasons';
 
 /** Events that arrive many times a second during a call and carry no state a REST read would show. */
@@ -276,15 +275,6 @@ export function connectSocket(token: string): VoxSocket | null {
       if (import.meta.env.DEV) console.log('[WS] Reconnect detected — firing reconnect callbacks');
       reconnectCallbacks.forEach((fn) => fn());
     }
-  });
-
-  // Every event the server delivers may mean its state changed: a GET the
-  // stores issue because of it must not share a request issued before it
-  // (services/api.ts coalesces identical GETs in flight). The high-rate
-  // media events change no REST-readable state and would switch coalescing
-  // off for the length of a call
-  s.onAny((event: string) => {
-    if (!NOISY_EVENTS.has(event)) bumpRequestGeneration();
   });
 
   // The server ended this session for good (ban, account deletion): the

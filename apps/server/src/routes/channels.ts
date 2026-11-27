@@ -545,6 +545,63 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
   }
 });
 
+/**
+ * The decision of a secure channel's delete, made fresh (it runs again on each
+ * attempt of a retried delete). Secure channels: MANAGE_CHANNELS is NOT
+ * sufficient. Deletable by the creator, or, the single opaque-moderation lever,
+ * the server owner / an ADMINISTRATOR acting on a channel id learned from an
+ * abuse report. Content stays unreadable either way; deletion is the only
+ * power. Throws the caller's answer when there is no lever; a channel that is
+ * gone, or no longer secure, answers what a nonexistent id answers this caller.
+ */
+async function authorizeSecureChannelDelete(userId: string, serverId: string, channelId: string): Promise<void> {
+  const [channel, canManage] = await Promise.all([
+    prisma.channel.findFirst({
+      where: { id: channelId, serverId },
+      select: { id: true, secure: true, createdById: true, server: { select: { ownerId: true } } },
+    }),
+    hasServerPermission(userId, serverId, Permissions.MANAGE_CHANNELS),
+  ]);
+  // What THIS caller would see for a nonexistent id: without MANAGE_CHANNELS
+  // the permission 403, with it a 404. A channel that is gone (or no longer
+  // secure) since the route's first read must answer the same, or a 404 to a
+  // caller who holds no lever would tell them a secure channel existed there.
+  const answerForAnUnknownId = () => canManage
+    ? new NotFoundError('Channel')
+    : new ForbiddenError('You do not have permission to delete channels');
+  if (!channel?.secure) throw answerForAnUnknownId();
+
+  let allowed = channel.server.ownerId === userId;
+  if (!allowed && channel.createdById === userId) {
+    // The creator's lever holds while they are a member of the space AND
+    // still the channel's creator member: a departure deletes the
+    // creator's channels with it, and a channel that outlived one (its
+    // creator's row removed by the channel_members migration) gives its
+    // former creator no say over it, even after they join again
+    const [spaceMember, creatorRow] = await Promise.all([
+      prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId, serverId } },
+        select: { userId: true },
+      }),
+      prisma.channelMember.findUnique({
+        where: { channelId_userId: { channelId, userId } },
+        select: { isCreator: true },
+      }),
+    ]);
+    allowed = !!spaceMember && creatorRow?.isCreator === true;
+  }
+  if (!allowed) {
+    const perms = await computeServerPermissions(userId, serverId);
+    allowed = (perms & Permissions.ADMINISTRATOR) === Permissions.ADMINISTRATOR;
+  }
+  if (!allowed) {
+    // Opacity, matched to what THIS caller would see for a nonexistent id:
+    // a 404 for a caller who would get the 403 would be an INVERTED oracle
+    // (404 ⇒ "a secure channel exists there").
+    throw answerForAnUnknownId();
+  }
+}
+
 // Delete a channel
 channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
   try {
@@ -560,44 +617,14 @@ channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request
     ]);
 
     if (channel?.secure) {
-      // Secure channels: MANAGE_CHANNELS is NOT sufficient. Deletable by the
-      // creator, or — the single opaque-moderation lever — the server owner /
-      // an ADMINISTRATOR acting on a channel id learned from an abuse report.
-      // Content stays unreadable either way; deletion is the only power.
-      let allowed = channel.server.ownerId === userId;
-      if (!allowed && channel.createdById === userId) {
-        // The creator's lever holds while they are a member of the space AND
-        // still the channel's creator member: a departure deletes the
-        // creator's channels with it, and a channel that outlived one (its
-        // creator's row removed by the channel_members migration) gives its
-        // former creator no say over it, even after they join again
-        const [spaceMember, creatorRow] = await Promise.all([
-          prisma.serverMember.findUnique({
-            where: { userId_serverId: { userId, serverId } },
-            select: { userId: true },
-          }),
-          prisma.channelMember.findUnique({
-            where: { channelId_userId: { channelId, userId } },
-            select: { isCreator: true },
-          }),
-        ]);
-        allowed = !!spaceMember && creatorRow?.isCreator === true;
-      }
-      if (!allowed) {
-        const perms = await computeServerPermissions(userId, serverId);
-        allowed = (perms & Permissions.ADMINISTRATOR) === Permissions.ADMINISTRATOR;
-      }
-      if (!allowed) {
-        // Opacity, matched to what THIS caller would see for a nonexistent id:
-        // without MANAGE_CHANNELS a nonexistent id gets the permission 403
-        // below, so a secure id must too — a 404 here would be an INVERTED
-        // oracle (404 ⇒ "a secure channel exists there").
-        throw canManage
-          ? new NotFoundError('Channel')
-          : new ForbiddenError('You do not have permission to delete channels');
-      }
-
-      await deleteSecureChannel(channelId);
+      // The lever check and its opacity answers run inside the helper, once
+      // per attempt: a deadlock retries the delete, and a caller who lost the
+      // lever meanwhile is refused with the same answer as a first refusal
+      const deleted = await deleteSecureChannel(channelId, () => authorizeSecureChannelDelete(userId, serverId, channelId));
+      // Reached only after the lever check passed (a refusal throws out of the
+      // helper first), so this caller already holds a lever over the channel
+      // and a 404 tells them nothing: the row went after that check
+      if (!deleted) throw new NotFoundError('Channel');
       res.json({ success: true, message: 'Channel deleted' });
       return;
     }
@@ -622,7 +649,29 @@ channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request
     // read now and the files deleted once the row is gone
     const attachmentKeys = await collectAttachmentKeys({ channelId });
 
-    await prisma.channel.delete({ where: { id: channelId } });
+    // The cascade takes the channel's messages, reactions, attachments and
+    // reply links with the row, so it can meet a transaction holding some of
+    // them (an account deletion) and lose the deadlock: it runs again, every
+    // check made before it made again first (one attempt = checks, then the
+    // delete; the steps below run once, after the retry returned).
+    await retryOnTransactionConflict(async () => {
+      const [current, mayManage] = await Promise.all([
+        prisma.channel.findFirst({ where: { id: channelId, serverId }, select: { id: true, secure: true } }),
+        hasServerPermission(userId, serverId, Permissions.MANAGE_CHANNELS),
+      ]);
+      if (!mayManage) throw new ForbiddenError('You do not have permission to delete channels');
+      if (!current || current.secure) throw new NotFoundError('Channel');
+      if (!await hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
+        throw new NotFoundError('Channel');
+      }
+      try {
+        await prisma.channel.delete({ where: { id: channelId } });
+      } catch (err) {
+        // The row went between the check and the delete: a missing channel
+        if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Channel');
+        throw err;
+      }
+    }, `[Channels] The delete of channel ${channelId}`);
     deleteAttachmentBlobs(attachmentKeys, '[Channels]', `channel ${channelId}`);
 
     // The row is gone: every step below is best effort, each on its own, so

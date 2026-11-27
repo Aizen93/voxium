@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ChangeEvent, type DragEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, forwardRef, type KeyboardEvent, type ChangeEvent, type DragEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
@@ -13,9 +13,9 @@ import { AppTag } from '../common/AppTag';
 import { MentionAutocomplete, getMentionQuery, handleMentionKeyDown, type MentionCandidate } from './MentionAutocomplete';
 import { api } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
-import { useServerPermissions } from '../../hooks/useServerPermissions';
+import { useChannelPermissions } from '../../hooks/useChannelPermissions';
 import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, Permissions } from '@voxium/shared';
-import { PlusCircle, Smile, Send, X, FileText, Image, Film, Music, Upload } from 'lucide-react';
+import { PlusCircle, Smile, Send, X, FileText, Image, Film, Music, Upload, Ban } from 'lucide-react';
 
 interface Props {
   channelId?: string;
@@ -51,10 +51,41 @@ function getFileIcon(mimeType: string) {
   return FileText;
 }
 
+/**
+ * In place of the composer of a channel where the viewer may not send. The
+ * polite region is in the page first and its sentence is put in by an effect,
+ * so a screen reader announces it (text present at mount is not announced).
+ * It takes focus when the composer it replaces had it.
+ */
+const ChannelSendRefusedNotice = forwardRef<HTMLDivElement, { takeFocus: boolean }>(function ChannelSendRefusedNotice({ takeFocus }, ref) {
+  const { t } = useTranslation();
+  const [shown, setShown] = useState(false);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { setShown(true); }, []);
+  useEffect(() => { if (takeFocus) boxRef.current?.focus(); }, [takeFocus]);
+  return (
+    <div className="px-4 pb-4 pt-1">
+      <div
+        ref={(el) => {
+          boxRef.current = el;
+          if (typeof ref === 'function') ref(el);
+          else if (ref) ref.current = el;
+        }}
+        tabIndex={-1}
+        data-testid="channel-send-refused-notice"
+        className="flex items-center gap-2 rounded-2xl border border-vox-border bg-vox-bg-secondary px-4 py-3 text-[13px] text-vox-text-secondary focus:outline-none"
+      >
+        <Ban size={15} className="shrink-0 text-vox-text-muted" aria-hidden />
+        <span role="status">{shown ? t('serverErrors.noPermissionSendMessages') : null}</span>
+      </div>
+    </div>
+  );
+});
+
 export function MessageInput({ channelId, conversationId, channelName, placeholderName }: Props) {
   const { t } = useTranslation();
   const { sendMessage, sendDMMessage, replyingTo, clearReplyingTo } = useChatStore();
-  // Every DM is encrypted (plan §4.2), so "this is a DM" IS "encrypt this":
+  // Every DM is encrypted (docs/e2e-always-on-plan.md §4.2), so "this is a DM" IS "encrypt this":
   // attachment bytes are encrypted client-side before upload. Deliberately not
   // gated on the conversation being in the store — a not-yet-loaded row must
   // not silently downgrade a send the server would reject anyway.
@@ -87,14 +118,6 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   const fileInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef = useRef(false);
-  // Turned read-only while a typing signal was pending: its "stop" never goes
-  // out (nothing is signalled in a read-only conversation)
-  useEffect(() => {
-    if (!readOnly) return;
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = null;
-    isTypingRef.current = false;
-  }, [readOnly]);
   const [cursorPos, setCursorPos] = useState(0);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -103,9 +126,49 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   // (the server decides again on send; this spares the others a dead option)
   const activeServerId = useServerStore((s) => s.activeServerId);
   const currentUserId = useAuthStore((s) => s.user?.id);
-  const serverPermissions = useServerPermissions(channelId ? activeServerId : null, currentUserId);
+  // The viewer's bits in THIS channel (a channel override can move any of
+  // them): null while unknown, and always in a secure channel, whose
+  // permissions come from membership
+  const channelPermissions = useChannelPermissions(channelId ? activeServerId : null, channelId, currentUserId);
+  // A control that only prevents a refusal (the composer, the attach control)
+  // stays usable while the bits are unknown or the fetch failed: the server
+  // decides and its refusal is shown. One that offers a power (`@everyone`)
+  // waits for the answer.
+  const maySend = channelPermissions === null || (channelPermissions & Permissions.SEND_MESSAGES) !== 0n;
+  const mayAttach = channelPermissions === null || (channelPermissions & Permissions.ATTACH_FILES) !== 0n;
   // Never in a secure channel: the server never flags an encrypted row
-  const canMentionEveryone = !isSecureChannel && serverPermissions !== null && (serverPermissions & Permissions.MENTION_EVERYONE) !== 0n;
+  const canMentionEveryone = !isSecureChannel && channelPermissions !== null && (channelPermissions & Permissions.MENTION_EVERYONE) !== 0n;
+  // No composer while a conversation is read-only or the channel refuses
+  // sending: no typing signal, no upload, no send. The draft, the attachments
+  // and the reply being composed stay as they are for when the bit returns.
+  const noComposer = readOnly || !maySend;
+  // Focus follows the swap, and only a swap: a notice that replaces a focused
+  // textarea takes focus, a composer that replaces a focused notice gives it
+  // back to the textarea. Read while rendering, when the old DOM is still up.
+  const noticeRef = useRef<HTMLDivElement | null>(null);
+  const prevMaySend = useRef(true);
+  const focusNotice = useRef(false);
+  const focusTextarea = useRef(false);
+  if (prevMaySend.current && !maySend && document.activeElement === textareaRef.current) focusNotice.current = true;
+  if (!prevMaySend.current && maySend && document.activeElement === noticeRef.current) focusTextarea.current = true;
+  useEffect(() => {
+    prevMaySend.current = maySend;
+    if (maySend) {
+      focusNotice.current = false;
+      if (focusTextarea.current) {
+        focusTextarea.current = false;
+        textareaRef.current?.focus();
+      }
+    }
+  }, [maySend]);
+  // Turned off while a typing signal was pending: its "stop" never goes out
+  // (nothing is signalled where nothing can be written)
+  useEffect(() => {
+    if (!noComposer) return;
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = null;
+    isTypingRef.current = false;
+  }, [noComposer]);
 
   // Focus textarea when replying to a message
   useEffect(() => {
@@ -243,6 +306,12 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
   const processFiles = (files: FileList) => {
     if (files.length === 0) return;
+
+    // Paste, drop and the picker all end here: the channel's ATTACH_FILES
+    if (!mayAttach) {
+      toast.error(t('serverErrors.noPermissionAttachFiles'));
+      return;
+    }
 
     // What is attached now plus what this call adds, counted at this moment
     // from the ref: a call right after another sees the first one's files.
@@ -404,7 +473,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     e.preventDefault();
     e.stopPropagation();
     dragCounterRef.current++;
-    if (e.dataTransfer.types.includes('Files')) {
+    if (mayAttach && e.dataTransfer.types.includes('Files')) {
       setIsDragging(true);
     }
   };
@@ -437,6 +506,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   const canSend = content.trim() || pendingFiles.some((pf) => pf.status === 'uploaded');
 
   if (readOnly) return <ReadOnlyConversationNotice />;
+  if (!maySend) return <ChannelSendRefusedNotice ref={noticeRef} takeFocus={focusNotice.current} />;
 
   return (
     <div
@@ -541,23 +611,27 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       <div className={`flex items-end gap-1 bg-vox-bg-floating border border-vox-border shadow-float px-2 py-1.5 ${
         replyingTo || pendingFiles.length > 0 ? 'rounded-b-2xl border-t-0' : 'rounded-2xl'
       }`}>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={handleFileSelect}
-          accept={ALLOWED_ATTACHMENT_TYPES.join(',')}
-        />
+        {mayAttach && (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={handleFileSelect}
+              accept={ALLOWED_ATTACHMENT_TYPES.join(',')}
+            />
 
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary"
-          title={t('messageInput.attachFile')}
-          aria-label={t('messageInput.attachFile')}
-        >
-          <PlusCircle size={16} />
-        </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary"
+              title={t('messageInput.attachFile')}
+              aria-label={t('messageInput.attachFile')}
+            >
+              <PlusCircle size={16} />
+            </button>
+          </>
+        )}
 
         <textarea
           ref={textareaRef}

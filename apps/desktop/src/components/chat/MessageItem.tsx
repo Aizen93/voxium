@@ -12,7 +12,7 @@ import { AttachmentDisplay } from './AttachmentDisplay';
 import { E2EAttachmentDisplay } from './E2EAttachmentDisplay';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Pencil, Trash2, SmilePlus, Reply, Flag, Lock } from 'lucide-react';
-import { format, isToday, isYesterday } from 'date-fns';
+import { formatDate, formatMessageStamp } from '../../utils/formatDate';
 import { clsx } from 'clsx';
 import type { Message } from '@voxium/shared';
 import { StaffBadge } from '../common/StaffBadge';
@@ -41,16 +41,24 @@ interface Props {
    * (deleting one's own message stays). The stores refuse those too.
    */
   readOnly?: boolean;
+  /**
+   * The viewer may send in this channel (the server judges a reply like any
+   * send). Only false when the channel's bits are KNOWN and lack the bit: a
+   * control that prevents a refusal stays usable while they are unknown.
+   */
+  canReply?: boolean;
+  /**
+   * The viewer may react in this channel. The server's toggle asks the bit to
+   * ADD and to REMOVE a reaction, so false also makes the chips display-only.
+   */
+  canReact?: boolean;
 }
 
 function formatMessageTime(dateStr: string, t: TFunction) {
-  const date = new Date(dateStr);
-  if (isToday(date)) return t('messageItem.todayAt', { time: format(date, 'h:mm a') });
-  if (isYesterday(date)) return t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') });
-  return format(date, 'MM/dd/yyyy h:mm a');
+  return formatMessageStamp(dateStr, t);
 }
 
-export const MessageItem = memo(function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId, readOnly = false }: Props) {
+export const MessageItem = memo(function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId, readOnly = false, canReply = true, canReact = true }: Props) {
   const { t } = useTranslation();
   const { editMessage, editDMMessage } = useChatStore();
   const [isEditing, setIsEditing] = useState(false);
@@ -64,11 +72,15 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
 
   // the conversation turned read-only under an edit being typed: the edit is dropped
   useEffect(() => {
-    if (readOnly) {
-      setIsEditing(false);
-      setShowReactionPicker(false);
-    }
+    if (readOnly) setIsEditing(false);
   }, [readOnly]);
+
+  // the react control goes away (read-only, or the channel's ADD_REACTIONS is
+  // gone): the picker's state goes with it, so it does not pop open again when
+  // the control comes back
+  useEffect(() => {
+    if (readOnly || !canReact) setShowReactionPicker(false);
+  }, [readOnly, canReact]);
 
   useEffect(() => {
     if (isEditing && editRef.current) {
@@ -270,8 +282,8 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
   }
 
   // What the hover toolbar offers (a read-only DM keeps only the delete of one's own)
-  const showReply = !isSystemMessage && !readOnly;
-  const showReact = !readOnly;
+  const showReply = !isSystemMessage && !readOnly && canReply;
+  const showReact = !readOnly && canReact;
   const showEdit = isOwn && !isWebhook && !readOnly;
   // A webhook author is not a user, nor is the deleted account's placeholder:
   // there is no one to report (a moderator deletes the message or the webhook)
@@ -453,14 +465,14 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 )}
               </div>
             </div>
-            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} readOnly={readOnly} />
+            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} readOnly={readOnly || !canReact} />
           </>
         ) : (
           <>
             <div className="flex items-start gap-3">
               <div className="w-10 shrink-0 text-center">
                 <span className="hidden group-hover:inline font-mono text-[10px] text-vox-text-muted/80">
-                  {format(new Date(message.createdAt), 'h:mm')}
+                  {formatDate('clock', message.createdAt)}
                 </span>
               </div>
 
@@ -496,7 +508,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 </div>
               )}
             </div>
-            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} readOnly={readOnly} />
+            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} readOnly={readOnly || !canReact} />
           </>
         )}
       </div>

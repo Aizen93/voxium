@@ -3500,7 +3500,7 @@ describe('E2E routes — key backup is outside the device lifecycle', () => {
   });
 });
 
-// ─── Message-key backup (plan §4.4) ─────────────────────────────────────────
+// ─── Message-key backup (docs/e2e-always-on-plan.md §4.4) ─────────────────────────────────────────
 // One opaque row per backed-up Megolm session, sealed under an account-level
 // key the server never sees. Every route is scoped to the authenticated caller
 // and takes no userId anywhere, so — as with §15 — the mock is backed by a real

@@ -6,7 +6,9 @@ import { toast } from './toastStore';
 import i18n from '../i18n';
 import { pinSecure, isPinnedSecure, claimDowngradeWarning } from '../utils/securePins';
 import { compareRoles } from '../utils/roleOrder';
+import { forgetSpaceChannelPermissions } from '../services/channelPermissionsCache';
 import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST, OPAQUE_ID_RE, ALL_PERMISSIONS, permissionsToString } from '@voxium/shared';
+import { isYoungerThan } from '../utils/age';
 import type { DiscoveryTier } from '@voxium/shared';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode, CreateRoleRequest, UpdateRoleRequest, SetChannelPermissionOverrideRequest } from '@voxium/shared';
 
@@ -464,7 +466,7 @@ interface ServerState {
   fetchSecureChannelCount: (serverId: string) => Promise<number>;
   handleChannelMembersUpdated: (payload: { channelId?: unknown; serverId?: unknown; members?: unknown }) => void;
 
-  // Server discovery — the owner side (docs/local/server-discovery-plan.html).
+  // Server discovery — the owner side.
   // Profile changes land through server:updated, never the PATCH response.
   /** Pending join requests per server, for the Members tab badge (moderators only). */
   joinRequestCounts: Record<string, number>;
@@ -503,6 +505,7 @@ const bansRefetch = new Map<string, { queued: boolean }>();
 // fire within a short window (e.g. setActiveChannel + joinAndFetch on channel switch)
 let _lastMarkedChannel = '';
 let _lastMarkedAt = 0;
+const MARK_READ_DEDUP_MS = 2000;
 
 export const useServerStore = create<ServerState>((set, get) => ({
   servers: [],
@@ -642,6 +645,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   leaveServer: async (serverId: string) => {
     await api.post(`/servers/${serverId}/leave`);
+    forgetSpaceChannelPermissions(serverId);
     set((state) => ({
       servers: state.servers.filter((s) => s.id !== serverId),
       activeServerId: state.activeServerId === serverId ? null : state.activeServerId,
@@ -1040,7 +1044,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     // Dedup: skip if same channel was marked within the last 2s (multiple code paths
     // can trigger this near-simultaneously on channel switch and reconnect)
     const now = Date.now();
-    if (channelId === _lastMarkedChannel && now - _lastMarkedAt < 2000) return;
+    if (channelId === _lastMarkedChannel && isYoungerThan(_lastMarkedAt, MARK_READ_DEDUP_MS)) return;
     _lastMarkedChannel = channelId;
     _lastMarkedAt = now;
     // Find the serverId for this channel — use hint when channels array may have changed (e.g. after server switch)
@@ -1161,6 +1165,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   handleMemberKicked: (serverId: string) => {
+    forgetSpaceChannelPermissions(serverId);
     if (get().activeServerId === serverId) resetMemberLookupState();
     if (get().directory.serverId === serverId) retireDirectory();
     set((state) => ({
@@ -1177,6 +1182,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   handleServerDeleted: (serverId: string) => {
+    forgetSpaceChannelPermissions(serverId);
     set((state) => {
       const isActive = state.activeServerId === serverId;
 

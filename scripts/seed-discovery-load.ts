@@ -1,8 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * Seed a THROWAWAY database with N listed servers for the directory's scale
- * measurement (docs/local/server-discovery-plan.html, "Measurement, part of
- * step 2"). Never the shared dev DB, never production: the script refuses
+ * measurement. Never the shared dev DB, never production: the script refuses
  * unless DISCOVERY_LOAD_DB=1 is set AND the database name contains "load".
  *
  *   DATABASE_URL=postgresql://.../voxium_discovery_load DISCOVERY_LOAD_DB=1 \

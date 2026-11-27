@@ -30,8 +30,8 @@ vi.mock('react-virtuoso', () => ({
 }));
 
 vi.mock('../../components/chat/MessageItem', () => ({
-  MessageItem: ({ message, canDelete, isOwn }: { message: Message; canDelete: boolean; isOwn: boolean }) => (
-    <div data-testid={`row-${message.id}`} data-can-delete={String(canDelete)} data-own={String(isOwn)} />
+  MessageItem: ({ message, canDelete, isOwn, canReply, canReact }: { message: Message; canDelete: boolean; isOwn: boolean; canReply?: boolean; canReact?: boolean }) => (
+    <div data-testid={`row-${message.id}`} data-can-delete={String(canDelete)} data-own={String(isOwn)} data-can-reply={String(canReply)} data-can-react={String(canReact)} />
   ),
 }));
 
@@ -77,6 +77,7 @@ vi.mock('../../stores/serverStore', () => {
 
 import { MessageList } from '../../components/chat/MessageList';
 import { resetServerPermissionsCache } from '../../hooks/useServerPermissions';
+import { invalidateChannelPermissions, resetChannelPermissionsCache } from '../../services/channelPermissionsCache';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -116,6 +117,7 @@ const canDelete = (id: string) => container.querySelector(`[data-testid="row-${i
 beforeEach(() => {
   vi.clearAllMocks();
   resetServerPermissionsCache();
+  resetChannelPermissionsCache();
   chatState.messages = [fromAlice, fromHook, mine];
   serverState.activeServerId = 'srv-1';
   serverState.activeChannelId = 'ch-1';
@@ -139,7 +141,7 @@ describe('MessageList — Delete follows MANAGE_MESSAGES, not only the legacy ro
     serverState.members = [member('me', 'member', [modRole])];
     fetchPerms.mockResolvedValue((Permissions.VIEW_CHANNEL | Permissions.MANAGE_MESSAGES).toString());
     await render();
-    expect(fetchPerms).toHaveBeenCalledWith('srv-1');
+    expect(fetchPerms).toHaveBeenCalledWith('srv-1', 'ch-1');
     expect(canDelete('m-alice')).toBe('true');
     expect(canDelete('m-hook')).toBe('true');
     expect(canDelete('m-mine')).toBe('true');
@@ -147,7 +149,7 @@ describe('MessageList — Delete follows MANAGE_MESSAGES, not only the legacy ro
 
   it('without the bit: Delete only on the viewer\'s own message', async () => {
     await render();
-    expect(fetchPerms).toHaveBeenCalledWith('srv-1');
+    expect(fetchPerms).toHaveBeenCalledWith('srv-1', 'ch-1');
     expect(canDelete('m-alice')).toBe('false');
     expect(canDelete('m-hook')).toBe('false');
     expect(canDelete('m-mine')).toBe('true');
@@ -169,18 +171,24 @@ describe('MessageList — Delete follows MANAGE_MESSAGES, not only the legacy ro
       act(() => root.unmount());
       root = createRoot(container);
       resetServerPermissionsCache();
+      resetChannelPermissionsCache();
     }
   });
 
-  it('the owner of the space (Server.ownerId) keeps Delete without waiting for the answer, and when the fetch fails', async () => {
+  it('the owner of the space (Server.ownerId) keeps Delete at once and asks nothing, so a failing route costs them nothing', async () => {
     serverState.servers = [{ id: 'srv-1', ownerId: 'me' }];
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     fetchPerms.mockRejectedValue(new Error('offline'));
     await render();
     expect(canDelete('m-alice')).toBe('true');
     expect(canDelete('m-hook')).toBe('true');
-    expect(warn).toHaveBeenCalledWith('[Permissions] Failed to fetch effective permissions:', 'offline');
-    warn.mockRestore();
+    expect(fetchPerms).not.toHaveBeenCalled();
+  });
+
+  it('during a space switch (new space, channels of the old one) Delete stays hidden and nothing is asked', async () => {
+    serverState.activeServerId = 'srv-2';
+    await render();
+    expect(canDelete('m-alice')).toBe('false');
+    expect(fetchPerms).not.toHaveBeenCalled();
   });
 
   it('a failed fetch leaves a plain member without Delete (logged, never thrown)', async () => {
@@ -198,6 +206,8 @@ describe('MessageList — Delete follows MANAGE_MESSAGES, not only the legacy ro
     chatState.messages = [msg('m-sec', author('u-alice'), 'ch-sec')];
     await render();
     expect(canDelete('m-sec')).toBe('false');
+    // a secure channel's bits are never asked: membership decides
+    expect(fetchPerms).not.toHaveBeenCalled();
 
     act(() => root.unmount());
     root = createRoot(container);
@@ -208,17 +218,112 @@ describe('MessageList — Delete follows MANAGE_MESSAGES, not only the legacy ro
   });
 });
 
+const attr = (id: string, name: string) => container.querySelector(`[data-testid="row-${id}"]`)?.getAttribute(name);
+
+describe('MessageList — Reply and reactions follow SEND_MESSAGES and ADD_REACTIONS of the channel', () => {
+  it('held: both props true', async () => {
+    fetchPerms.mockResolvedValue((Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.ADD_REACTIONS).toString());
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('true');
+    expect(attr('m-alice', 'data-can-react')).toBe('true');
+  });
+
+  it('known and denied: each prop follows its own bit', async () => {
+    fetchPerms.mockResolvedValue((Permissions.VIEW_CHANNEL | Permissions.ADD_REACTIONS).toString());
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('false');
+    expect(attr('m-alice', 'data-can-react')).toBe('true');
+    act(() => root.unmount());
+    root = createRoot(container);
+    resetChannelPermissionsCache();
+    fetchPerms.mockResolvedValue((Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES).toString());
+    await render();
+    expect(attr('m-mine', 'data-can-reply')).toBe('true');
+    expect(attr('m-mine', 'data-can-react')).toBe('false');
+  });
+
+  it('ADMINISTRATOR holds both', async () => {
+    fetchPerms.mockResolvedValue(Permissions.ADMINISTRATOR.toString());
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('true');
+    expect(attr('m-alice', 'data-can-react')).toBe('true');
+  });
+
+  it('not loaded yet: usable, never hidden', async () => {
+    fetchPerms.mockReturnValue(new Promise(() => {}));
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('true');
+    expect(attr('m-alice', 'data-can-react')).toBe('true');
+  });
+
+  it('a failed fetch stays usable (logged, never thrown)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fetchPerms.mockRejectedValue(new Error('offline'));
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('true');
+    expect(attr('m-alice', 'data-can-react')).toBe('true');
+    warn.mockRestore();
+  });
+
+  it('a secure channel asks nothing and keeps both', async () => {
+    serverState.activeChannelId = 'ch-sec';
+    chatState.messages = [msg('m-sec', author('u-alice'), 'ch-sec')];
+    await render();
+    expect(fetchPerms).not.toHaveBeenCalled();
+    expect(attr('m-sec', 'data-can-reply')).toBe('true');
+    expect(attr('m-sec', 'data-can-react')).toBe('true');
+  });
+
+  it('an override write that takes the bits away removes the controls', async () => {
+    fetchPerms.mockResolvedValue((Permissions.SEND_MESSAGES | Permissions.ADD_REACTIONS).toString());
+    await render();
+    expect(attr('m-alice', 'data-can-reply')).toBe('true');
+    fetchPerms.mockResolvedValue('0');
+    await act(async () => { invalidateChannelPermissions('srv-1'); });
+    for (let i = 0; i < 3; i++) await act(async () => { await Promise.resolve(); });
+    expect(attr('m-alice', 'data-can-reply')).toBe('false');
+    expect(attr('m-alice', 'data-can-react')).toBe('false');
+  });
+});
+
 describe('MessageList — the effective permissions are cached per server and fingerprint', () => {
-  it('a channel switch on the same server costs no second request', async () => {
-    fetchPerms.mockResolvedValue(Permissions.MANAGE_MESSAGES.toString());
+  it('a channel switch asks for the new channel (an override can differ there); coming back costs no request', async () => {
+    // ch-1 grants MANAGE_MESSAGES, ch-2 has an override taking it away
+    fetchPerms.mockImplementation((_s: string, ch: string) =>
+      Promise.resolve(ch === 'ch-1' ? Permissions.MANAGE_MESSAGES.toString() : '0'));
     await render();
     expect(fetchPerms).toHaveBeenCalledTimes(1);
+    expect(canDelete('m-alice')).toBe('true');
     serverState.activeChannelId = 'ch-2';
     serverState.channels = [...serverState.channels, channel('ch-2')];
     chatState.messages = [msg('m-2', author('u-alice'), 'ch-2')];
     await rerender();
-    expect(fetchPerms).toHaveBeenCalledTimes(1);
-    expect(canDelete('m-2')).toBe('true');
+    expect(fetchPerms).toHaveBeenCalledTimes(2);
+    expect(fetchPerms).toHaveBeenLastCalledWith('srv-1', 'ch-2');
+    expect(canDelete('m-2')).toBe('false');
+    serverState.activeChannelId = 'ch-1';
+    chatState.messages = [fromAlice];
+    await rerender();
+    expect(fetchPerms).toHaveBeenCalledTimes(2);
+    expect(canDelete('m-alice')).toBe('true');
+  });
+
+  it('an override that GRANTS the bit in one channel shows Delete there although the space level lacks it', async () => {
+    fetchPerms.mockImplementation((_s: string, ch: string) =>
+      Promise.resolve(ch === 'ch-1' ? (Permissions.VIEW_CHANNEL | Permissions.MANAGE_MESSAGES).toString() : Permissions.VIEW_CHANNEL.toString()));
+    await render();
+    expect(canDelete('m-alice')).toBe('true');
+  });
+
+  it('an override write (channel:permissions_updated) refetches: a bit taken away hides Delete', async () => {
+    fetchPerms.mockResolvedValue(Permissions.MANAGE_MESSAGES.toString());
+    await render();
+    expect(canDelete('m-alice')).toBe('true');
+    fetchPerms.mockResolvedValue('0');
+    await act(async () => { invalidateChannelPermissions('srv-1'); });
+    for (let i = 0; i < 3; i++) await act(async () => { await Promise.resolve(); });
+    expect(fetchPerms).toHaveBeenCalledTimes(2);
+    expect(canDelete('m-alice')).toBe('false');
   });
 
   it('a live role change (new fingerprint) refetches: a revoked bit takes Delete away', async () => {
@@ -250,7 +355,7 @@ describe('MessageList — the effective permissions are cached per server and fi
     serverState.channels = [channel('ch-9', { serverId: 'srv-2' })];
     chatState.messages = [msg('m-9', author('u-alice'), 'ch-9')];
     await rerender();
-    expect(fetchPerms).toHaveBeenLastCalledWith('srv-2');
+    expect(fetchPerms).toHaveBeenLastCalledWith('srv-2', 'ch-9');
     // srv-2's answer is not in yet: srv-1's MANAGE_MESSAGES does not carry over
     expect(canDelete('m-9')).toBe('false');
     await act(async () => { answer('0'); });

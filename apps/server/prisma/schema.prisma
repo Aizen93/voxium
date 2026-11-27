@@ -119,7 +119,7 @@ model Server {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  // ─── Server discovery (docs/local/server-discovery-plan.html) ──────────────
+  // ─── Server discovery ──────────────
   /// Directory profile. sanitizeText'd, <= LIMITS.SERVER_DESCRIPTION_MAX; optional.
   description        String?
   /// Values from DISCOVERY_TAGS only, <= LIMITS.DISCOVERY_MAX_TAGS, deduped.
@@ -181,7 +181,7 @@ model Server {
 
 // ─── Server Bans ─────────────────────────────────────────────────────────────
 
-/// Every removal from a server is a ban (plan: "kick is ban"). The row is what
+/// Every removal from a server is a ban. The row is what
 /// joinServerMember() refuses on — invite, direct join and approved request
 /// alike — and the undo is DELETE /servers/:id/bans/:userId.
 model ServerBan {
@@ -866,8 +866,23 @@ model Report {
   type            String    // "message" | "user"
   status          String    @default("pending") // "pending" | "resolved" | "dismissed"
   reason          String
-  reporterId      String    @map("reporter_id")
-  reportedUserId  String    @map("reported_user_id")
+  // Nullable since migration 20261123120000_reports_outlive_deleted_accounts
+  // (#48): a NULL side is an account that was deleted, its deletion time in
+  // the matching *DeletedAt column. Written only by an account deletion or a
+  // registration hygiene sweep batch with the flag
+  // account_deletion_keeps_reports on (settleReportsOfDeletedAccounts,
+  // utils/reportSettlement.ts), which settles the account's reports before
+  // its row goes. Both foreign keys still CASCADE: with the flag off, the
+  // reports filed by or about an account are deleted with it.
+  reporterId      String?   @map("reporter_id")
+  reportedUserId  String?   @map("reported_user_id")
+  // The reported account's username, kept when that account is deleted (a
+  // space report: the space's owner when it was filed). Backfilled by the
+  // migration; a report filed by a server older than it has none, and a
+  // reader then takes the name from the account.
+  reportedUsername      String?   @map("reported_username")
+  reporterDeletedAt     DateTime? @map("reporter_deleted_at")
+  reportedUserDeletedAt DateTime? @map("reported_user_deleted_at")
   messageId       String?   @map("message_id")
   messageContent  String?   @map("message_content")
   // "server" = content copied server-side (plaintext messages).
@@ -882,8 +897,8 @@ model Report {
   resolvedAt      DateTime? @map("resolved_at")
   createdAt       DateTime  @default(now()) @map("created_at")
 
-  reporter     User     @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
-  reportedUser User     @relation("ReportReported", fields: [reportedUserId], references: [id], onDelete: Cascade)
+  reporter     User?    @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reportedUser User?    @relation("ReportReported", fields: [reportedUserId], references: [id], onDelete: Cascade)
   message      Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
   resolvedBy   User?    @relation("ReportResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
 
@@ -1035,7 +1050,7 @@ model E2EKeyBackup {
   @@map("e2e_key_backups")
 }
 
-/// An account's backed-up Megolm message keys (plan §4.4): one row per inbound
+/// An account's backed-up Megolm message keys (docs/e2e-always-on-plan.md §4.4): one row per inbound
 /// session, sealed client-side under an account-level message-backup key that
 /// travels with the master secret. It exists so history follows the ACCOUNT — a
 /// newly linked device downloads these and can read messages it was never sent.

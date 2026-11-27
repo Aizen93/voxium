@@ -8,8 +8,7 @@ import express, { type Request } from 'express';
 import request from 'supertest';
 import { LIMITS } from '@voxium/shared';
 
-// POST /api/v1/webhooks/:webhookId/:token — the public execute route
-// (docs/local/webhooks-plan.html, "Execute (public)").
+// POST /api/v1/webhooks/:webhookId/:token — the public execute route.
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 

@@ -5,6 +5,7 @@ import { useServerStore, NO_JOIN_REQUESTS } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { Avatar } from '../common/Avatar';
+import { formatDate } from '../../utils/formatDate';
 
 /**
  * Server settings → Members → Join requests (KICK_MEMBERS). Rows are the
@@ -76,7 +77,7 @@ export function JoinRequestsSection({ serverId }: { serverId: string }) {
                 <p className={`mt-0.5 text-xs ${r.message ? 'text-vox-text-secondary' : 'italic text-vox-text-muted'}`} data-testid="join-request-message">
                   {r.message || t('server.joinRequests.noMessage')}
                 </p>
-                <p className="mt-0.5 text-[11px] text-vox-text-muted">{t('server.joinRequests.requestedAt', { when: new Date(r.createdAt).toLocaleString() })}</p>
+                <p className="mt-0.5 text-[11px] text-vox-text-muted">{t('server.joinRequests.requestedAt', { when: formatDate('dateTime', r.createdAt) })}</p>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
                 <button

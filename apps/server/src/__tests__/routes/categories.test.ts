@@ -60,6 +60,16 @@ vi.mock('../../utils/prisma', () => ({
   }),
 }));
 
+// The retry between attempts waits for nothing in these tests
+vi.mock('../../utils/transactionRetry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../utils/transactionRetry')>();
+  return {
+    ...actual,
+    retryOnTransactionConflict: (fn: () => Promise<unknown>, label: string, opts: object = {}) =>
+      actual.retryOnTransactionConflict(fn, label, { ...opts, sleep: async () => {} }),
+  };
+});
+
 // Socket.IO
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
@@ -746,6 +756,129 @@ describe('Category Routes', () => {
         .delete('/api/v1/servers/srv-1/categories/cat-1');
 
       expect(res.status).toBe(401);
+    });
+
+    describe('a delete that loses a deadlock is tried again', () => {
+      const deadlock = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+      let warn: ReturnType<typeof vi.spyOn>;
+
+      beforeEach(() => {
+        warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        prismaMock.category.findFirst.mockReset().mockResolvedValue({ id: 'cat-1', name: 'Text', serverId: 'srv-1', position: 0 });
+        prismaMock.category.delete.mockReset().mockResolvedValue({});
+        prismaMock.channel.findMany.mockReset().mockResolvedValue([]);
+      });
+      afterEach(() => warn.mockRestore());
+
+      const deleteCategory = () => request(app)
+        .delete('/api/v1/servers/srv-1/categories/cat-1')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      const deletedNotices = () => mockEmit.mock.calls.filter(([event]) => event === 'category:deleted');
+
+      it('a deadlock on the first attempt, then success: deletes twice at the database, announces once', async () => {
+        prismaMock.category.delete.mockRejectedValueOnce(deadlock());
+
+        const res = await deleteCategory();
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.category.delete).toHaveBeenCalledTimes(2);
+        expect(deletedNotices()).toHaveLength(1);
+      });
+
+      it('makes the permission and the category checks again on each attempt', async () => {
+        prismaMock.category.delete.mockRejectedValueOnce(deadlock());
+        mockHasServerPermission.mockClear();
+
+        await deleteCategory();
+
+        expect(mockHasServerPermission).toHaveBeenCalledTimes(2);
+        expect(prismaMock.category.findFirst).toHaveBeenCalledTimes(2);
+      });
+
+      it('a channel moved into the category between the attempts is announced too', async () => {
+        prismaMock.category.delete.mockRejectedValueOnce(deadlock());
+        prismaMock.channel.findMany
+          .mockResolvedValueOnce([{ id: 'ch-1' }])
+          .mockResolvedValueOnce([{ id: 'ch-1' }, { id: 'ch-2' }])
+          // the read of the orphaned channels after the delete
+          .mockResolvedValueOnce([
+            { id: 'ch-1', categoryId: null, serverId: 'srv-1' },
+            { id: 'ch-2', categoryId: null, serverId: 'srv-1' },
+          ]);
+
+        await deleteCategory();
+
+        expect(prismaMock.channel.findMany).toHaveBeenLastCalledWith({ where: { id: { in: ['ch-1', 'ch-2'] } } });
+        const rooms = mockTo.mock.calls.map((c: unknown[]) => c[0]);
+        expect(rooms).toEqual(expect.arrayContaining(['channel:ch-1', 'channel:ch-2']));
+      });
+
+      it('a caller whose permission is gone at the second attempt is refused: nothing more is deleted or announced', async () => {
+        prismaMock.category.delete.mockRejectedValueOnce(deadlock());
+        mockHasServerPermission.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+        const res = await deleteCategory();
+
+        expect(res.status).toBe(403);
+        expect(res.body.error).toContain('permission');
+        expect(prismaMock.category.delete).toHaveBeenCalledTimes(1);
+        expect(deletedNotices()).toHaveLength(0);
+      });
+
+      it('a category gone at the second attempt answers 404 Category and announces nothing', async () => {
+        prismaMock.category.delete.mockRejectedValueOnce(deadlock());
+        prismaMock.category.findFirst
+          .mockResolvedValueOnce({ id: 'cat-1', serverId: 'srv-1' })
+          .mockResolvedValueOnce(null);
+
+        const res = await deleteCategory();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Category not found');
+        expect(prismaMock.category.delete).toHaveBeenCalledTimes(1);
+        expect(deletedNotices()).toHaveLength(0);
+      });
+
+      it('a row gone between the check and the delete (P2025) answers 404 Category, not 500', async () => {
+        prismaMock.category.delete.mockRejectedValueOnce(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+
+        const res = await deleteCategory();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Category not found');
+        expect(prismaMock.category.delete).toHaveBeenCalledTimes(1);
+        expect(deletedNotices()).toHaveLength(0);
+      });
+
+      it('an error that is not a conflict is not retried', async () => {
+        const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          prismaMock.category.delete.mockRejectedValueOnce(new Error('db gone'));
+
+          const res = await deleteCategory();
+
+          expect(res.status).toBe(500);
+          expect(prismaMock.category.delete).toHaveBeenCalledTimes(1);
+          expect(deletedNotices()).toHaveLength(0);
+        } finally {
+          errorLog.mockRestore();
+        }
+      });
+
+      it('a conflict on every attempt surfaces as before: 500 and nothing announced', async () => {
+        const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          prismaMock.category.delete.mockRejectedValue(deadlock());
+
+          const res = await deleteCategory();
+
+          expect(res.status).toBe(500);
+          expect(prismaMock.category.delete).toHaveBeenCalledTimes(3);
+          expect(deletedNotices()).toHaveLength(0);
+        } finally {
+          errorLog.mockRestore();
+        }
+      });
     });
   });
 

@@ -199,3 +199,142 @@ describe('AdminReports — resolving and dismissing', () => {
     expect(buttonByText('Dismiss')).toBeUndefined();
   });
 });
+
+// ─── Reports kept after an account's deletion (#48) ─────────────────────────
+
+describe('AdminReports — a report that outlives a deleted account', () => {
+  const EXPIRES = '2027-11-20T08:00:00.000Z';
+  const KEPT_ABOUT = report({
+    id: 'r-kept', reason: 'Threats in a space', reportedUserId: null, reportedUsername: 'gone-user',
+    reportedUserDeletedAt: '2026-11-20T08:00:00.000Z', expiresAt: EXPIRES,
+  });
+  const KEPT_BY = report({
+    id: 'r-by', reason: 'Spam from a bot', reporterId: null, reporterUsername: null,
+    reporterDeletedAt: '2026-11-21T08:00:00.000Z', expiresAt: '2027-11-21T08:00:00.000Z',
+  });
+  const LIVE = report({ id: 'r-live', reason: 'Ordinary case' });
+  const resolveOf = (reason: string) =>
+    Array.from(rowWith(reason).querySelectorAll('button')).find((b) => b.textContent?.trim() === 'Resolve') as HTMLButtonElement;
+
+  beforeEach(() => {
+    store.reports = [KEPT_ABOUT, KEPT_BY, LIVE];
+    store.reportsTotal = 3;
+  });
+
+  it('a deleted reported account is shown by its kept username, marked "Deleted account", with the date the report will be deleted', async () => {
+    await render();
+    const row = rowWith('Threats in a space');
+
+    expect(row.textContent).toContain('gone-user');
+    expect(row.querySelector('[data-testid="report-reported-deleted"]')!.textContent).toBe('Deleted account');
+    expect(row.querySelector('[data-testid="report-expires"]')!.textContent).toBe(`Will be deleted on ${new Date(EXPIRES).toLocaleDateString()}`);
+    // the reporter is alive and named
+    expect(row.textContent).toContain('reporter');
+    expect(row.querySelector('[data-testid="report-reporter-deleted"]')).toBeNull();
+  });
+
+  it('a deleted reporter is shown as "Deleted account"', async () => {
+    await render();
+    const row = rowWith('Spam from a bot');
+
+    expect(row.querySelector('[data-testid="report-reporter-deleted"]')!.textContent).toBe('Deleted account');
+    expect(row.querySelector('[data-testid="report-reported-deleted"]')).toBeNull();
+    expect(row.querySelector('[data-testid="report-expires"]')).not.toBeNull();
+  });
+
+  it('a report whose accounts both live shows no mark and no date', async () => {
+    await render();
+    const row = rowWith('Ordinary case');
+
+    expect(row.querySelector('[data-testid="report-reporter-deleted"]')).toBeNull();
+    expect(row.querySelector('[data-testid="report-reported-deleted"]')).toBeNull();
+    expect(row.querySelector('[data-testid="report-expires"]')).toBeNull();
+  });
+
+  it('the resolve dialog of a report about a deleted account offers NO ban, says why, and resolves without one', async () => {
+    store.resolveReport.mockResolvedValue(true);
+    await render();
+    await act(async () => { resolveOf('Threats in a space').click(); });
+
+    expect(document.body.textContent).toContain('Reported user: gone-user (deleted account)');
+    expect(qa('.fixed input[type="checkbox"]')).toHaveLength(0);
+    expect(document.body.textContent).not.toContain('Ban reported user');
+    expect(qa('[data-testid="report-ban-unavailable"]')[0].textContent).toBe(
+      `The reported account has been deleted, so there is no one to ban. This report will be deleted on ${new Date(EXPIRES).toLocaleDateString()}.`,
+    );
+    expect(buttonByText('Resolve & Ban')).toBeUndefined();
+
+    await act(async () => { buttonByText('Resolve').click(); });
+    expect(store.resolveReport).toHaveBeenCalledWith('r-kept', { resolution: 'Resolved' });
+  });
+
+  it('the resolve dialog stays a dialog that keeps its typed note through Escape and the backdrop', async () => {
+    await render();
+    await act(async () => { resolveOf('Threats in a space').click(); });
+    const note = qa('.fixed textarea')[0] as HTMLTextAreaElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(note, 'Kept for the record');
+      note.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await act(async () => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+
+    expect((qa('.fixed textarea')[0] as HTMLTextAreaElement).value).toBe('Kept for the record');
+  });
+
+  it('a report BY a deleted account keeps its ban control (the reported account lives)', async () => {
+    await render();
+    await act(async () => { resolveOf('Spam from a bot').click(); });
+
+    expect(qa('.fixed input[type="checkbox"]')).toHaveLength(1);
+    expect(document.body.textContent).toContain('Ban reported user');
+    expect(qa('[data-testid="report-ban-unavailable"]')).toHaveLength(0);
+  });
+
+  it('a refusal the store reports keeps the dialog open for another try', async () => {
+    store.resolveReport.mockResolvedValue(false);
+    await render();
+    await act(async () => { resolveOf('Threats in a space').click(); });
+    await act(async () => { buttonByText('Resolve').click(); });
+
+    expect(buttonByText('Resolve')).toBeDefined();
+  });
+
+  it('a reported account deleted while the dialog is open with the ban ticked: the dialog follows the list, the ban box goes, and no ban is sent', async () => {
+    store.resolveReport.mockResolvedValue(true);
+    await render();
+    await act(async () => { resolveOf('Ordinary case').click(); });
+    const ban = qa('.fixed input[type="checkbox"]')[0] as HTMLInputElement;
+    await act(async () => { ban.click(); });
+    expect(buttonByText('Resolve & Ban')).toBeDefined();
+
+    // the list refreshes (a report:new) with the reported account now deleted
+    store.reports = [KEPT_ABOUT, KEPT_BY, { ...LIVE, reportedUserId: null, reportedUserDeletedAt: '2026-11-22T08:00:00.000Z', expiresAt: '2027-11-22T08:00:00.000Z' }];
+    await render();
+
+    expect(qa('.fixed input[type="checkbox"]')).toHaveLength(0);
+    expect(qa('[data-testid="report-ban-unavailable"]')).toHaveLength(1);
+    await act(async () => { buttonByText('Resolve').click(); });
+    expect(store.resolveReport).toHaveBeenCalledWith('r-live', { resolution: 'Resolved' });
+  });
+
+  it('a message link that goes while the dialog is open with the delete box ticked: the box goes, the label says Resolve, and no delete is sent', async () => {
+    const ABOUT_A_MESSAGE = report({ id: 'r-msg-live', type: 'message', messageId: 'm-9', messageContent: 'hi', reason: 'Message case', reportedUsername: 'poster' });
+    store.reports = [ABOUT_A_MESSAGE];
+    store.resolveReport.mockResolvedValue(true);
+    await render();
+    await act(async () => { resolveOf('Message case').click(); });
+    // the first box of a message report is "delete the reported message"
+    const del = qa('.fixed input[type="checkbox"]')[0] as HTMLInputElement;
+    await act(async () => { del.click(); });
+    expect(buttonByText('Resolve & Delete')).toBeDefined();
+
+    // the list refreshes with the message gone (its author's account was deleted, or the message was)
+    store.reports = [{ ...ABOUT_A_MESSAGE, messageId: null }];
+    await render();
+
+    expect(buttonByText('Resolve & Delete')).toBeUndefined();
+    await act(async () => { buttonByText('Resolve').click(); });
+    expect(store.resolveReport).toHaveBeenCalledWith('r-msg-live', { resolution: 'Resolved' });
+  });
+});

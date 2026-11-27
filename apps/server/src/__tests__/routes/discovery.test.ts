@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 
-// GET/POST/DELETE /discovery/* — the directory (docs/local/server-discovery-plan.html).
+// GET/POST/DELETE /discovery/* — the directory.
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 

@@ -7,7 +7,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { MessageItem } from './MessageItem';
 import { isNewDay, daySeparatorFor } from '../../utils/dateSeparator';
 import { startsMessageGroup } from '../../utils/messageGrouping';
-import { useServerPermissions } from '../../hooks/useServerPermissions';
+import { useChannelPermissions } from '../../hooks/useChannelPermissions';
 import { Permissions, hasPermission } from '@voxium/shared';
 import { ArrowDown } from 'lucide-react';
 
@@ -40,9 +40,18 @@ export function MessageList() {
 
   // The server lets MANAGE_MESSAGES delete other people's messages (a
   // webhook's posts included — they are deleted only this way), however the
-  // bit was obtained; the legacy role field decides nothing
-  const serverPerms = useServerPermissions(activeServerId, user?.id);
-  const canManageMessages = serverPerms !== null && hasPermission(serverPerms, Permissions.MANAGE_MESSAGES);
+  // bit was obtained, and judges it in THIS channel (an override can grant or
+  // take it away there); the legacy role field decides nothing. The control
+  // offers a power, so it waits for the answer. A secure channel is never
+  // asked (null): its rule is below.
+  const channelPerms = useChannelPermissions(activeServerId, activeChannelId, user?.id);
+  // Reply (the server judges SEND_MESSAGES) and reactions (ADD_REACTIONS, for
+  // adding and for removing) only PREVENT a refusal: usable while the bits are
+  // unknown (null: not loaded, a failed fetch, a secure channel), absent only
+  // when they are known and lack the bit.
+  const canReply = channelPerms === null || hasPermission(channelPerms, Permissions.SEND_MESSAGES);
+  const canReact = channelPerms === null || hasPermission(channelPerms, Permissions.ADD_REACTIONS);
+  const canManageMessages = channelPerms !== null && hasPermission(channelPerms, Permissions.MANAGE_MESSAGES);
   // SECURE channels: moderation is membership-derived, never role-derived —
   // the channel CREATOR moderates (MANAGE_MESSAGES in the fixed creator set),
   // and a server admin/owner who is a plain member (or no member at all) does
@@ -279,6 +288,8 @@ export function MessageList() {
                   isOwn={isOwn}
                   canDelete={isOwn || canModerate}
                   channelId={activeChannelId!}
+                  canReply={canReply}
+                  canReact={canReact}
                 />
               </div>
             );

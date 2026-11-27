@@ -23,7 +23,7 @@ import type { Conversation } from '@voxium/shared';
  * moved to Settings → Security in `settings/E2EDevicesSection.tsx`: one device
  * list, one account key, one backup, so administering them from inside a
  * single conversation was what made the whole feature read as per-conversation
- * (plan §4.5). Verifying a CONTACT genuinely is per contact, so it stayed here.
+ * (docs/e2e-always-on-plan.md §4.5). Verifying a CONTACT genuinely is per contact, so it stayed here.
  */
 
 /**

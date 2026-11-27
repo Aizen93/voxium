@@ -16,6 +16,7 @@ import {
   SIGNUP,
   SESSIONS,
   APP_VERSION,
+  REPORT_RETENTION_MONTHS,
 } from '@voxium/shared';
 import { LEGAL_LANGUAGES, type LegalLanguage } from '../../components/legal/legalLanguage';
 import { LEGAL_OPERATOR, PRIVACY_POLICY_DATES } from '../../components/legal/operator';
@@ -253,6 +254,11 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
       en: `at the latest ${SESSIONS.MAX_AGE_DAYS} days after you signed in`,
       fr: `au plus tard ${SESSIONS.MAX_AGE_DAYS} jours après la connexion`,
     },
+    {
+      source: 'REPORT_RETENTION_MONTHS (@voxium/shared)',
+      en: `${REPORT_RETENTION_MONTHS} months after`,
+      fr: `${REPORT_RETENTION_MONTHS} mois après`,
+    },
     CHANGE_NOTICE,
   ],
   terms: [
@@ -316,6 +322,8 @@ const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
     'account emails (address verification and password reset)',
     // an account deletion no longer deletes the other participant's side of a conversation outright
     'your direct conversations (including the other participant\'s messages in them)',
+    // a report no longer always goes with the account that filed it or that it concerns
+    'deleted with the account that opened or filed them, or that a report concerns',
   ],
   // The same statements, as a French translation would make them
   fr: [
@@ -336,6 +344,7 @@ const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
     'avis de modification des présents documents',
     'les e-mails liés au compte (vérification de l’adresse et réinitialisation du mot de passe)',
     'vos conversations privées (y compris les messages que l’autre participant y a envoyés)',
+    'supprimés avec le compte qui les a ouverts ou effectués, ou que concerne un signalement',
   ],
 };
 
@@ -415,9 +424,12 @@ describe('the Privacy Policy tells what an account deletion keeps of a direct co
     for (const sentence of keySentences(lang)) expect(text, sentence).toContain(sentence);
   });
 
-  it.each(LEGAL_LANGUAGES)('prints the date from which the conversation is kept, formatted, exactly twice (%s)', (lang) => {
+  it.each(LEGAL_LANGUAGES)('prints the date from which the conversation is kept, formatted, twice for each rule that prints it (%s)', (lang) => {
     const text = pages.privacy[lang].text;
-    expect(text.split(kept(lang))).toHaveLength(3);
+    // The reports item prints its own date twice; when both rules start on the
+    // same day the formatted text is the same, so it is counted once for each
+    const printed = PRIVACY_POLICY_DATES.reportsKeptFrom === PRIVACY_POLICY_DATES.conversationsKeptFrom ? 4 : 2;
+    expect(text.split(kept(lang))).toHaveLength(printed + 1);
     expect(text).not.toContain(PRIVACY_POLICY_DATES.conversationsKeptFrom);
   });
 
@@ -432,9 +444,65 @@ describe('the Privacy Policy tells what an account deletion keeps of a direct co
     expect(
       PRIVACY_POLICY_DATES.confirmedForVersion,
       `The app is at ${APP_VERSION}, the Privacy Policy dates were confirmed for ${PRIVACY_POLICY_DATES.confirmedForVersion}. ` +
-        'In operator.ts (PRIVACY_POLICY_DATES): set lastUpdated to the release day, conversationsKeptFrom to that day plus at least ' +
+        'In operator.ts (PRIVACY_POLICY_DATES): set lastUpdated to the release day, conversationsKeptFrom and reportsKeptFrom to that day plus at least ' +
         'LEGAL_OPERATOR.changeNoticeDays, then set confirmedForVersion to the released version.',
     ).toBe(APP_VERSION);
+  });
+});
+
+describe('the Privacy Policy tells what an account deletion keeps of a report', () => {
+  const MONTHS = REPORT_RETENTION_MONTHS;
+  const SUPPORT_ITEM: PerLanguage = {
+    en: 'Support conversations have no automatic expiry: they are kept for support, and are deleted with the account that opened them',
+    fr: 'Les conversations de support n’expirent pas automatiquement : elles sont conservées pour le support, et sont supprimées avec le compte qui les a ouvertes',
+  };
+  const kept = (lang: LegalLanguage) => formatLegalDate(PRIVACY_POLICY_DATES.reportsKeptFrom, lang);
+  const sentences = (lang: LegalLanguage): string[] => lang === 'en'
+    ? [
+        'Reports. A report is kept for moderation and, while the accounts it concerns exist, has no automatic expiry.',
+        `Until ${kept('en')}, deleting your account deletes the reports you filed and the reports that concern you.`,
+        `From ${kept('en')}, it keeps them, so that a report does not disappear when the person it concerns deletes their account.`,
+        'A kept report is no longer linked to the deleted account.',
+        "The report keeps the username of the reported account (for a report about a space, that of its owner), the reason given, the copy of the reported message (or of the reported space's name and description), the identifier of the channel, conversation or space it concerns, and the decision taken on it, if any.",
+        `It is deleted ${MONTHS} months after the deletion of that account, or, when the account that filed it and the reported account are both deleted, ${MONTHS} months after the earlier of the two deletions.`,
+        `A report you filed about someone else is therefore deleted ${MONTHS} months after you delete your account, even if the other account still exists`,
+        'reports, in the cases described under “Reports” above;',
+      ]
+    : [
+        'Les signalements. Un signalement est conservé pour la modération et, tant que les comptes qu’il concerne existent, n’expire pas automatiquement.',
+        `Jusqu’au ${kept('fr')}, la suppression de votre compte supprime les signalements que vous avez effectués et ceux qui vous concernent.`,
+        `À partir du ${kept('fr')}, elle les conserve, afin qu’un signalement ne disparaisse pas lorsque la personne qu’il concerne supprime son compte.`,
+        'Un signalement conservé n’est plus lié au compte supprimé.',
+        'Le signalement conserve le nom d’utilisateur du compte signalé (pour un signalement visant un espace, celui de son propriétaire), le motif indiqué, la copie du message signalé (ou du nom et de la description de l’espace signalé), l’identifiant du salon, de la conversation ou de l’espace qu’il concerne, et la décision prise à son sujet, le cas échéant.',
+        `Il est supprimé ${MONTHS} mois après la suppression de ce compte, ou, lorsque le compte qui l’a effectué et le compte signalé sont tous deux supprimés, ${MONTHS} mois après la plus ancienne des deux suppressions.`,
+        `Un signalement que vous avez effectué au sujet d’une autre personne est donc supprimé ${MONTHS} mois après la suppression de votre compte, même si l’autre compte existe encore`,
+        'les signalements, dans les cas décrits sous « Les signalements » ci-dessus ;',
+      ];
+
+  it.each(LEGAL_LANGUAGES)('holds the support item, then the reports item right after it (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    const at = text.indexOf(SUPPORT_ITEM[lang]);
+    expect(at, SUPPORT_ITEM[lang]).toBeGreaterThan(-1);
+    expect(text.indexOf(sentences(lang)[0])).toBe(at + SUPPORT_ITEM[lang].length + 1);
+  });
+
+  it.each(LEGAL_LANGUAGES)('holds every sentence of the reports item and its mention after a deletion (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    for (const sentence of sentences(lang)) expect(text, sentence).toContain(sentence);
+  });
+
+  it.each(LEGAL_LANGUAGES)('prints the number of months only through the constant, the date never as written (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    expect(text).not.toContain(PRIVACY_POLICY_DATES.reportsKeptFrom);
+    const word = lang === 'en' ? 'months after' : 'mois après';
+    expect(text.split(`${MONTHS} ${word}`)).toHaveLength(4);
+  });
+
+  it('allows at least the notice period between the last update and the day the report rule starts', () => {
+    expect(
+      daysBetween(PRIVACY_POLICY_DATES.lastUpdated, PRIVACY_POLICY_DATES.reportsKeptFrom),
+      'reportsKeptFrom must be at least LEGAL_OPERATOR.changeNoticeDays after lastUpdated',
+    ).toBeGreaterThanOrEqual(LEGAL_OPERATOR.changeNoticeDays);
   });
 });
 
@@ -595,6 +663,7 @@ describe('legal pages state the numbers the code implements', () => {
     for (const pin of PINS[name]) rest = rest.split(pin[lang]).join(' ');
     // the Privacy Policy's second date, pinned to its constant (PRIVACY_POLICY_DATES)
     if (name === 'privacy') rest = rest.split(formatLegalDate(PRIVACY_POLICY_DATES.conversationsKeptFrom, lang)).join(' ');
+    if (name === 'privacy') rest = rest.split(formatLegalDate(PRIVACY_POLICY_DATES.reportsKeptFrom, lang)).join(' ');
     const stray = rest.match(/\S*\d\S*/g) ?? [];
     expect(stray, `${name} (${lang}): every number must be pinned to the constant it describes (add it to PINS)`).toEqual([]);
   });

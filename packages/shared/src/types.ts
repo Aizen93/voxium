@@ -253,7 +253,7 @@ export interface Server {
   invitesLocked: boolean;
   ownerId: string;
   createdAt: string;
-  // Directory profile (docs/local/server-discovery-plan.html). Every select
+  // Directory profile. Every select
   // that spells out invitesLocked/ownerId/createdAt carries these too.
   description: string | null;
   tags: string[];
@@ -1251,10 +1251,22 @@ export interface Report {
   type: ReportType;
   status: ReportStatus;
   reason: string;
-  reporterId: string;
-  reporterUsername: string;
-  reportedUserId: string;
+  /** null once the reporter's account is deleted (the report outlives it: `reporterDeletedAt`). */
+  reporterId: string | null;
+  reporterUsername: string | null;
+  /** null once the reported account is deleted (`reportedUserDeletedAt`); `reportedUsername` is kept. */
+  reportedUserId: string | null;
   reportedUsername: string;
+  /** When the reporter's account was deleted. Optional: a server older than this field does not send it. */
+  reporterDeletedAt?: string | null;
+  /** When the reported account was deleted; such a report cannot ban anyone. Optional, as above. */
+  reportedUserDeletedAt?: string | null;
+  /**
+   * When the report will be deleted: REPORT_RETENTION_MONTHS after the
+   * earlier deletion of its accounts; null while neither is deleted.
+   * Optional, as above.
+   */
+  expiresAt?: string | null;
   messageId: string | null;
   messageContent: string | null;
   /**
@@ -1357,7 +1369,7 @@ export type AuditAction =
   | 'storage.file_delete' | 'storage.cleanup_orphans'
   | 'registration.hygiene_sweep'
   | 'announcement.create' | 'announcement.publish' | 'announcement.delete'
-  | 'report.resolve' | 'report.dismiss'
+  | 'report.resolve' | 'report.dismiss' | 'report.retention_sweep'
   | 'support.claim' | 'support.close'
   | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user'
   | 'feature_flag.update' | 'feature_flag.reset'

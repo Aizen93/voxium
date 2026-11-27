@@ -89,6 +89,7 @@ import { LOCK_WAIT_TRANSACTION_OPTIONS } from '../../utils/transactionRetry';
 import { DM_SYSTEM_NOTICES } from '@voxium/shared';
 import {
   changeConversationMessage,
+  lockConversationsOfAccount,
   reopenConversationForUser,
   removeConversationForUser,
   settleConversationsOfDeletedAccount,
@@ -674,6 +675,22 @@ describe('settleConversationsOfDeletedAccount', () => {
     const lock = sql('lock: the account\'s conversations FOR UPDATE');
     expect(lock.sql.replace(/\s+/g, ' ')).toMatch(/FROM conversations WHERE user1_id = \? OR user2_id = \? ORDER BY id FOR UPDATE/);
     expect(lock.values).toEqual([A, A]);
+  });
+
+  it('lockConversationsOfAccount is that first statement on its own: the same text, the same values, nothing else run', async () => {
+    stage();
+    await settleConversationsOfDeletedAccount(tx as any, A, { keep: true });
+    const settled = sql('lock: the account\'s conversations FOR UPDATE');
+    rawCalls.length = 0;
+    h.ran.length = 0;
+
+    const rows = await lockConversationsOfAccount(tx as any, A);
+
+    expect(h.ran).toEqual(['lock: the account\'s conversations FOR UPDATE']);
+    expect(rawCalls).toHaveLength(1);
+    expect(rawCalls[0].sql).toBe(settled.sql);
+    expect(rawCalls[0].values).toEqual(settled.values);
+    expect(rows).toEqual(locked);
   });
 
   it('keep on: each decided under the locks; the kept ones rewritten (rows, then reactions and files), unhidden, side set NULL; the others deleted after their keys are read', async () => {

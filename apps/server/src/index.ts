@@ -49,6 +49,7 @@ import { startRegistrationHygiene, stopRegistrationHygiene } from './utils/regis
 import { startKeyShareCleanup, stopKeyShareCleanup } from './utils/keyShareCleanup';
 import { startSessionSweep, stopSessionSweep } from './utils/sessionSweep';
 import { startOrphanCleanup, stopOrphanCleanup } from './utils/orphanCleanup';
+import { startReportRetention, stopReportRetention } from './utils/reportRetention';
 import { startDiscoveryStats, stopDiscoveryStats } from './utils/discoveryStats';
 import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, NODE_HEARTBEAT_TTL_S, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
@@ -246,6 +247,11 @@ async function main() {
   // matter more than the sweep itself.
   startOrphanCleanup();
 
+  // Moderation reports kept after an account's deletion are deleted once
+  // their retention period has passed (nightly) — leader-locked via
+  // withClusterLock, see utils/reportRetention.ts
+  startReportRetention();
+
   // Directory activity figures on a rolling daily cycle (every 5 min, lock
   // held 290 s, budgeted batches) plus the join-request sweeps and the
   // nightly drift corrections — see utils/discoveryStats.ts.
@@ -269,6 +275,7 @@ async function main() {
     stopSessionSweep();
     stopRegistrationHygiene();
     stopOrphanCleanup();
+    stopReportRetention();
     stopDiscoveryStats();
     stopVoiceCluster();
     stopPresenceReaper();

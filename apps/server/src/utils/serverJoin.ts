@@ -62,7 +62,7 @@ async function waitForJoinRows(userId: string, serverId: string, opts: JoinServe
  * is made a member inside server creation). Invite joins, direct discovery
  * joins and approved join requests all come through here, so the ban check,
  * the member limit, the duplicate check and the inline member count live here
- * and nowhere else (docs/local/server-discovery-plan.html).
+ * and nowhere else.
  *
  * Order: ban (403) → already a member (400) → member limit (400) → a wait,
  * holding nothing, for the rows the transaction takes after the space row

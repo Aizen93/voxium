@@ -79,6 +79,9 @@ function makeService(userId: string) {
     resetAccountIdentity: vi.fn(async () => {}),
     keyBackupInfo: vi.fn(async () => ({ exists: false, updatedAt: null as string | null })),
     createKeyBackup: vi.fn(async () => RECOVERY_KEY),
+    // nothing pending unless a test says otherwise: no notice, and the backup read as usual
+    resolveKeyBackupWrite: vi.fn(async (): Promise<E2EKeyBackupWriteCheck | null> => null),
+    dismissKeyBackupWrite: vi.fn(async () => {}),
     deleteKeyBackup: vi.fn(async () => {}),
     restoreKeyBackup: vi.fn(async (_recoveryKey: string) => {}),
   };
@@ -100,7 +103,11 @@ vi.mock('../../services/e2e/e2eService', async () => {
 });
 
 import { useE2EStore, stopE2EDeviceListWatch, E2ELinkingCodeUnknownError } from '../../stores/e2eStore';
-import { E2EIdentityChangedError } from '../../services/e2e/e2eService';
+import {
+  E2EIdentityChangedError,
+  E2EKeyBackupUnconfirmedError,
+  type E2EKeyBackupWriteCheck,
+} from '../../services/e2e/e2eService';
 
 const USER = 'alice';
 const PEER = 'bob';
@@ -575,7 +582,7 @@ describe('e2eStore own-device actions', () => {
   });
 });
 
-describe('e2eStore device linking (plan §4.3)', () => {
+describe('e2eStore device linking', () => {
   const LINKED = {
     deviceId: 'laptop',
     createdAt: '2026-07-30T09:15:00.000Z',
@@ -714,10 +721,335 @@ describe('e2eStore key backup (spec §15)', () => {
     expect(useE2EStore.getState().keyBackup).toBeNull();
   });
 
+  it('records the notice and the backup the read after an unconfirmed write found, and passes the error on', async () => {
+    // The write may or may not have landed (spec §15.7): the panel shows what
+    // the read after it saw, not the backup the write was meant to leave.
+    useE2EStore.setState({ keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' } });
+    const unconfirmed = new E2EKeyBackupUnconfirmedError('changed', false, {
+      exists: true,
+      updatedAt: '2026-11-22T10:00:00.000Z',
+    });
+    service.createKeyBackup.mockRejectedValueOnce(unconfirmed);
+
+    await expect(useE2EStore.getState().createKeyBackup(USER)).rejects.toBe(unconfirmed);
+
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: true, updatedAt: '2026-11-22T10:00:00.000Z' });
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+    expect(service.keyBackupInfo).not.toHaveBeenCalled();
+  });
+
+  it('keeps the last known backup state when the read after the write failed too', async () => {
+    useE2EStore.setState({ keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' }, keyBackupJudged: true });
+    service.createKeyBackup.mockRejectedValueOnce(new E2EKeyBackupUnconfirmedError('unknown', true, null));
+
+    await expect(useE2EStore.getState().createKeyBackup(USER)).rejects.toBeInstanceOf(E2EKeyBackupUnconfirmedError);
+
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'unknown', firstSetup: true });
+    // the read after the write failed: nothing judged it
+    expect(useE2EStore.getState().keyBackupJudged).toBe(false);
+  });
+
+  it('ends the notice of an earlier write once a key is shown, and a key shown counts as judged', async () => {
+    useE2EStore.setState({ keyBackupAttempt: { outcome: 'changed', firstSetup: false }, keyBackupJudged: false });
+    // the read after it fails: the shown key alone ends the notice
+    service.resolveKeyBackupWrite.mockRejectedValueOnce(new Error('the vault failed'));
+    await useE2EStore.getState().createKeyBackup(USER);
+    expect(useE2EStore.getState().keyBackupAttempt).toBeNull();
+    expect(useE2EStore.getState().keyBackupJudged).toBe(true);
+  });
+
+  it('checks a write not confirmed again, and records the notice and the backup it read', async () => {
+    useE2EStore.setState({ keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' } });
+    service.resolveKeyBackupWrite.mockResolvedValueOnce({
+      outcome: 'changed',
+      firstSetup: false,
+      stored: { exists: false, updatedAt: null },
+    });
+
+    await expect(useE2EStore.getState().checkKeyBackupWrite(USER)).resolves.toBe('changed');
+
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: false, updatedAt: null });
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+  });
+
+  it.each([
+    ['unchanged', { outcome: 'unchanged', firstSetup: false, stored: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' } }, true],
+    ['nothing to say', null, true],
+    ['unknown', { outcome: 'unknown', firstSetup: false, stored: null }, false],
+  ] as const)('counts a check that answers %s as judged only when its read succeeded', async (_, check, judged) => {
+    useE2EStore.setState({ keyBackupAttempt: { outcome: 'unknown', firstSetup: false }, keyBackupJudged: !judged });
+    service.resolveKeyBackupWrite.mockResolvedValueOnce(check);
+
+    await useE2EStore.getState().checkKeyBackupWrite(USER);
+
+    expect(useE2EStore.getState().keyBackupJudged).toBe(judged);
+  });
+
+  it('drops the notice once a check settles the write', async () => {
+    useE2EStore.setState({ keyBackupAttempt: { outcome: 'unchanged', firstSetup: false } });
+    service.resolveKeyBackupWrite.mockResolvedValueOnce({
+      outcome: 'settled',
+      firstSetup: false,
+      stored: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' },
+    });
+
+    await expect(useE2EStore.getState().checkKeyBackupWrite(USER)).resolves.toBe('settled');
+
+    expect(useE2EStore.getState().keyBackupAttempt).toBeNull();
+  });
+
+  it('does not swallow a failed check, and keeps the notice', async () => {
+    useE2EStore.setState({ keyBackupAttempt: { outcome: 'unknown', firstSetup: false } });
+    service.resolveKeyBackupWrite.mockRejectedValueOnce(new Error('the vault failed'));
+
+    await expect(useE2EStore.getState().checkKeyBackupWrite(USER)).rejects.toThrow('the vault failed');
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'unknown', firstSetup: false });
+  });
+
+  it('judges a write not confirmed when the panel loads, and records what the check read', async () => {
+    service.resolveKeyBackupWrite.mockResolvedValueOnce({
+      outcome: 'changed',
+      firstSetup: false,
+      stored: { exists: true, updatedAt: '2026-11-22T10:00:00.000Z' },
+    });
+
+    await useE2EStore.getState().loadKeyBackup(USER);
+
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: true, updatedAt: '2026-11-22T10:00:00.000Z' });
+  });
+
+  it('shows the backup state at panel load without waiting for a judging that waits on the queue', async () => {
+    // a record is pending and the service's queue is busy: the backup is shown first
+    let judge!: (check: E2EKeyBackupWriteCheck | null) => void;
+    service.resolveKeyBackupWrite.mockImplementationOnce(() => new Promise((resolve) => (judge = resolve)));
+    service.keyBackupInfo.mockResolvedValueOnce({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+
+    // an earlier load was judged: this one is not until its own judging answers
+    useE2EStore.setState({ keyBackupJudged: true });
+    const loading = useE2EStore.getState().loadKeyBackup(USER);
+    await settle();
+
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+    expect(useE2EStore.getState().keyBackupAttempt).toBeNull();
+    expect(useE2EStore.getState().keyBackupJudged).toBe(false);
+
+    judge({ outcome: 'unchanged', firstSetup: false, stored: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' } });
+    await loading;
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'unchanged', firstSetup: false });
+    expect(useE2EStore.getState().keyBackupJudged).toBe(true);
+  });
+
+  it('leaves the load not judged when its judging answers unknown', async () => {
+    service.resolveKeyBackupWrite.mockResolvedValueOnce({ outcome: 'unknown', firstSetup: false, stored: null });
+    service.keyBackupInfo.mockResolvedValueOnce({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+
+    await useE2EStore.getState().loadKeyBackup(USER);
+
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'unknown', firstSetup: false });
+    expect(useE2EStore.getState().keyBackupJudged).toBe(false);
+  });
+
+  it('judges a load with nothing pending at once', async () => {
+    service.keyBackupInfo.mockResolvedValueOnce({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+
+    await useE2EStore.getState().loadKeyBackup(USER);
+
+    expect(useE2EStore.getState().keyBackupAttempt).toBeNull();
+    expect(useE2EStore.getState().keyBackupJudged).toBe(true);
+  });
+
+  it('applies only the later of two panel loads when the earlier one answers last', async () => {
+    // the earlier load read before one of this device's writes landed, the
+    // later one after it; the earlier answer arrives last
+    let judgeEarlier!: (check: E2EKeyBackupWriteCheck | null) => void;
+    let infoEarlier!: (info: { exists: boolean; updatedAt: string | null }) => void;
+    service.resolveKeyBackupWrite
+      .mockImplementationOnce(() => new Promise((resolve) => (judgeEarlier = resolve)))
+      .mockResolvedValueOnce({ outcome: 'changed', firstSetup: false, stored: { exists: true, updatedAt: '2026-11-22T10:00:00.000Z' } });
+    service.keyBackupInfo
+      .mockImplementationOnce(() => new Promise((resolve) => (infoEarlier = resolve)))
+      .mockResolvedValueOnce({ exists: true, updatedAt: '2026-11-22T10:00:00.000Z' });
+
+    const earlier = useE2EStore.getState().loadKeyBackup(USER);
+    await useE2EStore.getState().loadKeyBackup(USER);
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+
+    infoEarlier({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+    judgeEarlier(null);
+    await earlier;
+
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: true, updatedAt: '2026-11-22T10:00:00.000Z' });
+    expect(useE2EStore.getState().keyBackupJudged).toBe(true);
+  });
+
+  it('keeps what a "Check again" found when a load asked before it answers after it', async () => {
+    let judgeLoad!: (check: E2EKeyBackupWriteCheck | null) => void;
+    service.resolveKeyBackupWrite
+      .mockImplementationOnce(() => new Promise((resolve) => (judgeLoad = resolve)))
+      .mockResolvedValueOnce({ outcome: 'changed', firstSetup: false, stored: { exists: true, updatedAt: '2026-11-22T10:00:00.000Z' } });
+    service.keyBackupInfo.mockResolvedValueOnce({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+
+    const loading = useE2EStore.getState().loadKeyBackup(USER);
+    await settle();
+    await expect(useE2EStore.getState().checkKeyBackupWrite(USER)).resolves.toBe('changed');
+
+    judgeLoad(null);
+    await loading;
+
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: true, updatedAt: '2026-11-22T10:00:00.000Z' });
+  });
+
+  it('answers a "Check again" that a later load overtook, and leaves the store to that load', async () => {
+    let judgeCheck!: (check: E2EKeyBackupWriteCheck | null) => void;
+    service.resolveKeyBackupWrite
+      .mockImplementationOnce(() => new Promise((resolve) => (judgeCheck = resolve)))
+      .mockResolvedValueOnce({ outcome: 'changed', firstSetup: false, stored: { exists: true, updatedAt: '2026-11-22T10:00:00.000Z' } });
+    service.keyBackupInfo.mockResolvedValueOnce({ exists: true, updatedAt: '2026-11-22T10:00:00.000Z' });
+
+    const checking = useE2EStore.getState().checkKeyBackupWrite(USER);
+    await useE2EStore.getState().loadKeyBackup(USER);
+    judgeCheck(null);
+
+    await expect(checking).resolves.toBeNull();
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+    expect(useE2EStore.getState().keyBackupJudged).toBe(true);
+  });
+
+  it('applies the notice of an unconfirmed write over a load asked while the write was out', async () => {
+    // the load read before the write's own read: whatever it answers, and
+    // whenever, the write's notice stands
+    let failWrite!: (err: unknown) => void;
+    let judgeLoad!: (check: E2EKeyBackupWriteCheck | null) => void;
+    service.createKeyBackup.mockImplementationOnce(() => new Promise((_resolve, reject) => (failWrite = reject)));
+    service.resolveKeyBackupWrite.mockImplementationOnce(() => new Promise((resolve) => (judgeLoad = resolve)));
+    service.keyBackupInfo.mockResolvedValueOnce({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+
+    const creating = useE2EStore.getState().createKeyBackup(USER);
+    const loading = useE2EStore.getState().loadKeyBackup(USER);
+    await settle();
+    failWrite(new E2EKeyBackupUnconfirmedError('changed', false, { exists: true, updatedAt: '2026-11-22T10:00:00.000Z' }));
+    await expect(creating).rejects.toBeInstanceOf(E2EKeyBackupUnconfirmedError);
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+
+    judgeLoad(null);
+    await loading;
+
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'changed', firstSetup: false });
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: true, updatedAt: '2026-11-22T10:00:00.000Z' });
+  });
+
+  it('does not count a key shown as judged once a later load was asked', async () => {
+    // the reload after the key hangs; a load asked after it could not read
+    let judgeReload!: (check: E2EKeyBackupWriteCheck | null) => void;
+    service.resolveKeyBackupWrite
+      .mockImplementationOnce(() => new Promise((resolve) => (judgeReload = resolve)))
+      .mockResolvedValueOnce({ outcome: 'unknown', firstSetup: false, stored: null });
+
+    const creating = useE2EStore.getState().createKeyBackup(USER);
+    await settle();
+    await useE2EStore.getState().loadKeyBackup(USER);
+    expect(useE2EStore.getState().keyBackupJudged).toBe(false);
+
+    judgeReload(null);
+    await expect(creating).resolves.toBe(RECOVERY_KEY);
+
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'unknown', firstSetup: false });
+    expect(useE2EStore.getState().keyBackupJudged).toBe(false);
+  });
+
+  it('does not bring the backup back when a load asked before recovery was turned off answers after it', async () => {
+    let judgeLoad!: (check: E2EKeyBackupWriteCheck | null) => void;
+    let infoLoad!: (info: { exists: boolean; updatedAt: string | null }) => void;
+    service.resolveKeyBackupWrite.mockImplementationOnce(() => new Promise((resolve) => (judgeLoad = resolve)));
+    service.keyBackupInfo.mockImplementationOnce(() => new Promise((resolve) => (infoLoad = resolve)));
+
+    const loading = useE2EStore.getState().loadKeyBackup(USER);
+    await useE2EStore.getState().deleteKeyBackup(USER);
+    infoLoad({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+    judgeLoad(null);
+    await loading;
+
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: false, updatedAt: null });
+    expect(useE2EStore.getState().keyBackupAttempt).toBeNull();
+  });
+
+  it('does not bring a dismissed notice back when a load asked before the dismiss answers after it', async () => {
+    useE2EStore.setState({ keyBackupAttempt: { outcome: 'elsewhere', firstSetup: false } });
+    let judgeLoad!: (check: E2EKeyBackupWriteCheck | null) => void;
+    service.resolveKeyBackupWrite.mockImplementationOnce(() => new Promise((resolve) => (judgeLoad = resolve)));
+    service.keyBackupInfo.mockResolvedValueOnce({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+
+    const loading = useE2EStore.getState().loadKeyBackup(USER);
+    await settle();
+    await useE2EStore.getState().dismissKeyBackupWrite(USER);
+    judgeLoad({ outcome: 'elsewhere', firstSetup: false, stored: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' } });
+    await loading;
+
+    expect(useE2EStore.getState().keyBackupAttempt).toBeNull();
+  });
+
+  it('shows an unknown outcome at panel load even when the backup cannot be read', async () => {
+    service.resolveKeyBackupWrite.mockResolvedValueOnce({ outcome: 'unknown', firstSetup: false, stored: null });
+    service.keyBackupInfo.mockRejectedValueOnce(new Error('offline'));
+
+    await useE2EStore.getState().loadKeyBackup(USER);
+
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'unknown', firstSetup: false });
+    expect(useE2EStore.getState().keyBackup).toBeNull();
+  });
+
+  it.each([
+    ['a notice', { outcome: 'changed', firstSetup: false }],
+    ['no notice', null],
+  ] as const)('keeps %s at panel load when the check itself fails, reads the backup, and leaves the load not judged', async (_, attempt) => {
+    useE2EStore.setState({ keyBackupAttempt: attempt, keyBackupJudged: true });
+    service.resolveKeyBackupWrite.mockRejectedValueOnce(new Error('Network Error'));
+    service.keyBackupInfo.mockResolvedValueOnce({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+
+    await useE2EStore.getState().loadKeyBackup(USER);
+
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual(attempt);
+    expect(useE2EStore.getState().keyBackup).toEqual({ exists: true, updatedAt: '2026-07-01T00:00:00.000Z' });
+    expect(useE2EStore.getState().keyBackupJudged).toBe(false);
+  });
+
+  it('drops the notice once it is dismissed', async () => {
+    useE2EStore.setState({ keyBackupAttempt: { outcome: 'elsewhere', firstSetup: false } });
+
+    await useE2EStore.getState().dismissKeyBackupWrite(USER);
+
+    expect(service.dismissKeyBackupWrite).toHaveBeenCalled();
+    expect(useE2EStore.getState().keyBackupAttempt).toBeNull();
+  });
+
+  it('keeps the notice when the dismiss fails', async () => {
+    useE2EStore.setState({ keyBackupAttempt: { outcome: 'elsewhere', firstSetup: false } });
+    service.dismissKeyBackupWrite.mockRejectedValueOnce(new Error('the vault failed'));
+
+    await expect(useE2EStore.getState().dismissKeyBackupWrite(USER)).rejects.toThrow('the vault failed');
+    expect(useE2EStore.getState().keyBackupAttempt).toEqual({ outcome: 'elsewhere', firstSetup: false });
+  });
+
+  it('reads and judges nothing of the key backup in initialize: the panel does, when it opens', async () => {
+    await useE2EStore.getState().initialize(USER);
+    await settle();
+
+    expect(useE2EStore.getState().ready).toBe(true);
+    expect(service.resolveKeyBackupWrite).not.toHaveBeenCalled();
+    expect(service.keyBackupInfo).not.toHaveBeenCalled();
+  });
+
   it('clears the backup state when the backup is deleted', async () => {
     useE2EStore.setState({ keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' } });
+    useE2EStore.setState({ keyBackupAttempt: { outcome: 'changed', firstSetup: false } });
     await useE2EStore.getState().deleteKeyBackup(USER);
     expect(useE2EStore.getState().keyBackup).toEqual({ exists: false, updatedAt: null });
+    // recovery is off: no write is pending against any backup
+    expect(useE2EStore.getState().keyBackupAttempt).toBeNull();
   });
 
   it('does not swallow a failed delete — the blob may still be there', async () => {
@@ -806,6 +1138,8 @@ describe('e2eStore logout hygiene', () => {
         capabilityServed: true,
       },
       keyBackup: { exists: true, updatedAt: '2026-07-01T00:00:00.000Z' },
+      keyBackupAttempt: { outcome: 'changed', firstSetup: false },
+      keyBackupJudged: true,
     });
 
     resetAccountStores();
@@ -826,6 +1160,9 @@ describe('e2eStore logout hygiene', () => {
     // Whether the PREVIOUS account had a recovery key is that account's
     // business, and offering the next user a "restore" box for it is worse.
     expect(state.keyBackup).toBeNull();
+    // nor does the next account see a notice about the previous one's backup
+    expect(state.keyBackupAttempt).toBeNull();
+    expect(state.keyBackupJudged).toBe(false);
   });
 });
 
@@ -881,6 +1218,48 @@ describe('e2eStore actions across a logout', () => {
     { action: 'resetAccountIdentity, at the backup read', held: () => service.keyBackupInfo, run: () => store().resetAccountIdentity(USER) },
     { action: 'restoreKeyBackup, at the status read', held: () => service.deviceListStatus, run: () => store().restoreKeyBackup(USER, RECOVERY_KEY) },
     { action: 'createKeyBackup, at the backup read', held: () => service.keyBackupInfo, run: () => store().createKeyBackup(USER) },
+    {
+      action: 'createKeyBackup, unconfirmed',
+      held: () => {
+        // the read after the write found a backup, which would show if written
+        const stored = { exists: true, updatedAt: '2026-11-22T10:00:00.000Z' };
+        service.createKeyBackup.mockImplementation(async () => {
+          throw new E2EKeyBackupUnconfirmedError('changed', false, stored);
+        });
+        return service.createKeyBackup;
+      },
+      run: () => store().createKeyBackup(USER),
+    },
+    {
+      action: 'checkKeyBackupWrite',
+      held: () => {
+        // a check that would show a notice and a backup if written
+        service.resolveKeyBackupWrite.mockImplementation(async () => ({
+          outcome: 'changed',
+          firstSetup: false,
+          stored: { exists: true, updatedAt: '2026-11-22T10:00:00.000Z' },
+        }));
+        return service.resolveKeyBackupWrite;
+      },
+      run: () => store().checkKeyBackupWrite(USER),
+    },
+    {
+      action: 'dismissKeyBackupWrite',
+      held: () => service.dismissKeyBackupWrite,
+      run: () => store().dismissKeyBackupWrite(USER),
+    },
+    {
+      action: 'loadKeyBackup, at the write check',
+      held: () => {
+        service.resolveKeyBackupWrite.mockImplementation(async () => ({
+          outcome: 'unknown',
+          firstSetup: false,
+          stored: null,
+        }));
+        return service.resolveKeyBackupWrite;
+      },
+      run: () => store().loadKeyBackup(USER),
+    },
   ];
 
   it.each(cases)('$action applies nothing once a logout overtook it', async ({ held, run }) => {
@@ -911,6 +1290,8 @@ describe('e2eStore actions across a logout', () => {
       identityWarnings: { [PEER]: true },
       newDeviceWarnings: { [PEER]: ['p9'] },
       accountVerified: { [PEER]: false },
+      // the next account's own notice, which an action of the previous one must not clear
+      keyBackupAttempt: { outcome: 'unknown', firstSetup: false },
     });
     const before = JSON.stringify(data());
 

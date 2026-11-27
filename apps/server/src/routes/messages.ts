@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { rateLimitMessageSend, rateLimitInteract } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam, prismaErrorCode } from '../utils/errors';
 import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, mentionsEveryone as contentMentionsEveryone, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
@@ -549,7 +549,14 @@ messageRouter.delete('/:messageId', rateLimitInteract, async (req: Request<{ cha
       if (!canManageMessages) throw new ForbiddenError('You can only delete your own messages');
     }
 
-    await prisma.message.delete({ where: { id: messageId } });
+    try {
+      await prisma.message.delete({ where: { id: messageId } });
+    } catch (err) {
+      // The row went between the read and the delete (another delete, the
+      // channel's delete): the missing-message answer, nothing announced
+      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Message');
+      throw err;
+    }
 
     // Fire-and-forget S3 cleanup
     if (message.attachments.length > 0) {

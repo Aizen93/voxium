@@ -11,7 +11,7 @@ import { ANNOTATION_COLORS } from './annotationPresets';
  * recently used colours, and a native picker. Every colour that leaves here
  * is '#rrggbb' — the only form the wire accepts.
  *
- * Portal rules (see CLAUDE.md): body-level, position: fixed, placed from the
+ * Portal rules: body-level, position: fixed, placed from the
  * button's bounding rect, re-placed on window resize only.
  */
 

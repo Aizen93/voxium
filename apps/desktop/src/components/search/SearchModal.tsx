@@ -8,7 +8,7 @@ import { useDMStore } from '../../stores/dmStore';
 import { Avatar } from '../common/Avatar';
 import { AppTag } from '../common/AppTag';
 import { Search, X, Hash, Lock } from 'lucide-react';
-import { format, isToday, isYesterday } from 'date-fns';
+import { formatMessageStamp } from '../../utils/formatDate';
 import type { SearchResult, Channel } from '@voxium/shared';
 import { withoutSecureChannelHits } from '../../utils/searchHits';
 
@@ -34,7 +34,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
   const abortRef = useRef<AbortController>(undefined);
 
   const textChannels = channels?.filter((c) => c.type === 'text') ?? [];
-  // Every DM is encrypted (plan §4.2), so searching one is always a local
+  // Every DM is encrypted (docs/e2e-always-on-plan.md §4.2), so searching one is always a local
   // search over this device's decrypted history — there is no encrypted/
   // plaintext conversation distinction left to test for.
   const isEncryptedDM = !!conversationId;
@@ -206,12 +206,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
     }
   };
 
-  const formatTime = (dateStr: string) => {
-    const date = new Date(dateStr);
-    if (isToday(date)) return t('messageItem.todayAt', { time: format(date, 'h:mm a') });
-    if (isYesterday(date)) return t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') });
-    return format(date, 'MM/dd/yyyy h:mm a');
-  };
+  const formatTime = (dateStr: string) => formatMessageStamp(dateStr, t);
 
   const truncate = (text: string, max: number) => {
     return text.length > max ? text.slice(0, max) + '...' : text;

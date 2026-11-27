@@ -173,21 +173,35 @@ categoryRouter.delete('/:categoryId', rateLimitCategoryManage, async (req: Reque
   try {
     const { serverId, categoryId } = req.params;
 
-    const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CATEGORIES);
-    if (!canManage) throw new ForbiddenError('You do not have permission to manage categories');
+    // The delete's SET NULL rewrites every channel of the category, so it can
+    // meet a transaction holding a channel row (a reorder) and lose the
+    // deadlock: it runs again, every check made again first (one attempt =
+    // checks, the affected channels, then the delete; the notices below run
+    // once, after the retry returned).
+    const affectedChannelIds = await retryOnTransactionConflict(async () => {
+      const [mayManage, category] = await Promise.all([
+        hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CATEGORIES),
+        prisma.category.findFirst({ where: { id: categoryId, serverId } }),
+      ]);
+      if (!mayManage) throw new ForbiddenError('You do not have permission to manage categories');
+      if (!category) throw new NotFoundError('Category');
 
-    const category = await prisma.category.findFirst({
-      where: { id: categoryId, serverId },
-    });
-    if (!category) throw new NotFoundError('Category');
+      // Read inside the attempt, so a channel moved into the category since
+      // an earlier attempt is announced too (SET NULL will orphan them)
+      const channelIds = (await prisma.channel.findMany({
+        where: { categoryId },
+        select: { id: true },
+      })).map((c) => c.id);
 
-    // Collect affected channel IDs before delete (Prisma SetNull will orphan them)
-    const affectedChannelIds = (await prisma.channel.findMany({
-      where: { categoryId },
-      select: { id: true },
-    })).map((c) => c.id);
-
-    await prisma.category.delete({ where: { id: categoryId } });
+      try {
+        await prisma.category.delete({ where: { id: categoryId } });
+      } catch (err) {
+        // The row went between the check and the delete: a missing category
+        if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Category');
+        throw err;
+      }
+      return channelIds;
+    }, `[Categories] The delete of category ${categoryId}`);
 
     const io = getIO();
     io.to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_DELETED, { categoryId, serverId });

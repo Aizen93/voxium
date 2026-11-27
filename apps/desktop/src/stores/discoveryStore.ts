@@ -6,8 +6,7 @@ import { api } from '../services/api';
 import { useServerStore } from './serverStore';
 
 /**
- * Explore — the member side of server discovery
- * (docs/local/server-discovery-plan.html, "Desktop client → Explore").
+ * Explore — the member side of server discovery.
  *
  * Holds the browse state (query, tag, sort), the loaded result list with its
  * cursor, the Featured row and the capped total, plus the viewer's actions:

@@ -20,8 +20,7 @@ import { isParticipantDeleted } from '../../utils/dmParticipant';
 
 /**
  * The spaces strip: the navigation along the top of the app, in two captioned
- * zones (docs/local/spaces-dm-navigation-plan.html, Concept E, decided
- * 2026-10-25).
+ * zones.
  *
  *   Messages — a labelled tab that leads to Direct Messages in BOTH contexts
  *   (a logo with no word read as "about", never as "my conversations"), and

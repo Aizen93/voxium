@@ -1395,8 +1395,8 @@ e2eRouter.post('/keyshares', rateLimitE2EShares, async (req: Request, res: Respo
 });
 
 /**
- * Which claim a request asked for: `lease=1` (the leasing claim, docs/e2e-dm-
- * spec.md §12.3) or nothing (the legacy claim of desktop 2.1.x, which deletes
+ * Which claim a request asked for: `lease=1` (the leasing claim, §12.3 of
+ * docs/e2e-dm-spec.md) or nothing (the legacy claim of desktop 2.1.x, which deletes
  * on read). Asked for explicitly, never guessed from the client: anything else
  * is refused rather than read as either.
  */
@@ -1759,7 +1759,7 @@ e2eRouter.delete('/backup', rateLimitE2EApprove, async (req: Request, res: Respo
   }
 });
 
-// ─── Message-key backup (plan §4.4) ──────────────────────────────────────────
+// ─── Message-key backup (docs/e2e-always-on-plan.md §4.4) ──────────────────────────────────────────
 // SELF ONLY, and opaque end to end. Each device seals every INBOUND Megolm
 // session key under an account-level message-backup key — which travels with
 // the master secret in the approval payload and is sealed into the §15 backup
