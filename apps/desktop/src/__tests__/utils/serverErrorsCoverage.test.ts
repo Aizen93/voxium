@@ -488,6 +488,9 @@ const UNSEEN_SITES: Record<string, number> = {
   'apps/server/src/services/signupService.ts': 6,
   'apps/server/src/utils/attachmentCleanup.ts': 1,
   'apps/server/src/utils/errors.ts': 1,
+  // `error:` of a recorded job run and of a failed tick: the job registry's own fields, never an answer
+  'apps/server/src/utils/jobStore.ts': 1,
+  'apps/server/src/utils/jobs.ts': 2,
   'apps/server/src/utils/permissionWrites.ts': 2,
   'apps/server/src/utils/s3.ts': 5,
   'apps/server/src/utils/uploadVerification.ts': 2,
