@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { Device } from 'mediasoup-client';
 import type { Transport, Producer, Consumer, RtpCapabilities, IceParameters, IceCandidate, DtlsParameters, RtpParameters } from 'mediasoup-client/types';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused, onNoiseSuppressionFailure, getSpeakingDetectionMode } from '../services/audioAnalyser';
+import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused, onNoiseSuppressionFailure, getSpeakingDetectionMode, resendSpeaking } from '../services/audioAnalyser';
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
 import { teardownComposite, prepareComposite, attachCompositeProducerHandles } from '../services/screenComposite';
@@ -270,6 +270,10 @@ interface VoiceState {
   // ─── Server Voice Actions (SFU) ────────────────────────────────────
   joinChannel: (channelId: string, serverId?: string, opts?: { secure?: boolean; keepRetryCount?: boolean }) => Promise<void>;
   leaveChannel: () => void;
+  /** The voice channel is gone on the server (its space was deleted): the
+   *  same local teardown as leaveChannel, without voice:leave (the server
+   *  already removed the session and its room). */
+  handleVoiceChannelGone: () => void;
   /** `source: 'connect'` is a snapshot replay (socket connect, server join): ignored for the channel this client is in. */
   setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string, source?: 'connect') => void;
   addUserToChannel: (channelId: string, user: VoiceUser, serverId?: string) => void;
@@ -332,6 +336,10 @@ interface VoiceState {
   /** Full local teardown WITHOUT notifying the server — for server-initiated
    *  ends (dm:voice:ended), where echoing dm:voice:leave would be wrong. */
   handleDMCallEnded: () => void;
+  /** The server's `dm:voice:ended`: ends the call and drops the ring of that
+   *  conversation. An answer marked `rejoin` (to this device's re-join after
+   *  a reconnect) is acted on only by the re-join that asked. */
+  handleDMVoiceEnded: (data: { conversationId: string; rejoin?: boolean }) => void;
   /** Leave the call because of an E2E security condition, telling the user why. */
   abortDMCall: (reason: DMCallAbortReason) => void;
   acceptCall: () => Promise<void>;
@@ -361,10 +369,11 @@ function activeSecureVoiceSession(channelId: string | null): import('../services
 }
 
 /**
- * End the secure-voice session (if any) — leave/cleanup/reconnect paths.
- * Exported because teardowns that deliberately skip leaveChannel (the server
- * already ejected us, so emitting voice:leave would be wrong) must still kill
- * the crypto worker, zero the media key, and stop the membership poll.
+ * End the secure-voice session (if any): kill the crypto worker, zero the
+ * media key, and stop the membership poll. Part of the one teardown of a
+ * space voice session (endVoiceChannelSession), which a channel gone on the
+ * server goes through too (handleVoiceChannelGone): an end of a call outside
+ * the store goes through those actions, not through this alone.
  */
 export function teardownSecureVoice(): void {
   if (!secureVoiceChannelId) return;
@@ -380,6 +389,13 @@ export function teardownSecureVoice(): void {
 // mic acquisition inside joins: a join superseded mid-getUserMedia must stop the
 // stream it acquired instead of leaking it (OS mic indicator stuck on forever).
 let voiceSessionGeneration = 0;
+
+/** The voice session generation under which the last DM call re-join went
+ *  out (null: none yet). The server's answer to it carries no more than the
+ *  conversation, so it is acted on only while this is still the generation:
+ *  a call hung up and placed again with the same person meanwhile is another
+ *  session, which that answer must not end. */
+let dmRejoinSentUnder: number | null = null;
 
 // Track ICE restart timers per DM peer
 const iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -747,14 +763,31 @@ let micRefusedOn: Transport | null = null;
 
 async function produceMicOn(sendTransport: Transport, device: Device): Promise<Producer | null> {
   const state = useVoiceStore.getState;
-  const audioTrack = (getGatedStream() || state().localStream)?.getAudioTracks()[0];
+  const session = voiceSessionGeneration;
+  const gated = getGatedStream();
+  const audioTrack = (gated || state().localStream)?.getAudioTracks()[0];
   if (!audioTrack || audioTrack.readyState !== 'live' || !device.canProduce('audio')) return null;
+  // The gated track outlives the producers made from it (a transport restart
+  // makes a new one from the same pipeline). Only a producer's pause disables
+  // it, and a producer starts paused on a disabled track: handed over enabled,
+  // as a new one is, this producer's pause state is its own. The raw track is
+  // never touched here: its `enabled` is the mute and push-to-talk.
+  if (gated) audioTrack.enabled = true;
   const maxBitrate = VOICE_QUALITY_BITRATE[useSettingsStore.getState().voiceQuality];
   const secureSession = activeSecureVoiceSession(state().activeChannelId);
   let attachError: unknown = null;
   let attachInvoked = false;
   const producer = await sendTransport.produce({
     track: audioTrack,
+    // The pipeline owns the track's life, not the producer. Unless told not
+    // to, mediasoup stops the track of a produce that fails or is refused, of
+    // a producer or transport that closes, and either track of a replace,
+    // while the pipeline still uses it (the listen-only state after a
+    // refusal, a transport restart, the next rebuild). The pipeline stops its
+    // tracks where it ends: stopSpeakingDetection, stopNoiseSuppression and
+    // the localStream's own stops. The pause defaults stay (the noise gate,
+    // mute and push-to-talk pause by disabling the track).
+    stopTracks: false,
     codecOptions: {
       opusStereo: false,
       opusDtx: true,
@@ -798,8 +831,26 @@ async function produceMicOn(sendTransport: Transport, device: Device): Promise<P
   // rebuild ended
   await adoptCurrentMicTrack(producer);
 
+  // Still this session's producer: someone already talking shows their ring
+  if (session === voiceSessionGeneration && !producer.closed) resendSpeakingForNewMicProducer();
+
   debugLog('[Voice SFU] Audio producer created:', producer.id);
   return producer;
+}
+
+/**
+ * Right after a mic producer is made: the speaking detector started before
+ * the session existed on the server, and runs on across a plaintext
+ * transport restart, and it sends only changes, so someone already talking
+ * would show no ring until their next pause. Their current state is sent
+ * once, through the detector's own sender (resendSpeaking: only while it
+ * hears speech), never while muted (as the speaking callback,
+ * followSpeakingWithMicProducer, does nothing then) nor with push-to-talk's
+ * key up (micShouldBeOpen).
+ */
+function resendSpeakingForNewMicProducer() {
+  if (useVoiceStore.getState().selfMute || !micShouldBeOpen()) return;
+  resendSpeaking();
 }
 
 /** Server voice: the mic producer follows the noise gate (paused in silence,
@@ -1282,6 +1333,74 @@ function handleSignalInternal(
   }
 }
 
+/**
+ * The one teardown of a space voice session, for every way it ends on this
+ * client: the session generation moves (an in-flight join or rebuild gives
+ * up), the pipeline ends (speaking detection, noise suppression and their
+ * tracks), then the microphone, the SFU side, the secure-voice session and
+ * the state. `tellServer` false is a channel already gone on the server (its
+ * space was deleted): no voice:leave, the session and the room are gone.
+ */
+function endVoiceChannelSession(
+  stateAccessors: { get: () => VoiceState; set: (partial: Partial<VoiceState>) => void },
+  { tellServer }: { tellServer: boolean },
+) {
+  const { get, set } = stateAccessors;
+  voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
+  const socket = getSocket();
+  const { localStream, activeChannelId, localUserId } = get();
+
+  // A pre-flight in progress dies with the voice session. The modal's own
+  // effect also cancels, but logout REPLACES the store state before React
+  // can run it — the capture tracks would never be stopped and the OS
+  // "sharing your screen" indicator would stay lit until app restart.
+  get().cancelPendingShare();
+
+  // Stop screen sharing before leaving
+  if (get().isScreenSharing) {
+    get().stopScreenShare();
+  }
+
+  get().stopLatencyMeasurement();
+  onSpeakingChange(null);
+  stopSpeakingDetection();
+  stopNoiseSuppression();
+
+  // Immediately remove local user from channelUsers
+  if (activeChannelId && localUserId) {
+    get().removeUserFromChannel(activeChannelId, localUserId);
+  }
+
+  if (localStream) {
+    localStream.getTracks().forEach((track) => track.stop());
+  }
+
+  // Clean up SFU resources
+  get().cleanupSFU();
+
+  // Secure voice: the media keys die with the session (fresh key + epoch on
+  // any rejoin — the IV-reuse firewall, spec §21)
+  teardownSecureVoice();
+
+  if (socket && tellServer) {
+    socket.emit('voice:leave');
+  }
+
+  set({
+    activeChannelId: null,
+    activeVoiceServerId: null,
+    localStream: null,
+    latency: null,
+    pttActive: false,
+    screenStream: null,
+    isScreenSharing: false,
+    screenSharingUserId: null,
+    remoteScreenStream: null,
+    secureVoicePeerIssues: {},
+    secureVoiceActive: false,
+  });
+}
+
 // ─── Store ──────────────────────────────────────────────────────────────────
 
 export const useVoiceStore = create<VoiceState>((set, get) => ({
@@ -1530,59 +1649,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   leaveChannel: () => {
-    voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
-    const socket = getSocket();
-    const { localStream, activeChannelId, localUserId } = get();
+    endVoiceChannelSession({ get, set }, { tellServer: true });
+  },
 
-    // A pre-flight in progress dies with the voice session. The modal's own
-    // effect also cancels, but logout REPLACES the store state before React
-    // can run it — the capture tracks would never be stopped and the OS
-    // "sharing your screen" indicator would stay lit until app restart.
-    get().cancelPendingShare();
-
-    // Stop screen sharing before leaving
-    if (get().isScreenSharing) {
-      get().stopScreenShare();
-    }
-
-    get().stopLatencyMeasurement();
-    onSpeakingChange(null);
-    stopSpeakingDetection();
-    stopNoiseSuppression();
-
-    // Immediately remove local user from channelUsers
-    if (activeChannelId && localUserId) {
-      get().removeUserFromChannel(activeChannelId, localUserId);
-    }
-
-    if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop());
-    }
-
-    // Clean up SFU resources
-    get().cleanupSFU();
-
-    // Secure voice: the media keys die with the session (fresh key + epoch on
-    // any rejoin — the IV-reuse firewall, spec §21)
-    teardownSecureVoice();
-
-    if (socket) {
-      socket.emit('voice:leave');
-    }
-
-    set({
-      activeChannelId: null,
-      activeVoiceServerId: null,
-      localStream: null,
-      latency: null,
-      pttActive: false,
-      screenStream: null,
-      isScreenSharing: false,
-      screenSharingUserId: null,
-      remoteScreenStream: null,
-      secureVoicePeerIssues: {},
-      secureVoiceActive: false,
-    });
+  handleVoiceChannelGone: () => {
+    endVoiceChannelSession({ get, set }, { tellServer: false });
+    // The share state the space-deleted handler used to reset by hand
+    set({ screenShareFrozen: false, screenShareSourceKey: null, shareKind: 'screen' });
   },
 
   // ── mediasoup SFU handlers ─────────────────────────────────────────────
@@ -1746,9 +1819,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
               }
               const s = getSocket();
               if (s) {
-                const { selfMute: m, selfDeaf: d } = get();
-                const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
-                s.emit('voice:join', currentChannelId, { selfMute: isPTT ? true : m, selfDeaf: d });
+                s.emit('voice:join', currentChannelId, { selfMute: rejoinSelfMute(), selfDeaf: get().selfDeaf });
                 set({ activeChannelId: currentChannelId, activeVoiceServerId: currentServerId });
               }
             } else if (currentChannelId) {
@@ -2962,6 +3033,32 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
   },
 
+  handleDMVoiceEnded: ({ conversationId, rejoin }) => {
+    const voiceState = get();
+    if (rejoin === true) {
+      // The answer to this device's re-join names only the conversation, and
+      // is about the call that sent it: acted on while that call is still the
+      // current session, never once it was hung up (and perhaps placed again
+      // with the same person). A ring is another call's, left alone
+      if (dmRejoinSentUnder === voiceSessionGeneration && voiceState.dmCallConversationId === conversationId) {
+        voiceState.handleDMCallEnded();
+      } else {
+        debugLog('[DMVoice] Ignoring the answer to a re-join of a call that has since ended', conversationId);
+      }
+      return;
+    }
+    if (voiceState.dmCallConversationId === conversationId) {
+      // Full teardown without emitting dm:voice:leave back (the call was
+      // already ended server-side). Must go through the store action: an
+      // inline cleanup here once left the E2E device pin, signal chains,
+      // and callCrypto session state stale for the next call.
+      voiceState.handleDMCallEnded();
+    }
+    if (voiceState.incomingCall?.conversationId === conversationId) {
+      voiceState.setIncomingCall(null);
+    }
+  },
+
   abortDMCall: (reason: DMCallAbortReason) => {
     const conversationId = get().dmCallConversationId;
     if (!conversationId) return;
@@ -3128,6 +3225,23 @@ function micShouldBeOpen(): boolean {
   const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
   const state = useVoiceStore.getState();
   return isPTT ? state.pttActive : !state.selfMute;
+}
+
+/** What a voice channel's re-join (a transport restart, a socket reconnect)
+ *  states about the microphone: muted under the mute flag (which wins at a
+ *  re-join, whatever the key does: the new producer starts paused under it),
+ *  with no microphone at all (as a first join states it), or with
+ *  push-to-talk's key up. A held key without the flag says the microphone is
+ *  open, so the server does not keep the new producer paused under it. */
+function rejoinSelfMute(): boolean {
+  const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
+  const state = useVoiceStore.getState();
+  return state.selfMute || !state.localStream || (isPTT && !state.pttActive);
+}
+
+/** Whether a stream's microphone is open (an audio track of it is enabled). */
+function micOpenOn(stream: MediaStream | null): boolean {
+  return !!stream?.getAudioTracks().some((track) => track.enabled);
 }
 
 /** A failed switch: tell the user, and put the picker back on the device the call uses. */
@@ -3424,6 +3538,11 @@ onSocketReconnect(async () => {
       newStream?.getTracks().forEach((t) => t.stop());
       localStream = meanwhile;
     } else {
+      // The new microphone starts as the one it replaces was left (the
+      // push-to-talk key kept that one current while this one opened), and
+      // closed where there was none; the settle below then decides
+      const leftOpen = micOpenOn(localStream);
+      newStream?.getAudioTracks().forEach((track) => { track.enabled = leftOpen; });
       localStream = newStream;
       useVoiceStore.setState({ localStream: newStream });
       liveInputDeviceId = inputDeviceOf(reopened, requestedInputDevice);
@@ -3431,14 +3550,21 @@ onSocketReconnect(async () => {
     }
   }
 
-  const { selfMute, selfDeaf } = useVoiceStore.getState();
-  const settings = useSettingsStore.getState();
-  const isPTT = settings.voiceMode === 'push_to_talk';
-
-  // Apply mute state to the (possibly new) stream
+  // Settle the microphone on the (possibly new) stream, before the waits
+  // below. Outside push-to-talk it follows the mute flag. Under push-to-talk
+  // the reconnect opens nothing itself. In a voice channel the track stays
+  // open only where it was left open for the held key (by the key handler,
+  // or by a device switch made under it) and the key is still held without
+  // the mute flag. In a direct call it is closed here whatever the key does:
+  // a direct call's re-join tells the other person nothing (they keep the
+  // last state they were shown), so a microphone kept open here could be
+  // heard while they still see it muted. A key pressed during the waits
+  // below opens it again, as it always did
   if (localStream) {
-    const shouldDisable = isPTT || selfMute;
-    localStream.getAudioTracks().forEach((track) => { track.enabled = !shouldDisable; });
+    const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
+    const keptOpen = !dmCallConversationId && micOpenOn(localStream);
+    const open = !rejoinSelfMute() && (!isPTT || keptOpen);
+    localStream.getAudioTracks().forEach((track) => { track.enabled = open; });
   }
 
   // Restart audio pipelines BEFORE emitting voice:join (the producer and the
@@ -3467,19 +3593,40 @@ onSocketReconnect(async () => {
       void useVoiceStore.getState().joinChannel(activeChannelId, serverId ?? undefined, { secure: true });
     } else {
       // Re-emit voice:join — server will send voice:transport_created to re-establish SFU
-      socket.emit('voice:join', activeChannelId, { selfMute: isPTT ? true : selfMute, selfDeaf });
+      // Both flags are read now, after the waits above: a mute, a deafen or
+      // a key event during them is what the join states
+      socket.emit('voice:join', activeChannelId, { selfMute: rejoinSelfMute(), selfDeaf: useVoiceStore.getState().selfDeaf });
     }
   } else if (dmCallConversationId) {
     debugLog('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
     // deviceId must survive the rebind or the peer loses its sealing target
     const deviceId = await resolveOwnCallDeviceId();
+    // The call ended (the peer hung up, a leave, another call) while the
+    // device id was resolved, which can wait for the E2E start: nothing to
+    // re-join, and a join now would start a new call ringing the other person
+    if (session !== voiceSessionGeneration) return;
     // the conversation turned read-only meanwhile (the other side's account
     // was deleted): no re-join of a call it can no longer have
     const { useDMStore } = await import('./dmStore');
+    if (session !== voiceSessionGeneration) return;
     if (isHeldReadOnly(useDMStore.getState(), dmCallConversationId)) {
       console.warn('[DMVoice] Not re-joining a call in a read-only conversation');
     } else {
-      socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf, deviceId });
+      // `rejoin`: the server rebinds this account's place in that call, and
+      // answers dm:voice:ended marked `rejoin` when the call ended while the
+      // socket was away (a server older than the flag ignores it and starts a
+      // new call then). That answer is acted on only under this generation
+      const { dmCallUsers, localUserId } = useVoiceStore.getState();
+      const placeConfirmed = !!localUserId && dmCallUsers.some((u) => u.id === localUserId);
+      if (placeConfirmed) dmRejoinSentUnder = session;
+      // Push-to-talk re-joins a direct call muted whatever its key does (the
+      // reconnect closed the track when it settled it above); otherwise the
+      // mute flag. Both flags are read now, after the waits above. The
+      // server stores them for the call; a re-join tells the other person
+      // nothing, they keep the last state they were told
+      const pushToTalk = useSettingsStore.getState().voiceMode === 'push_to_talk';
+      const { selfMute: muteNow, selfDeaf: deafNow } = useVoiceStore.getState();
+      socket.emit('dm:voice:join', dmCallConversationId, { selfMute: pushToTalk || muteNow, selfDeaf: deafNow, deviceId, ...(placeConfirmed && { rejoin: true }) });
     }
   }
 
