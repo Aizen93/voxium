@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { LayoutDashboard, Users, Server, ShieldBan, Megaphone, HardDrive, ClipboardList, Download, LogOut, Flag, LifeBuoy, Gauge, Zap, Globe } from 'lucide-react';
+import { LayoutDashboard, Users, Server, ShieldBan, Megaphone, HardDrive, ClipboardList, Download, LogOut, Flag, LifeBuoy, Gauge, Zap, Globe, Clock } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
@@ -17,8 +17,9 @@ import { AdminSupportTickets } from './AdminSupportTickets';
 import { AdminRateLimits } from './AdminRateLimits';
 import { AdminFeatureFlags } from './AdminFeatureFlags';
 import { AdminGeography } from './AdminGeography';
+import { AdminJobs } from './AdminJobs';
 
-type AdminView = 'dashboard' | 'reports' | 'support' | 'geography' | 'users' | 'servers' | 'bans' | 'announcements' | 'storage' | 'rate-limits' | 'feature-flags' | 'audit-logs' | 'export';
+type AdminView = 'dashboard' | 'reports' | 'support' | 'geography' | 'users' | 'servers' | 'bans' | 'announcements' | 'storage' | 'rate-limits' | 'feature-flags' | 'jobs' | 'audit-logs' | 'export';
 
 const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -32,6 +33,7 @@ const NAV_ITEMS: Array<{ id: AdminView; label: string; icon: typeof LayoutDashbo
   { id: 'storage', label: 'Storage', icon: HardDrive },
   { id: 'rate-limits', label: 'Rate Limits', icon: Gauge },
   { id: 'feature-flags', label: 'Feature Flags', icon: Zap },
+  { id: 'jobs', label: 'Jobs', icon: Clock },
   { id: 'audit-logs', label: 'Audit Log', icon: ClipboardList },
   { id: 'export', label: 'Data Tools', icon: Download },
 ];
@@ -94,6 +96,8 @@ export function AdminLayout() {
         return <AdminRateLimits />;
       case 'feature-flags':
         return <AdminFeatureFlags />;
+      case 'jobs':
+        return <AdminJobs />;
       case 'audit-logs':
         return <AdminAuditLog />;
       case 'export':
