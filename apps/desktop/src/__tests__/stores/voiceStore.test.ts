@@ -24,6 +24,7 @@ vi.mock('../../services/audioAnalyser', () => ({
   setSpeakingDetectionPaused: vi.fn(),
   onNoiseSuppressionFailure: vi.fn(),
   getSpeakingDetectionMode: vi.fn().mockReturnValue(null),
+  resendSpeaking: vi.fn(),
 }));
 
 vi.mock('../../services/sdpUtils', () => ({
@@ -186,6 +187,7 @@ vi.mock('../../stores/settingsStore', async () => {
 });
 
 import { useVoiceStore, isMicProducer, registerShareMaskHooks } from '../../stores/voiceStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { getSocket, onSocketReconnect } from '../../services/socket';
 import type { VoiceUser } from '@voxium/shared';
 
@@ -903,6 +905,21 @@ describe('voiceStore', () => {
       expect(useVoiceStore.getState().activeChannelId).toBeNull();
     });
 
+    it('a channel gone on the server mid-mic-acquisition supersedes the join too (the teardown moves the generation)', async () => {
+      const socket = vi.mocked(getSocket)()!;
+      vi.mocked(socket.emit).mockClear();
+
+      const joinPromise = useVoiceStore.getState().joinChannel('ch-race');
+      useVoiceStore.getState().handleVoiceChannelGone();
+      await joinPromise;
+
+      const emitted = vi.mocked(socket.emit).mock.calls.map((c) => c[0]);
+      expect(emitted).not.toContain('voice:join');
+      // The server already removed the session: nothing is said about it
+      expect(emitted).not.toContain('voice:leave');
+      expect(useVoiceStore.getState().activeChannelId).toBeNull();
+    });
+
     it('control: an unimpeded join emits voice:join for the channel', async () => {
       const socket = vi.mocked(getSocket)()!;
       vi.mocked(socket.emit).mockClear();
@@ -1285,6 +1302,9 @@ describe('voiceStore', () => {
 
       expect(socketEmit()).toHaveBeenCalledWith('dm:voice:join', 'conv-1',
         expect.objectContaining({ deviceId: 'device-me000001' }));
+      // A call the user starts or answers is never a re-join
+      const join = socketEmit().mock.calls.find((c) => c[0] === 'dm:voice:join');
+      expect(join?.[2]).not.toHaveProperty('rejoin');
     });
 
     it('REFUSES to start a call when our E2E device is unavailable — the peer must never see a deviceless join', async () => {
@@ -1485,11 +1505,239 @@ describe('voiceStore — socket reconnect clears stale voice occupancy', () => {
       useVoiceStore.setState({ dmCallConversationId: null });
     });
 
-    it('re-joins a live conversation\'s call', async () => {
+    it('re-joins a live conversation\'s call, saying it is a re-join', async () => {
+      dmEnv.conversations = [{ id: 'conv-1', participant: { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null } }];
+      // The place in the call is confirmed (a dm:voice:joined naming this account)
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallUsers: [vu('me')] });
+      await reconnectHandler();
+      // The server answers dm:voice:ended to a re-join whose call is gone,
+      // instead of starting a new call that rings the other person
+      expect(socket.emit).toHaveBeenCalledWith('dm:voice:join', 'conv-1', expect.objectContaining({ deviceId: 'device-me000001', rejoin: true }));
+    });
+
+    describe('a call whose place the server has not confirmed', () => {
+      const peerConversation = { id: 'conv-1', participant: { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null } };
+      const joinKinds = () => socket.emit.mock.calls
+        .filter((c) => c[0] === 'dm:voice:join')
+        .map((c) => ((c[2] as { rejoin?: boolean } | undefined)?.rejoin === true ? 'rejoin' : 'join'));
+
+      beforeEach(() => {
+        useVoiceStore.getState().leaveDMCall();
+        useVoiceStore.setState({ dmCallUsers: [] });
+        dmEnv.conversations = [peerConversation];
+        socket.emit.mockClear();
+      });
+
+      afterEach(() => {
+        useVoiceStore.getState().leaveDMCall();
+        useVoiceStore.setState({ dmCallUsers: [] });
+        e2eEnv.ready = true;
+      });
+
+      it('a reconnect while the first join is unanswered sends a plain join, and a marked end does not end the call', async () => {
+        await useVoiceStore.getState().joinDMCall('conv-1');
+        await reconnectHandler();
+        expect(joinKinds()).toEqual(['join', 'join']);
+
+        useVoiceStore.getState().handleDMVoiceEnded({ conversationId: 'conv-1', rejoin: true });
+        expect(useVoiceStore.getState().dmCallConversationId).toBe('conv-1');
+      });
+
+      it('a reconnect while joinDMCall waits for the device id sends nothing marked', async () => {
+        e2eEnv.ready = false;
+        const joining = useVoiceStore.getState().joinDMCall('conv-1');
+        await flushAsync();
+        const reconnecting = reconnectHandler();
+        await flushAsync();
+        e2eEnv.ready = true;
+        for (const cb of e2eEnv.subscribers.splice(0)) cb({ ready: true, error: null });
+        await Promise.all([joining, reconnecting]);
+
+        expect(joinKinds()).not.toContain('rejoin');
+        expect(useVoiceStore.getState().dmCallConversationId).toBe('conv-1');
+      });
+
+      it('a reconnect with only the other person in the call list sends a plain join', async () => {
+        await useVoiceStore.getState().joinDMCall('conv-1');
+        useVoiceStore.setState({ dmCallUsers: [vu('peer-x')] });
+        await reconnectHandler();
+        expect(joinKinds()).toEqual(['join', 'join']);
+      });
+
+      it('a reconnect after a dm:voice:joined naming this account sends the re-join, and a marked end ends the call', async () => {
+        await useVoiceStore.getState().joinDMCall('conv-1');
+        useVoiceStore.getState().addDMCallUser(vu('me'));
+        await reconnectHandler();
+        expect(joinKinds()).toEqual(['join', 'rejoin']);
+
+        useVoiceStore.getState().handleDMVoiceEnded({ conversationId: 'conv-1', rejoin: true });
+        expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+      });
+    });
+
+    it('the call ends while its device id resolves (the E2E start in flight): nothing is re-joined', async () => {
       dmEnv.conversations = [{ id: 'conv-1', participant: { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null } }];
       useVoiceStore.setState({ dmCallConversationId: 'conv-1' });
-      await reconnectHandler();
-      expect(socket.emit).toHaveBeenCalledWith('dm:voice:join', 'conv-1', expect.objectContaining({ deviceId: 'device-me000001' }));
+      e2eEnv.ready = false;
+      try {
+        const done = reconnectHandler();
+        await flushAsync();
+        // The other person hung up meanwhile (dm:voice:ended)
+        useVoiceStore.getState().handleDMCallEnded();
+        e2eEnv.ready = true;
+        for (const cb of e2eEnv.subscribers.splice(0)) cb({ ready: true, error: null });
+        await done;
+
+        expect(socket.emit.mock.calls.filter((c) => c[0] === 'dm:voice:join')).toHaveLength(0);
+        expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+      } finally {
+        e2eEnv.ready = true;
+      }
+    });
+
+    it('a mute, a deafen and push-to-talk chosen while the device id resolves are what the re-join states', async () => {
+      dmEnv.conversations = [{ id: 'conv-1', participant: { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null } }];
+      const joinState = () => {
+        const joins = socket.emit.mock.calls.filter((c) => c[0] === 'dm:voice:join');
+        expect(joins).toHaveLength(1);
+        return joins[0][2] as { selfMute: boolean; selfDeaf: boolean };
+      };
+      const held = async (change: () => void) => {
+        socket.emit.mockClear();
+        useVoiceStore.setState({ dmCallConversationId: 'conv-1', selfMute: false, selfDeaf: false });
+        e2eEnv.ready = false;
+        const done = reconnectHandler();
+        await flushAsync();
+        change();
+        e2eEnv.ready = true;
+        for (const cb of e2eEnv.subscribers.splice(0)) cb({ ready: true, error: null });
+        await done;
+        return joinState();
+      };
+      try {
+        expect(await held(() => useVoiceStore.setState({ selfMute: true, selfDeaf: true }))).toMatchObject({ selfMute: true, selfDeaf: true });
+        expect(await held(() => {})).toMatchObject({ selfMute: false, selfDeaf: false });
+        expect(await held(() => useSettingsStore.setState({ voiceMode: 'push_to_talk' }))).toMatchObject({ selfMute: true });
+      } finally {
+        e2eEnv.ready = true;
+        useSettingsStore.setState({ voiceMode: 'voice_activity' });
+        useVoiceStore.getState().leaveDMCall();
+        useVoiceStore.setState({ selfMute: false, selfDeaf: false });
+      }
+    });
+
+    it('another call begins while the device id resolves: the old one is not re-joined', async () => {
+      dmEnv.conversations = [
+        { id: 'conv-1', participant: { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null } },
+        { id: 'conv-2', participant: { id: 'peer-y', username: 'other', displayName: 'Other', avatarUrl: null } },
+      ];
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1' });
+      e2eEnv.ready = false;
+      try {
+        const done = reconnectHandler();
+        await flushAsync();
+        const answered = useVoiceStore.getState().joinDMCall('conv-2');
+        e2eEnv.ready = true;
+        for (const cb of e2eEnv.subscribers.splice(0)) cb({ ready: true, error: null });
+        await Promise.all([done, answered]);
+
+        const joins = socket.emit.mock.calls.filter((c) => c[0] === 'dm:voice:join');
+        expect(joins.map((c) => c[1])).toEqual(['conv-2']);
+        expect(joins[0][2]).not.toHaveProperty('rejoin');
+      } finally {
+        e2eEnv.ready = true;
+      }
+    });
+
+    describe('the server\'s dm:voice:ended', () => {
+      const peerConversation = { id: 'conv-1', participant: { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null } };
+      const ring = { conversationId: 'conv-1', from: vu('peer-x') };
+
+      afterEach(() => {
+        useVoiceStore.setState({ incomingCall: null });
+      });
+
+      /** In conv-1's call, re-joined after a reconnect. */
+      async function reJoined() {
+        dmEnv.conversations = [peerConversation];
+        // The place in the call is confirmed (a dm:voice:joined naming this account)
+        useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallUsers: [vu('me')] });
+        await reconnectHandler();
+        expect(socket.emit).toHaveBeenCalledWith('dm:voice:join', 'conv-1', expect.objectContaining({ rejoin: true }));
+      }
+
+      it('the answer to the re-join, while its call is still the current one, ends that call', async () => {
+        await reJoined();
+
+        useVoiceStore.getState().handleDMVoiceEnded({ conversationId: 'conv-1', rejoin: true });
+
+        expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+      });
+
+      it('a late answer to the re-join, after the call was hung up and placed again with the same person, ends nothing', async () => {
+        await reJoined();
+        useVoiceStore.getState().leaveDMCall();
+        await useVoiceStore.getState().joinDMCall('conv-1');
+        expect(useVoiceStore.getState().dmCallConversationId).toBe('conv-1');
+        const endCalls = cc.endCallSignaling.mock.calls.length;
+        socket.emit.mockClear();
+
+        useVoiceStore.getState().handleDMVoiceEnded({ conversationId: 'conv-1', rejoin: true });
+        await flushAsync();
+
+        expect(useVoiceStore.getState().dmCallConversationId).toBe('conv-1');
+        expect(socket.emit).not.toHaveBeenCalledWith('dm:voice:leave', expect.anything());
+        expect(cc.endCallSignaling.mock.calls.length).toBe(endCalls);
+      });
+
+      it('a late answer to the re-join leaves the same person\'s new ring alone', async () => {
+        await reJoined();
+        useVoiceStore.getState().leaveDMCall();
+        useVoiceStore.getState().setIncomingCall(ring);
+
+        useVoiceStore.getState().handleDMVoiceEnded({ conversationId: 'conv-1', rejoin: true });
+
+        expect(useVoiceStore.getState().incomingCall).toEqual(ring);
+      });
+
+      it('a marked answer this device sent no re-join for ends nothing', () => {
+        // beforeEach's leave moved the generation past any earlier re-join
+        useVoiceStore.setState({ dmCallConversationId: 'conv-1' });
+
+        useVoiceStore.getState().handleDMVoiceEnded({ conversationId: 'conv-1', rejoin: true });
+
+        expect(useVoiceStore.getState().dmCallConversationId).toBe('conv-1');
+      });
+
+      it('an unmarked end is unchanged: it ends the current call of that conversation, whichever session sent what', async () => {
+        await reJoined();
+        useVoiceStore.getState().leaveDMCall();
+        await useVoiceStore.getState().joinDMCall('conv-1');
+
+        useVoiceStore.getState().handleDMVoiceEnded({ conversationId: 'conv-1' });
+
+        expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+        // Without emitting dm:voice:leave back: the server ended it
+        expect(socket.emit.mock.calls.filter((c) => c[0] === 'dm:voice:leave')).toHaveLength(1); // the hang-up above
+      });
+
+      it('an unmarked end drops the ring of that conversation, and only of that one', () => {
+        useVoiceStore.setState({ incomingCall: ring });
+
+        useVoiceStore.getState().handleDMVoiceEnded({ conversationId: 'conv-2' });
+        expect(useVoiceStore.getState().incomingCall).toEqual(ring);
+
+        useVoiceStore.getState().handleDMVoiceEnded({ conversationId: 'conv-1' });
+        expect(useVoiceStore.getState().incomingCall).toBeNull();
+      });
+
+      it('an unmarked end of another conversation leaves the current call alone', () => {
+        useVoiceStore.setState({ dmCallConversationId: 'conv-1' });
+
+        useVoiceStore.getState().handleDMVoiceEnded({ conversationId: 'conv-2' });
+
+        expect(useVoiceStore.getState().dmCallConversationId).toBe('conv-1');
+      });
     });
 
     it('never re-joins a call of a conversation that turned read-only meanwhile', async () => {
@@ -1534,7 +1782,8 @@ describe('voiceStore — socket reconnect clears stale voice occupancy', () => {
 
     await done;
 
-    expect(socketEmit).toHaveBeenCalledWith('voice:join', 'ch-reconnect', expect.objectContaining({ selfMute: false, selfDeaf: false }));
+    // No microphone is held in this test, so the re-join states it muted
+    expect(socketEmit).toHaveBeenCalledWith('voice:join', 'ch-reconnect', expect.objectContaining({ selfMute: true, selfDeaf: false }));
     expect(useVoiceStore.getState().activeChannelId).toBe('ch-reconnect');
   });
 
