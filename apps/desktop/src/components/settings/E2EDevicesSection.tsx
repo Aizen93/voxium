@@ -26,7 +26,7 @@ import { formatDate } from '../../utils/formatDate';
 
 /**
  * Account-level encryption management: this account's devices, linking,
- * recovery key and the identity reset (plan §4.5).
+ * recovery key and the identity reset (docs/e2e-always-on-plan.md §4.5).
  *
  * All of this state has always been ACCOUNT-scoped — one device list, one
  * account key, one recovery key, one backup — but it used to be administered
@@ -182,7 +182,7 @@ function RecoveryKeyDialog({
 }
 
 /**
- * Which half of the linking flow (plan §4.3) this device is on, if either.
+ * Which half of the linking flow (docs/e2e-always-on-plan.md §4.3) this device is on, if either.
  *
  * `enter` wins a hypothetical tie: a device that holds the account key can
  * already act, so showing it a code to be approved WITH would be asking it to
@@ -249,7 +249,7 @@ function LinkingCodeBlock({ code }: { code: string }) {
 }
 
 /**
- * Enter the code the OTHER device is showing (plan §4.3, steps 3-6).
+ * Enter the code the OTHER device is showing (docs/e2e-always-on-plan.md §4.3, steps 3-6).
  *
  * Two steps, never one. Looking a code up proves nothing about who typed it:
  * the residual risk this flow carries is phishing — a user talked into
@@ -406,7 +406,7 @@ function LinkDeviceForm({ userId }: { userId: string }) {
 }
 
 /**
- * Device linking (plan §4.3): "type the code your new device is showing",
+ * Device linking (docs/e2e-always-on-plan.md §4.3): "type the code your new device is showing",
  * replacing "find the unfamiliar device in a list and press Approve".
  *
  * It is the same approval underneath — no new cryptography — but a safer

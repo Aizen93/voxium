@@ -29,7 +29,7 @@ interface ContextMenuState {
  * on the rows themselves (name colors, badges); the section axis is what
  * people are doing right now.
  *
- * It is a PRESENCE view, not the member list (CLAUDE.md "Server Membership"):
+ * It is a PRESENCE view, not the member list:
  * on a small server every member is loaded and the Offline section lists
  * them; on a big one only the online members are, the Offline section
  * collapses to a count and a way into the directory (a plain "All members"

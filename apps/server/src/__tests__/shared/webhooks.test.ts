@@ -15,7 +15,7 @@ import {
 } from '@voxium/shared';
 import { WEBHOOK_AUTHOR_ID_PREFIX } from '../../utils/messageAuthor';
 
-// The shared surface of incoming webhooks (docs/local/webhooks-plan.html):
+// The shared surface of incoming webhooks:
 // constants the routes and the client size themselves on, the 22nd permission
 // bit, the two socket events and the name validator.
 

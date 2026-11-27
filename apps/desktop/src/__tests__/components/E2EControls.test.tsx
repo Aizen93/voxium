@@ -41,7 +41,7 @@ const conversation = (peerId = PEER_ID): Conversation =>
     user2Id: peerId,
     participant: { id: peerId, username: 'peer', displayName: 'Peer', avatarUrl: null },
     lastMessage: null,
-    // always set: conversations are born encrypted (plan §4.2)
+    // always set: conversations are born encrypted (docs/e2e-always-on-plan.md §4.2)
     encryptedAt: '2026-01-01T00:00:00.000Z',
     createdAt: '2026-01-01T00:00:00.000Z',
   }) as unknown as Conversation;

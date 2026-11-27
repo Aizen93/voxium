@@ -117,7 +117,7 @@ describe('shutdown disconnects only THIS node', () => {
 });
 
 describe('the socket-connect hot path never serializes every socket in the cluster', () => {
-  // CLAUDE.md: io.fetchSockets() serializes every socket on every node AND
+  // io.fetchSockets() serializes every socket on every node AND
   // waits for every node's reply, so one unresponsive peer makes it throw after
   // 5s and kills everything after it in the handler. Targeted work uses
   // `user:{id}` rooms instead.

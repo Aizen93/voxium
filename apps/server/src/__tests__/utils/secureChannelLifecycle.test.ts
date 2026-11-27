@@ -4,7 +4,7 @@ import { WS_EVENTS } from '@voxium/shared';
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
 const prismaMock: Record<string, any> = {
-  channel: { findUnique: vi.fn(), findMany: vi.fn(), delete: vi.fn() },
+  channel: { findUnique: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), delete: vi.fn() },
   channelMember: { findMany: vi.fn(), deleteMany: vi.fn() },
   channelRead: { deleteMany: vi.fn() },
   e2EKeyShare: { deleteMany: vi.fn() },
@@ -43,6 +43,16 @@ vi.mock('../../websocket/voiceCluster', () => ({
   broadcastVoiceEvictUser: (...args: any[]) => mockBroadcastVoiceEvictUser(...args),
 }));
 
+// The retry between attempts waits for nothing in these tests
+vi.mock('../../utils/transactionRetry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../utils/transactionRetry')>();
+  return {
+    ...actual,
+    retryOnTransactionConflict: (fn: () => Promise<unknown>, label: string, opts: object = {}) =>
+      actual.retryOnTransactionConflict(fn, label, { ...opts, sleep: async () => {} }),
+  };
+});
+
 import {
   deleteSecureChannel,
   removeSecureMember,
@@ -70,25 +80,39 @@ describe('secureChannelLifecycle', () => {
   });
 
   describe('deleteSecureChannel', () => {
+    const KEY = 'attachments/ch-sec-1/aaaa-encrypted.bin';
+    const deadlock = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+    let warn: ReturnType<typeof vi.spyOn>;
+
+    /** The locked row the transaction finds, and the members the notices go to */
+    function arm(...userIds: string[]) {
+      prismaMock.$queryRaw.mockResolvedValue([{ serverId: 'srv-1' }]);
+      prismaMock.channelMember.findMany.mockResolvedValue(userIds.map((userId) => ({ userId })));
+      prismaMock.channel.delete.mockResolvedValue({});
+    }
+    const userRooms = () => mockTo.mock.calls.map((c: any[]) => c[0]);
+
+    beforeEach(() => {
+      warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.$queryRaw.mockReset();
+      prismaMock.channel.delete.mockReset();
+      // the cheap existence check a call without a decision makes first
+      prismaMock.channel.findFirst.mockReset().mockResolvedValue({ id: 'sec-1' });
+    });
+    afterEach(() => warn.mockRestore());
+
     it('deletes the row, notifies each member user room, tears down the channel room, cleans S3', async () => {
-      prismaMock.channel.findUnique.mockResolvedValue({
-        id: 'sec-1',
-        secure: true,
-        serverId: 'srv-1',
-        members: [{ userId: 'u1' }, { userId: 'u2' }],
-      });
+      arm('u1', 'u2');
       prismaMock.messageAttachment.findMany.mockResolvedValueOnce([
         { id: 'att-1', s3Key: 'attachments/ch-sec-1/aaaa-encrypted.bin' },
         { id: 'att-2', s3Key: 'attachments/ch-sec-1/bbbb-encrypted.bin' },
       ]);
-      prismaMock.channel.delete.mockResolvedValue({});
 
       const result = await deleteSecureChannel('sec-1');
 
       expect(result).toBe(true);
       expect(prismaMock.channel.delete).toHaveBeenCalledWith({ where: { id: 'sec-1' } });
-      const rooms = mockTo.mock.calls.map((c: any[]) => c[0]);
-      expect(rooms).toEqual(['user:u1', 'user:u2']);
+      expect(userRooms()).toEqual(['user:u1', 'user:u2']);
       expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_DELETED, {
         channelId: 'sec-1',
         serverId: 'srv-1',
@@ -101,15 +125,31 @@ describe('secureChannelLifecycle', () => {
       ]);
     });
 
-    it('reads the keys in bounded batches before the row, and deletes the files after it', async () => {
-      prismaMock.channel.findUnique.mockResolvedValue({ id: 'sec-1', secure: true, serverId: 'srv-1', members: [] });
-      prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: 'attachments/ch-sec-1/aaaa-encrypted.bin' }]);
-      prismaMock.channel.delete.mockResolvedValue({});
+    it('locks the secure channel row FIRST, reads the members under that lock, then deletes, in one transaction', async () => {
+      const order: string[] = [];
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+        order.push(strings.join('?').includes('FOR UPDATE') ? 'lock' : 'other');
+        return [{ serverId: 'srv-1' }];
+      });
+      prismaMock.channelMember.findMany.mockImplementation(async () => { order.push('members'); return []; });
+      prismaMock.channel.delete.mockImplementation(async () => { order.push('delete'); return {}; });
 
       await deleteSecureChannel('sec-1');
 
-      // No nested load of every message: the channel read selects no messages
-      expect(prismaMock.channel.findUnique.mock.calls[0][0].select).not.toHaveProperty('messages');
+      expect(order).toEqual(['lock', 'members', 'delete']);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      // the long budget: a wait behind an account deletion must not expire it
+      expect(prismaMock.$transaction.mock.calls[0][1]).toEqual({ timeout: 60_000, maxWait: 10_000 });
+      // a plaintext channel can never match the lock
+      expect(prismaMock.$queryRaw.mock.calls[0][0].join('?')).toContain('secure = true');
+    });
+
+    it('reads the keys in bounded batches before the row, and deletes the files after it', async () => {
+      arm();
+      prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
+
+      await deleteSecureChannel('sec-1');
+
       expect(prismaMock.messageAttachment.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: { expired: false, message: { channelId: 'sec-1' } },
         take: 1000,
@@ -120,15 +160,14 @@ describe('secureChannelLifecycle', () => {
     });
 
     it('a fan-out step that throws after the row cannot skip the file delete', async () => {
-      prismaMock.channel.findUnique.mockResolvedValue({ id: 'sec-1', secure: true, serverId: 'srv-1', members: [{ userId: 'u1' }] });
-      prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: 'attachments/ch-sec-1/aaaa-encrypted.bin' }]);
-      prismaMock.channel.delete.mockResolvedValue({});
+      arm('u1');
+      prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
       mockEmit.mockImplementationOnce(() => { throw new Error('adapter publish failed'); });
       const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
         await deleteSecureChannel('sec-1');
 
-        expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith(['attachments/ch-sec-1/aaaa-encrypted.bin']);
+        expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith([KEY]);
       } finally {
         errorLog.mockRestore();
       }
@@ -138,8 +177,7 @@ describe('secureChannelLifecycle', () => {
       let errorLog: ReturnType<typeof vi.spyOn>;
 
       beforeEach(() => {
-        prismaMock.channel.findUnique.mockResolvedValue({ id: 'sec-1', secure: true, serverId: 'srv-1', members: [{ userId: 'u1' }] });
-        prismaMock.channel.delete.mockResolvedValue({});
+        arm('u1');
         errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
       });
 
@@ -188,34 +226,35 @@ describe('secureChannelLifecycle', () => {
       });
     });
 
-    it('REFUSES to delete a plaintext channel (returns false, touches nothing)', async () => {
-      prismaMock.channel.findUnique.mockResolvedValue({
-        id: 'ch-plain', secure: false, serverId: 'srv-1', members: [],
-      });
+    it('REFUSES to delete a plaintext or a nonexistent channel (returns false, reads and touches nothing)', async () => {
+      // without a decision to make, the existence check matches secure rows only
+      prismaMock.channel.findFirst.mockResolvedValue(null);
 
-      const result = await deleteSecureChannel('ch-plain');
+      expect(await deleteSecureChannel('ch-plain')).toBe(false);
 
-      expect(result).toBe(false);
+      expect(prismaMock.channel.findFirst).toHaveBeenCalledWith({ where: { id: 'ch-plain', secure: true }, select: { id: true } });
+      expect(prismaMock.messageAttachment.findMany).not.toHaveBeenCalled();
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
       expect(prismaMock.channel.delete).not.toHaveBeenCalled();
       expect(mockEmit).not.toHaveBeenCalled();
-      expect(prismaMock.messageAttachment.findMany).not.toHaveBeenCalled();
       expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      expect(mockBroadcastChannelVoiceCleanup).not.toHaveBeenCalled();
     });
 
-    it('returns false for a nonexistent channel', async () => {
-      prismaMock.channel.findUnique.mockResolvedValue(null);
+    it('a channel the lock does not find (gone or not secure) returns false, touches nothing', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([]);
 
-      expect(await deleteSecureChannel('ghost')).toBe(false);
+      expect(await deleteSecureChannel('sec-1')).toBe(false);
+
+      expect(prismaMock.channel.delete).not.toHaveBeenCalled();
+      expect(prismaMock.channelMember.findMany).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(mockBroadcastChannelVoiceCleanup).not.toHaveBeenCalled();
     });
 
     it('a failed S3 cleanup does not fail the deletion (logged, fire-and-forget)', async () => {
-      const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      prismaMock.channel.findUnique.mockResolvedValue({
-        id: 'sec-1', secure: true, serverId: 'srv-1',
-        members: [{ userId: 'u1' }],
-      });
+      arm('u1');
       prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: 'attachments/ch-sec-1/x-encrypted.bin' }]);
-      prismaMock.channel.delete.mockResolvedValue({});
       mockDeleteMultipleFromS3.mockRejectedValue(Object.assign(new Error('s3 down'), { name: 'ServiceUnavailable', $metadata: { httpStatusCode: 503 } }));
 
       const result = await deleteSecureChannel('sec-1');
@@ -223,9 +262,111 @@ describe('secureChannelLifecycle', () => {
       await new Promise((r) => setImmediate(r));
 
       expect(result).toBe(true);
-      expect(consoleWarn).toHaveBeenCalledWith(
+      expect(warn).toHaveBeenCalledWith(
         '[SecureChannel] Attachment file cleanup failed for deleted channel sec-1 (the orphan sweep will reclaim them):', 'ServiceUnavailable, HTTP 503');
-      consoleWarn.mockRestore();
+    });
+
+    describe('a delete that loses a deadlock is tried again', () => {
+      it('a deadlock on the first attempt, then success: deletes twice at the database, announces and cleans once', async () => {
+        arm('u1');
+        prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
+        prismaMock.channel.delete.mockRejectedValueOnce(deadlock());
+
+        await expect(deleteSecureChannel('sec-1')).resolves.toBe(true);
+
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(2);
+        expect(mockEmit).toHaveBeenCalledTimes(1);
+        expect(mockBroadcastChannelVoiceCleanup).toHaveBeenCalledTimes(1);
+        expect(mockDeleteMultipleFromS3).toHaveBeenCalledTimes(1);
+        // the keys are read once, not per attempt
+        expect(prismaMock.messageAttachment.findMany).toHaveBeenCalledTimes(1);
+      });
+
+      it("the caller's decision is made again on each attempt, and once before the keys are read", async () => {
+        arm('u1');
+        prismaMock.channel.delete.mockRejectedValueOnce(deadlock());
+        const authorize = vi.fn().mockResolvedValue(undefined);
+
+        await deleteSecureChannel('sec-1', authorize);
+
+        // the early refusal + one per attempt
+        expect(authorize).toHaveBeenCalledTimes(3);
+        expect(authorize.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.messageAttachment.findMany.mock.invocationCallOrder[0]);
+      });
+
+      it("a refusal at the second attempt deletes and announces nothing more, and the caller's own answer surfaces", async () => {
+        arm('u1');
+        prismaMock.channel.delete.mockRejectedValueOnce(deadlock());
+        const refusal = new Error('lever gone');
+        const authorize = vi.fn().mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockRejectedValueOnce(refusal);
+
+        await expect(deleteSecureChannel('sec-1', authorize)).rejects.toBe(refusal);
+
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(1);
+        expect(mockEmit).not.toHaveBeenCalled();
+        expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+        expect(mockBroadcastChannelVoiceCleanup).not.toHaveBeenCalled();
+      });
+
+      it('a member added between the attempts receives the notice: the list is read inside the attempt that deletes', async () => {
+        prismaMock.$queryRaw.mockResolvedValue([{ serverId: 'srv-1' }]);
+        prismaMock.channelMember.findMany
+          .mockResolvedValueOnce([{ userId: 'u1' }])
+          .mockResolvedValueOnce([{ userId: 'u1' }, { userId: 'u-new' }]);
+        prismaMock.channel.delete.mockRejectedValueOnce(deadlock()).mockResolvedValue({});
+
+        await deleteSecureChannel('sec-1');
+
+        expect(userRooms()).toEqual(['user:u1', 'user:u-new']);
+      });
+
+      it('a channel gone at the second attempt returns false and announces nothing', async () => {
+        prismaMock.$queryRaw.mockResolvedValueOnce([{ serverId: 'srv-1' }]).mockResolvedValueOnce([]);
+        prismaMock.channelMember.findMany.mockResolvedValue([{ userId: 'u1' }]);
+        prismaMock.channel.delete.mockRejectedValueOnce(deadlock());
+
+        await expect(deleteSecureChannel('sec-1')).resolves.toBe(false);
+
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(1);
+        expect(mockEmit).not.toHaveBeenCalled();
+        expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+        expect(mockBroadcastChannelVoiceCleanup).not.toHaveBeenCalled();
+      });
+
+      it('a row gone at the delete (P2025) returns false, announces nothing, and is not retried', async () => {
+        arm('u1');
+        prismaMock.channel.delete.mockRejectedValueOnce(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+
+        await expect(deleteSecureChannel('sec-1')).resolves.toBe(false);
+
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(1);
+        expect(mockEmit).not.toHaveBeenCalled();
+        expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      });
+
+      it('an error that is not a conflict is not retried', async () => {
+        arm('u1');
+        prismaMock.channel.delete.mockRejectedValueOnce(new Error('db gone'));
+
+        await expect(deleteSecureChannel('sec-1')).rejects.toThrow('db gone');
+
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(1);
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('a conflict on every attempt surfaces as before and announces nothing', async () => {
+        arm('u1');
+        prismaMock.channel.delete.mockRejectedValue(deadlock());
+
+        await expect(deleteSecureChannel('sec-1')).rejects.toMatchObject({ code: 'P2034' });
+
+        // the first attempt and two retries
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(3);
+        expect(mockEmit).not.toHaveBeenCalled();
+        expect(mockSocketsLeave).not.toHaveBeenCalled();
+        expect(mockBroadcastChannelVoiceCleanup).not.toHaveBeenCalled();
+        expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      });
     });
   });
 

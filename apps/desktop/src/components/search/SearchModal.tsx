@@ -34,7 +34,7 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
   const abortRef = useRef<AbortController>(undefined);
 
   const textChannels = channels?.filter((c) => c.type === 'text') ?? [];
-  // Every DM is encrypted (plan §4.2), so searching one is always a local
+  // Every DM is encrypted (docs/e2e-always-on-plan.md §4.2), so searching one is always a local
   // search over this device's decrypted history — there is no encrypted/
   // plaintext conversation distinction left to test for.
   const isEncryptedDM = !!conversationId;

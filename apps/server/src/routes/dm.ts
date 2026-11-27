@@ -233,7 +233,7 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
               authorId: last.authorId ?? deletedParticipantId(c.id),
             }
           : null,
-        // always set — conversations are born encrypted (plan §4.2)
+        // always set — conversations are born encrypted (docs/e2e-always-on-plan.md §4.2)
         encryptedAt: c.encryptedAt.toISOString(),
         createdAt: c.createdAt.toISOString(),
         // The list's own order key, paged mode only (the legacy body is
@@ -307,7 +307,7 @@ dmRouter.post('/', rateLimitDmOpen, async (req: Request, res: Response, next: Ne
 
     const isNew = !existing;
     // encryptedAt is filled by the column default — a conversation is born
-    // encrypted and there is no route that turns it on (plan §4.2)
+    // encrypted and there is no route that turns it on (docs/e2e-always-on-plan.md §4.2)
     const conversation = existing ?? await prisma.conversation.create({
       data: { user1Id, user2Id },
     }).catch(async (err) => {
@@ -479,7 +479,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
     refuseReadOnly(view);
     const wantsEncrypted = req.body.encrypted === true;
 
-    // Every conversation is born encrypted (plan §4.2 — encrypted_at is NOT
+    // Every conversation is born encrypted (docs/e2e-always-on-plan.md §4.2 — encrypted_at is NOT
     // NULL), so a DM is always an opaque ciphertext envelope and there is no
     // plaintext path left to fall back to. An un-updated client must get a
     // hard error, not a silent downgrade (docs/e2e-dm-spec.md §6).
@@ -602,7 +602,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
 });
 
 // There is deliberately no "enable encryption" route: POST
-// /:conversationId/encryption was removed in the always-on cutover (plan §4.2,
+// /:conversationId/encryption was removed in the always-on cutover (docs/e2e-always-on-plan.md §4.2,
 // §5). Conversations are encrypted from the moment they are created, so there
 // is nothing to turn on and no window in which a conversation is plaintext.
 

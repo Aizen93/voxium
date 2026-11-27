@@ -5,7 +5,7 @@ import { registerUser, createServer, createInvite, joinServerViaInvite, deleteSe
 import { seedServerMembers, deleteSeededUsers } from './helpers/db';
 import { MEMBER_LIST } from '@voxium/shared';
 
-// Live test of the member lists on a BIG server (CLAUDE.md "Server Membership"):
+// Live test of the member lists on a BIG server:
 //   (a) the People panel is a presence view — on a server past the panel cap
 //       it loads the online members only, the Offline section becomes a count
 //       and a way into the directory, and a member coming online appears live
