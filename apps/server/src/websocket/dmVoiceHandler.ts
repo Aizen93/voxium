@@ -12,6 +12,7 @@ import { writeConversationMessage } from '../utils/conversationLifecycle';
 import { viewersRoom } from '../utils/conversationAudience';
 import { isReadOnlyConversation } from '../utils/conversationVisibility';
 import { ForbiddenError, NotFoundError } from '../utils/errors';
+import { describeCaughtError } from '../utils/loggableError';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -523,7 +524,18 @@ export function handleDMVoiceEvents(
    *  only as that room leave. */
   let callEntries = 0;
 
-  socket.on('dm:voice:join', async (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => {
+  /** A re-join's answer when the caller no longer has a place in that call:
+   *  it ended while their socket was away. To this socket alone, so its call
+   *  ends there; nothing is started, left, rung or written. Marked `rejoin`:
+   *  the client acts on it only while the call that sent the re-join is still
+   *  its current one (a call placed again with the same person meanwhile is
+   *  not the one this answer is about). */
+  const answerRejoinEnded = (conversationId: string) => {
+    console.log(`[DMVoice] User ${userId} re-joining DM call ${conversationId}, which has ended`);
+    socket.emit('dm:voice:ended', { conversationId, rejoin: true });
+  };
+
+  socket.on('dm:voice:join', async (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string; rejoin?: boolean }) => {
     if (!socketRateLimit(socket, 'dm:voice:join', 10)) return;
     if (typeof conversationId !== 'string' || !conversationId) return;
     if (!isFeatureEnabled('dm_voice')) {
@@ -549,9 +561,33 @@ export function handleDMVoiceEvents(
       return;
     }
 
+    // A client re-joining its call after a socket reconnect says so (only the
+    // literal `true`: any other value is read as an older client's join). A
+    // re-join resumes the caller's own place in this conversation's call and
+    // never starts a call: without one, the call ended while the socket was
+    // away, and that is the answer. A re-join rings and writes nothing, and
+    // leaves nothing (space voice on another device, a call in another
+    // conversation) unless its rebind took effect.
+    const rejoin = state?.rejoin === true;
+    let rejoinedCall: string | null = null;
+    if (rejoin) {
+      try {
+        rejoinedCall = await getUserDMCall(userId);
+      } catch (err) {
+        console.error('[DMVoice] Redis error reading the call of a re-join:', describeCaughtError(err));
+        socket.emit('voice:error', { message: 'Voice service temporarily unavailable.' });
+        return;
+      }
+      if (rejoinedCall !== conversationId) {
+        answerRejoinEnded(conversationId);
+        return;
+      }
+    }
+
     // Leave any current server voice channel first (mutual exclusivity; force-evict
     // any stale session so a reconnected socket doesn't orphan old voice transports).
-    leaveCurrentVoiceChannel(io, socket, userId, { force: true });
+    // A re-join does it only once its rebind took effect (below).
+    if (!rejoin) leaveCurrentVoiceChannel(io, socket, userId, { force: true });
 
     const initialMute = state?.selfMute ?? false;
     const initialDeaf = state?.selfDeaf ?? false;
@@ -562,13 +598,18 @@ export function handleDMVoiceEvents(
         ? state.deviceId
         : undefined;
 
-    // Handle an existing DM call for this user.
-    const existingCall = await getUserDMCall(userId);
+    // Handle an existing DM call for this user (a re-join read it above).
+    const existingCall = rejoin ? rejoinedCall : await getUserDMCall(userId);
     if (existingCall === conversationId) {
       // Reconnect into the SAME call: rebind our socket in place without ending the
       // call or re-ringing the peer, then rehydrate this socket's participant view.
       const rebound = await updateDMVoiceUserSocket(conversationId, userId, socket.id, initialMute, initialDeaf, deviceId);
       if (rebound) {
+        // The re-join's leave of space voice, now that it holds its place
+        // again. Holding one does not prove there is no space session: a
+        // space join and a DM join each leave the other and then write their
+        // own, with waits between, so the two can still cross
+        if (rejoin) leaveCurrentVoiceChannel(io, socket, userId, { force: true });
         callEntries++;
         socket.join(`dm:voice:${conversationId}`);
         socket.data.dmCallConversationId = conversationId;
@@ -591,7 +632,12 @@ export function handleDMVoiceEvents(
         console.log(`[DMVoice] User ${userId} rebound socket for existing call ${conversationId}`);
         return;
       }
-      // Rebind failed (user left the call between checks) — fall through to a fresh join.
+      // Rebind failed (user left the call between checks): the call a re-join
+      // was resuming has ended; a join falls through to a fresh join.
+      if (rejoin) {
+        answerRejoinEnded(conversationId);
+        return;
+      }
     } else if (existingCall) {
       // Joining a DIFFERENT call — leave the old one (force-evict; ends that 1-on-1 call).
       await leaveCurrentDMVoiceChannel(io, socket, userId, { force: true });

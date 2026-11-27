@@ -81,6 +81,19 @@ export type SecureVoiceErrorKind =
   | 'device-revoked'
   | 'no-key';
 
+/**
+ * A vet that waits for the membership check its own list read queued (that
+ * read named the identity change of a participant already keyed): not a
+ * failure, and not a verdict on the participant. The check excludes first,
+ * then vets them again.
+ */
+class VetWaitsForMembershipCheck extends Error {
+  constructor(userId: string) {
+    super(`${userId} is vetted by the membership check that follows: a keyed participant's identity changed`);
+    this.name = 'VetWaitsForMembershipCheck';
+  }
+}
+
 /** This join was superseded before it claimed the session — abort quietly. */
 export class SecureVoiceSupersededError extends Error {
   constructor() {
@@ -268,7 +281,7 @@ async function vetParticipant(state: SecureVoiceSessionState, userId: string, de
     // participant waits for it, and that check retries their vet right after.
     if (identityChangedUserIds.some((changed) => state.peers.get(changed)?.vetted)) {
       confirmMembership(state.channelId);
-      throw new Error(`${userId} is vetted by the membership check that follows: a keyed participant's identity changed`);
+      throw new VetWaitsForMembershipCheck(userId);
     }
   }
 
@@ -478,6 +491,7 @@ export async function beginSecureVoiceSession(
   // the only way to notice one mid-call is to re-ask the authoritative endpoint.
   state.confirmTimer = setInterval(() => confirmMembership(channelId), MEMBERSHIP_RECHECK_MS);
   sessions.set(channelId, state);
+  endedChains.delete(channelId);
   if (import.meta.env.DEV) {
     // Diagnostics surface for the Playwright ciphertext proof — DEV builds only
     (globalThis as { __voxSecureVoiceDiag?: () => Promise<unknown> }).__voxSecureVoiceDiag = () => frames.getDiagnostics();
@@ -498,7 +512,7 @@ function onDecryptStalled(state: SecureVoiceSessionState, senderUserId: string, 
   if (!stalled) {
     if (entry.timer) clearTimeout(entry.timer);
     state.keyRequests.delete(senderUserId);
-    void clearPeerIssue(state.channelId, senderUserId);
+    void clearPeerIssue(state, senderUserId);
     return;
   }
 
@@ -512,7 +526,7 @@ function onDecryptStalled(state: SecureVoiceSessionState, senderUserId: string, 
   if (entry.timer) clearTimeout(entry.timer);
   entry.timer = setTimeout(() => {
     if (state.ended) return;
-    void notifyPeerExcluded(state.channelId, senderUserId, new SecureVoiceError('no-key', 'no usable media key for this member'));
+    void notifyPeerExcluded(state, senderUserId, new SecureVoiceError('no-key', 'no usable media key for this member'));
   }, KEY_REQUEST_GRACE_MS);
   state.keyRequests.set(senderUserId, entry);
 }
@@ -594,8 +608,13 @@ export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id
         // their key_requests are ignored — the pair goes mutually deaf for the
         // rest of the call. Leave them un-vetted so the next membership tick
         // retries, and say nothing to the user yet. The tick keys them
-        // through the same step, arrival generation included.
-        console.warn(`[SecureVoice] Vetting ${user.id} failed transiently — will retry:`, err);
+        // through the same step, arrival generation included. A vet that
+        // waits for a check its own read queued has not failed at all.
+        if (err instanceof VetWaitsForMembershipCheck) {
+          console.info(`[SecureVoice] Vetting ${user.id} waits for the membership check that follows`);
+        } else {
+          console.warn(`[SecureVoice] Vetting ${user.id} failed transiently — will retry:`, err);
+        }
         peer.vetted = false;
         return;
       }
@@ -603,7 +622,7 @@ export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id
       state.pendingKeys.delete(user.id);
       recordExclusion(state, user.id, peer.epoch);
       console.error(`[SecureVoice] Vetting ${user.id} failed — excluded from the session:`, err);
-      await notifyPeerExcluded(channelId, user.id, err);
+      await notifyPeerExcluded(state, user.id, err);
       return;
     }
 
@@ -622,6 +641,11 @@ export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id
  * is in a `finally` because a failed seal must not strand them: nothing else
  * ever drains this buffer, so they would be dead weight for the session AND we
  * would stay deaf to a sender whose key we already hold.
+ *
+ * Once keyed, their badge is cleared: an issue on screen then belongs to a
+ * session of theirs that this one replaced (an exclusion, which a late
+ * departure of that session no longer clears), or is the watchdog's
+ * "cannot hear", which it raises again while their frames still fail.
  */
 async function keyVettedParticipantLocked(
   state: SecureVoiceSessionState,
@@ -631,6 +655,7 @@ async function keyVettedParticipantLocked(
 ): Promise<void> {
   try {
     await keyParticipantLocked(state, userId, reason);
+    if (state.peers.get(userId) === peer) await clearPeerIssue(state, userId);
   } catch (err) {
     if (!(err instanceof E2EIdentityChangedError)) throw err;
     // The seal found their identity changed (already flagged). This was their
@@ -638,7 +663,7 @@ async function keyVettedParticipantLocked(
     state.peers.delete(userId);
     recordExclusion(state, userId, peer.epoch);
     forgetPeer(state, userId);
-    await notifyPeerExcluded(state.channelId, userId, err);
+    await notifyPeerExcluded(state, userId, err);
   } finally {
     const buffered = state.pendingKeys.get(userId) ?? [];
     state.pendingKeys.delete(userId);
@@ -668,7 +693,7 @@ export function onParticipantLeft(channelId: string, userId: string, epoch?: str
     // Clear the badge FIRST: an already-excluded peer is not in `peers`, so
     // the early return below would otherwise leave "N members can't be keyed"
     // on screen for the rest of the call after they have gone.
-    clearPeerIssueFor(channelId, userId);
+    void clearPeerIssue(state, userId);
     if (!state.peers.delete(userId)) return;
     forgetPeer(state, userId);
     await rotateFreshLocked(state);
@@ -684,11 +709,6 @@ function forgetPeer(state: SecureVoiceSessionState, userId: string): void {
   state.keyRequests.delete(userId);
   // NOTE: seenSenderEpochs is deliberately NOT cleared — it must outlive the
   // peer's reconnects to keep their dead sessions' keys uninstallable.
-}
-
-/** A member who is gone is not a member we "cannot hear" — drop the badge. */
-function clearPeerIssueFor(channelId: string, userId: string): void {
-  void clearPeerIssue(channelId, userId);
 }
 
 /** Force a fresh rotation (counter exhaustion, membership confirmation). */
@@ -736,7 +756,8 @@ async function rotateFreshLocked(state: SecureVoiceSessionState): Promise<void> 
     state.peers.delete(userId);
     recordExclusion(state, userId, peer.epoch);
     forgetPeer(state, userId);
-    await notifyPeerExcluded(state.channelId, userId, err);
+    await notifyPeerExcluded(state, userId, err);
+    if (state.ended) return;
   }
 }
 
@@ -803,9 +824,10 @@ export function confirmMembership(channelId: string): void {
       state.peers.delete(userId);
       recordExclusion(state, userId, peer.epoch);
       forgetPeer(state, userId);
-      if (notice) await notifyPeerExcluded(channelId, userId, notice);
+      if (notice) await notifyPeerExcluded(state, userId, notice);
+      // A session that ended during a notice says nothing more
+      if (state.ended) return;
     }
-    if (state.ended) return;
     if (keyedExcluded) await rotateFreshLocked(state);
     if (state.ended) return;
 
@@ -818,6 +840,9 @@ export function confirmMembership(channelId: string): void {
     // the list no longer publishes is excluded as revoked, with no rotation
     // (they were never keyed).
     for (const [userId, peer] of [...state.peers.entries()]) {
+      // A session that ended during an earlier participant (a notice, a vet)
+      // vets and says nothing more
+      if (state.ended) return;
       if (peer.vetted) continue;
       try {
         await vetParticipant(state, userId, peer.deviceId);
@@ -826,11 +851,15 @@ export function confirmMembership(channelId: string): void {
           state.peers.delete(userId);
           recordExclusion(state, userId, peer.epoch);
           forgetPeer(state, userId);
-          await notifyPeerExcluded(channelId, userId, err);
+          await notifyPeerExcluded(state, userId, err);
           continue;
         }
         if (devicePublished(lists, userId, peer.deviceId) !== false) {
-          console.warn(`[SecureVoice] Re-vetting ${userId} failed transiently — retried at the next membership check:`, err);
+          if (err instanceof VetWaitsForMembershipCheck) {
+            console.info(`[SecureVoice] Re-vetting ${userId} waits for the membership check that follows`);
+          } else {
+            console.warn(`[SecureVoice] Re-vetting ${userId} failed transiently — retried at the next membership check:`, err);
+          }
           continue;
         }
       }
@@ -840,7 +869,7 @@ export function confirmMembership(channelId: string): void {
         state.peers.delete(userId);
         recordExclusion(state, userId, peer.epoch);
         forgetPeer(state, userId);
-        await notifyPeerExcluded(channelId, userId, new SecureVoiceError('device-revoked', 'the pinned device was revoked'));
+        await notifyPeerExcluded(state, userId, new SecureVoiceError('device-revoked', 'the pinned device was revoked'));
         continue;
       }
       peer.vetted = true;
@@ -925,7 +954,7 @@ async function processInboundKeyLocked(
       state.peers.delete(from);
       recordExclusion(state, from, peer.epoch);
       forgetPeer(state, from);
-      await notifyPeerExcluded(channelId, from, new SecureVoiceError('legacy-key', 'key payload is not an olm1 envelope'));
+      await notifyPeerExcluded(state, from, new SecureVoiceError('legacy-key', 'key payload is not an olm1 envelope'));
       // Excluding a peer we already keyed means our current key is in hands we
       // no longer trust — rotate so they cannot follow the rest of the call.
       await rotateFreshLocked(state);
@@ -945,7 +974,7 @@ async function processInboundKeyLocked(
         state.peers.delete(from);
         recordExclusion(state, from, peer.epoch);
         forgetPeer(state, from);
-        await notifyPeerExcluded(channelId, from, err);
+        await notifyPeerExcluded(state, from, err);
         // Spec §21.4 lists identity change as a FRESH-rotation trigger: the
         // device we just stopped trusting already holds our current key, and
         // the server keeps forwarding our audio to it (an identity change is
@@ -1021,7 +1050,7 @@ export function handleKeyRequest(channelId: string, from: string): void {
       state.peers.delete(from);
       recordExclusion(state, from, peer.epoch);
       forgetPeer(state, from);
-      await notifyPeerExcluded(channelId, from, err);
+      await notifyPeerExcluded(state, from, err);
       if (state.ended) return;
       await rotateFreshLocked(state);
     }
@@ -1054,19 +1083,37 @@ export function endSecureVoiceSessionFor(channelId: string, frames: FrameCryptoS
 /**
  * What the unit tests of this module wait on; nothing in the app does. The
  * serial key chain of the channel's session, which settles once every step
- * queued on it so far has run, or one settled promise, the same on every
- * call, when the channel has no session. It never rejects (see `enqueue`).
+ * queued on it so far has run. With no session, the chain of the one that
+ * ended last, while a step of it is still to finish (a teardown lands
+ * mid-step; waiting on nothing then would let a test pass before that step
+ * ran); else one settled promise, the same on every call. It never rejects
+ * (see `enqueue`).
  */
 export function secureVoiceKeyChain(channelId: string): Promise<void> {
-  return sessions.get(channelId)?.chain ?? NO_CHAIN;
+  return sessions.get(channelId)?.chain ?? endedChains.get(channelId) ?? NO_CHAIN;
 }
 
 /** What secureVoiceKeyChain answers for a channel with no chain to wait on. */
 const NO_CHAIN: Promise<void> = Promise.resolve();
 
+/**
+ * Per channel, the chain of the session that ended last, until it settles or
+ * a new session of the channel begins. Nothing is queued on an ended session
+ * (every entry point looks the session up by channel), so that chain is the
+ * whole of its remaining work.
+ */
+const endedChains = new Map<string, Promise<void>>();
+
 function endSessionState(state: SecureVoiceSessionState): void {
   state.ended = true;
-  if (sessions.get(state.channelId) === state) sessions.delete(state.channelId);
+  if (sessions.get(state.channelId) === state) {
+    sessions.delete(state.channelId);
+    const { channelId, chain } = state;
+    endedChains.set(channelId, chain);
+    void chain.then(() => {
+      if (endedChains.get(channelId) === chain) endedChains.delete(channelId);
+    });
+  }
   if (state.confirmTimer) clearInterval(state.confirmTimer);
   state.confirmTimer = null;
   for (const req of state.keyRequests.values()) if (req.timer) clearTimeout(req.timer);
@@ -1076,28 +1123,37 @@ function endSessionState(state: SecureVoiceSessionState): void {
   state.frames.destroy();
 }
 
-async function notifyPeerExcluded(channelId: string, userId: string, err: unknown): Promise<void> {
+/**
+ * Show a participant's exclusion in the UI. Only for a session still live
+ * when the notice lands (checked after its own import): the badges are kept
+ * per channel, so a notice of an ended session would reach the next session
+ * of the same channel (a reconnect or a transport restart begins one).
+ */
+async function notifyPeerExcluded(state: SecureVoiceSessionState, userId: string, err: unknown): Promise<void> {
   try {
     const { useVoiceStore } = await import('../../stores/voiceStore');
+    if (state.ended) return;
     // Optional until the store integration phase lands the action — the
     // session itself is already correct without the UI surface.
     const store = useVoiceStore.getState() as {
       markSecureVoicePeerExcluded?: (channelId: string, userId: string, kind: SecureVoiceErrorKind | 'identity-changed') => void;
     };
-    store.markSecureVoicePeerExcluded?.(channelId, userId, err instanceof SecureVoiceError ? err.kind : 'identity-changed');
+    store.markSecureVoicePeerExcluded?.(state.channelId, userId, err instanceof SecureVoiceError ? err.kind : 'identity-changed');
   } catch (notifyErr) {
     console.warn('[SecureVoice] Could not surface peer exclusion to the UI:', notifyErr);
   }
 }
 
-/** A previously un-hearable member started decrypting — drop the warning. */
-async function clearPeerIssue(channelId: string, userId: string): Promise<void> {
+/** Drop a participant's badge (they decrypt again, left, or were keyed in a
+ *  new session); like a notice, only for a session still live. */
+async function clearPeerIssue(state: SecureVoiceSessionState, userId: string): Promise<void> {
   try {
     const { useVoiceStore } = await import('../../stores/voiceStore');
+    if (state.ended) return;
     const store = useVoiceStore.getState() as {
       clearSecureVoicePeerIssue?: (channelId: string, userId: string) => void;
     };
-    store.clearSecureVoicePeerIssue?.(channelId, userId);
+    store.clearSecureVoicePeerIssue?.(state.channelId, userId);
   } catch (err) {
     console.warn('[SecureVoice] Could not clear a peer issue in the UI:', err);
   }
