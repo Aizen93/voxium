@@ -12,6 +12,7 @@ import { getEffectiveLimits } from '../utils/serverLimits';
 import { getRedis, NODE_ID, isNodeAlive, socketExistsInCluster, liveNodeCounts, liveClusterSocketIds } from '../utils/redis';
 import { reapVoiceChannelMirror, reapDeadOwnerChannelMirror, announceReapedDepartures } from '../utils/voiceMirror';
 import { annotationKey, deleteAnnotationState, getAnnotationState, initAnnotationState } from '../utils/annotationState';
+import type { JobRun } from '../utils/jobs';
 import {
   getRemoteSession, setRemoteSession, clearRemoteSession,
   relayVoiceEvent, resolveOrClaimChannelOwner, dropShim,
@@ -1698,6 +1699,7 @@ export function evictUserFromChannelVoice(
  */
 export async function reapOrphanedRemoteParticipants(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  run?: JobRun,
 ): Promise<void> {
   // Candidates FIRST, liveness snapshot AFTER — the same ordering as the boot
   // sweeps, for the same reason: a participant who joins between the two is
@@ -1754,6 +1756,8 @@ export async function reapOrphanedRemoteParticipants(
     leaveCurrentVoiceChannel(io, shim, uid);
     shimHandlerTables.delete(media.socketId);
     dropShim(media.socketId);
+    // The job registry's handle (utils/jobs.ts), from the voice reaper
+    run?.count('orphanedParticipants', 1);
   }
 }
 

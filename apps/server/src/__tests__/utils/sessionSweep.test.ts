@@ -36,6 +36,9 @@ import {
   SESSION_SWEEP_FIRST_DELAY_MS, SESSION_SWEEP_FIRST_JITTER_MS, SWEEP_STATEMENTS,
 } from '../../utils/sessionSweep';
 import { prisma } from '../../utils/prisma';
+import { SWEEP_INTERVAL_MS } from '../../utils/sessionSweep';
+import { jobDefinition } from '../../utils/jobs';
+import { useFakeJobStore, restoreJobStore, type FakeJobStore } from '../helpers/jobStoreFake';
 
 const nowS = () => Math.floor(Date.now() / 1000);
 const counts = (over: Partial<{ expired: number; outdated: number; due: number; total: number }> = {}) => {
@@ -422,5 +425,58 @@ describe('session sweep — once per cluster, under its lock', () => {
     startSessionSweep();
     await vi.advanceTimersByTimeAsync(SESSION_SWEEP_FIRST_DELAY_MS);
     expect(redisSet).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The run goes through the job registry's wrapper (utils/jobs.ts), around
+// the lock: switched off it claims nothing and reads nothing, and a run hands
+// its counts over (a refusal as a skip, with the check that refused).
+describe('session sweep — the job registry', () => {
+  let jobs: FakeJobStore;
+  beforeEach(() => { jobs = useFakeJobStore(); });
+  afterEach(() => { restoreJobStore(); });
+
+  it('states the schedule the module keeps: every 6 hours', () => {
+    expect(jobDefinition('session-sweep')!.schedule).toEqual({ kind: 'interval', seconds: SWEEP_INTERVAL_MS / 1000 });
+  });
+
+  it('records a success with what it deleted', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    store.countSweepableSessions.mockResolvedValue(counts({ expired: 2 }));
+    store.sampleExpiredSessions.mockResolvedValue([nowS() - 7200]);
+    store.deleteSweepableSessions.mockResolvedValueOnce(['a', 'b']);
+    store.deleteExpiredLegacyRedemptions.mockResolvedValueOnce(3);
+    await expect(runSessionSweep()).resolves.toEqual({ sessions: 2, redemptions: 3 });
+    expect(jobs.runs).toHaveLength(1);
+    expect(jobs.runs[0]).toMatchObject({ job: 'session-sweep', outcome: 'success', skipReason: null, summary: { sessions: 2, redemptions: 3 } });
+  });
+
+  it('a refused run is recorded as a skip by its guard, with the check that refused and no id', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    store.countSweepableSessions.mockResolvedValue(counts({ outdated: 1 }));
+    store.sampleOutdatedSessions.mockResolvedValue(['s-live']);
+    typedRead(['s-live']);
+    await expect(runSessionSweep()).resolves.toMatchObject({ refused: 'sample-mismatch', mismatch: 'version' });
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'guard-refused', summary: { mismatch: 'version' } });
+    expect(JSON.stringify(jobs.runs[0])).not.toContain('s-live');
+  });
+
+  it('switched off: no lock, no statement, nothing recorded, null, and the timer re-armed at the interval', async () => {
+    jobs.modes.set('session-sweep', 'off');
+    startSessionSweep();
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    await expect(runSessionSweep()).resolves.toBeNull();
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(store.countSweepableSessions).not.toHaveBeenCalled();
+    expect(jobs.runs).toHaveLength(0);
+    expect(setTimeoutSpy.mock.calls.map((c) => c[1])).toContain(SWEEP_INTERVAL_MS);
+  });
+
+  it('a failed run is recorded as failed and still logged as before', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    store.countSweepableSessions.mockRejectedValueOnce(new Error('db down'));
+    await expect(runSessionSweep()).resolves.toBeNull();
+    expect(error).toHaveBeenCalledWith('[Sessions] Session sweep failed:', 'db down');
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'failed', error: 'Error: db down' });
   });
 });

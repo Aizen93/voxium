@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const { mockPrisma, mockList, mockDeleteMany, mockRedisSet, mockRedisDel, mockRedisEval } = vi.hoisted(() => ({
   mockPrisma: {
@@ -28,6 +28,9 @@ vi.mock('../../utils/redis', () => ({
 }));
 
 import { runOrphanCleanup, runScheduledOrphanCleanup, ORPHAN_GRACE_DAYS, ORPHAN_MAX_DELETES_PER_RUN, ORPHAN_MAX_FRACTION, ORPHAN_FRACTION_FLOOR } from '../../utils/orphanCleanup';
+import { startOrphanCleanup, stopOrphanCleanup, SWEEP_HOUR, SWEEP_MINUTE } from '../../utils/orphanCleanup';
+import { jobDefinition } from '../../utils/jobs';
+import { useFakeJobStore, restoreJobStore, type FakeJobStore } from '../helpers/jobStoreFake';
 
 const DAY = 24 * 60 * 60 * 1000;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
@@ -418,5 +421,84 @@ describe('orphan sweep — cluster leadership', () => {
     expect(mockList).not.toHaveBeenCalled();
     expect(result.skipped).toBe('not-leader');
     warn.mockRestore();
+  });
+});
+
+// The scheduled sweep goes through the job registry's wrapper (utils/jobs.ts),
+// around its lock: switched off it claims nothing and lists nothing, and a
+// run hands its counts over (a refusal as a skip). The admin endpoint calls
+// the sweep itself: it is neither switched nor recorded.
+describe('orphan sweep — the job registry', () => {
+  let jobs: FakeJobStore;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 10, 27, SWEEP_HOUR, SWEEP_MINUTE, 0).getTime() - 60_000);
+    jobs = useFakeJobStore();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    stopOrphanCleanup();
+    restoreJobStore();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('states the schedule the module keeps: daily at 05:00', () => {
+    expect(jobDefinition('orphan-cleanup')!.schedule).toEqual({ kind: 'daily', hour: SWEEP_HOUR, minute: SWEEP_MINUTE });
+  });
+
+  it('the slot records a success with every count of the sweep', async () => {
+    mockList.mockResolvedValue([s3('avatars/old.webp', 30 * DAY), s3('avatars/new.webp', DAY), s3('dumps/db.sql', 30 * DAY)]);
+    startOrphanCleanup();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(jobs.runs).toHaveLength(1);
+    expect(jobs.runs[0]).toMatchObject({
+      job: 'orphan-cleanup', outcome: 'success', skipReason: null,
+      summary: { scanned: 3, orphaned: 1, deleted: 1, withinGrace: 1, notOurs: 1 },
+    });
+  });
+
+  it('a refused sweep is recorded as a skip by its bound, with what it found', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockList.mockResolvedValue(Array.from({ length: ORPHAN_FRACTION_FLOOR + 1 }, (_, i) => s3(`avatars/o${i}.webp`, 30 * DAY)));
+    startOrphanCleanup();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockDeleteMany).not.toHaveBeenCalled();
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'over-fraction', summary: { orphaned: ORPHAN_FRACTION_FLOOR + 1, deleted: 0 } });
+  });
+
+  it('switched off, the slot claims no lock and lists nothing, and records nothing', async () => {
+    jobs.modes.set('orphan-cleanup', 'off');
+    startOrphanCleanup();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockRedisSet).not.toHaveBeenCalled();
+    expect(mockList).not.toHaveBeenCalled();
+    expect(jobs.runs).toHaveLength(0);
+  });
+
+  it('a lost lock is not recorded; Redis unreachable is recorded as a skip; a failed sweep as failed, logged as before', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockRedisSet.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('redis down'));
+    startOrphanCleanup();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(jobs.runs).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(DAY);
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'store-unavailable' });
+    expect(warn).toHaveBeenCalledWith('[OrphanSweep] Could not claim the sweep lock — skipping this run:', 'redis down');
+
+    mockList.mockRejectedValueOnce(Object.assign(new Error('connect ECONNREFUSED store.example:9000'), { name: 'TimeoutError' }));
+    await vi.advanceTimersByTimeAsync(DAY);
+    expect(jobs.runs[1]).toMatchObject({ outcome: 'failed', error: 'Error: The object store call failed (TimeoutError)' });
+    expect(JSON.stringify(jobs.runs)).not.toContain('store.example');
+    expect(error.mock.calls.some((c) => String(c[0]) === '[OrphanSweep] Sweep failed:')).toBe(true);
+  });
+
+  it('the admin sweep is neither switched nor recorded', async () => {
+    jobs.modes.set('orphan-cleanup', 'off');
+    await runScheduledOrphanCleanup({ force: true });
+    expect(mockRedisSet).toHaveBeenCalledTimes(1);
+    expect(jobs.readMode).not.toHaveBeenCalled();
+    expect(jobs.runs).toHaveLength(0);
   });
 });

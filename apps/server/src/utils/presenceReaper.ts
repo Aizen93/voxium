@@ -3,6 +3,7 @@ import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared'
 import { clearPresenceState, isUserOnline, type PresenceSweepDb } from './redis';
 import { withClusterLock, wasSkipped } from './dailySchedule';
 import { describeCaughtError } from './loggableError';
+import { runJob, resultOf, noteClusterLock, type JobRun } from './jobs';
 
 type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -50,18 +51,22 @@ let reaperTimer: ReturnType<typeof setInterval> | null = null;
  * would stick on every client).
  *
  * Returns how many users were taken offline (0 when the lock was held, the
- * snapshot refused, or nothing was stale).
+ * snapshot refused, or nothing was stale). `run` (the job registry's handle,
+ * utils/jobs.ts) is told the lock's answer, a refused snapshot and the count.
  */
-export async function reapStalePresence(io: IO, db: PresenceReaperDb): Promise<number> {
+export async function reapStalePresence(io: IO, db: PresenceReaperDb, run?: JobRun): Promise<number> {
   const result = await withClusterLock(
     { key: PRESENCE_REAP_LOCK_KEY, ttlSeconds: PRESENCE_REAP_LOCK_TTL_S, tag: '[Presence]', holdOnSuccess: true },
-    () => sweepAndAnnounce(io, db),
+    () => sweepAndAnnounce(io, db, run),
   );
+  noteClusterLock(run, result);
   return wasSkipped(result) ? 0 : result;
 }
 
-async function sweepAndAnnounce(io: IO, db: PresenceReaperDb): Promise<number> {
+async function sweepAndAnnounce(io: IO, db: PresenceReaperDb, run?: JobRun): Promise<number> {
   const { skipped, offlineUserIds } = await clearPresenceState(db, io, { allowFullWipe: false, requireSnapshot: true, reconcileColumn: true });
+  if (skipped) run?.skip('snapshot-refused');
+  else run?.count('usersOffline', offlineUserIds.length);
   if (skipped || offlineUserIds.length === 0) return 0;
 
   for (const userId of offlineUserIds) {
@@ -89,11 +94,15 @@ async function sweepAndAnnounce(io: IO, db: PresenceReaperDb): Promise<number> {
   return offlineUserIds.length;
 }
 
-/** Start the periodic sweep. Call once after Socket.IO is initialized. */
+/**
+ * Start the periodic sweep. Call once after Socket.IO is initialized. Each
+ * tick goes through the job registry's wrapper (not switchable: it never
+ * reads a mode), which records it; a failed sweep is logged here as before.
+ */
 export function startPresenceReaper(io: IO, db: PresenceReaperDb): void {
   if (reaperTimer) clearInterval(reaperTimer);
   reaperTimer = setInterval(() => {
-    reapStalePresence(io, db).catch((err) =>
+    runJob('presence-reaper', (run) => reapStalePresence(io, db, run)).then(resultOf).catch((err) =>
       console.warn('[Presence] Stale presence reap failed:', describeCaughtError(err)));
   }, PRESENCE_REAP_INTERVAL_MS);
   // Never keep the process alive just for the sweep

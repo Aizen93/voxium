@@ -17,6 +17,9 @@ vi.mock('../../utils/redis', () => ({
 
 import { prisma } from '../../utils/prisma';
 import { runSweep, startKeyShareCleanup, stopKeyShareCleanup, KEYSHARE_SWEEP_LOCK_KEY, KEYSHARE_SWEEP_LOCK_TTL_SECONDS, KEYSHARE_SWEEP_RETRY_MS } from '../../utils/keyShareCleanup';
+import { SWEEP_INTERVAL_MS } from '../../utils/keyShareCleanup';
+import { jobDefinition } from '../../utils/jobs';
+import { useFakeJobStore, restoreJobStore, type FakeJobStore } from '../helpers/jobStoreFake';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -116,6 +119,54 @@ describe('E2E retention sweep — cluster lock', () => {
     expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
     expect(setTimeoutSpy.mock.calls[0][1]).toBe(KEYSHARE_SWEEP_RETRY_MS);
     setTimeoutSpy.mockRestore();
+    error.mockRestore();
+  });
+});
+
+// The sweep goes through the job registry's wrapper (utils/jobs.ts), around
+// the lock: switched off it claims nothing and deletes nothing, and a run
+// hands its counts over.
+describe('E2E retention sweep — the job registry', () => {
+  let store: FakeJobStore;
+  beforeEach(() => { store = useFakeJobStore(); });
+  afterEach(() => { restoreJobStore(); });
+
+  it('states the schedule the module keeps: every 6 hours', () => {
+    expect(jobDefinition('key-share-sweep')!.schedule).toEqual({ kind: 'interval', seconds: SWEEP_INTERVAL_MS / 1000 });
+  });
+
+  it('records a success with the two counts it swept', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.mocked(prisma.e2EKeyShare.deleteMany).mockResolvedValue({ count: 4 } as any);
+    vi.mocked(prisma.e2EMasterTransfer.deleteMany).mockResolvedValue({ count: 2 } as any);
+    expect(await runSweep()).toBe(6);
+    expect(store.runs).toHaveLength(1);
+    expect(store.runs[0]).toMatchObject({ job: 'key-share-sweep', outcome: 'success', summary: { keyShares: 4, masterTransfers: 2 }, error: null });
+    vi.restoreAllMocks();
+  });
+
+  it('switched off, claims no lock, deletes nothing, records nothing, answers 0 and re-arms at its interval', async () => {
+    store.modes.set('key-share-sweep', 'off');
+    startKeyShareCleanup();
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    expect(await runSweep()).toBe(0);
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
+    expect(store.runs).toHaveLength(0);
+    expect(setTimeoutSpy.mock.calls.map((c) => c[1])).toContain(SWEEP_INTERVAL_MS);
+    setTimeoutSpy.mockRestore();
+  });
+
+  it('a failed sweep is recorded as failed and still logged as before; a lost lock is not recorded', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(prisma.e2EKeyShare.deleteMany).mockRejectedValue(new Error('db down'));
+    expect(await runSweep()).toBe(0);
+    expect(error).toHaveBeenCalledWith('[E2E] Key-share sweep failed:', 'db down');
+    expect(store.runs[0]).toMatchObject({ outcome: 'failed', error: 'Error: db down' });
+
+    redisSet.mockResolvedValue(null);
+    expect(await runSweep()).toBe(0);
+    expect(store.runs).toHaveLength(1);
     error.mockRestore();
   });
 });

@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 // The node id a record carries; withClusterLock's own module stays real
 vi.mock('../../utils/redis', () => ({ NODE_ID: () => 'node-under-test', getRedis: () => ({}) }));
 
 import {
   JOBS, JOB_MODES, JOB_RUNS_KEPT, JOB_QUIET_RECORD_INTERVAL_MS, JOB_WARNING_INTERVAL_MS, JOB_STORE_TIMEOUT_MS, JOB_ERROR_MAX,
-  jobDefinition, runJob, runJobWith, setJobStore, resetJobMemory, checkJobSummary, noteClusterLock, modeOf,
+  jobDefinition, runJob, runJobWith, setJobStore, resetJobMemory, checkJobSummary, noteClusterLock, modeOf, resultOf,
   jobOverdueAfterMs, nextJobSlot,
   type JobDefinition, type JobRunRecord, type JobStore,
 } from '../../utils/jobs';
@@ -517,5 +519,29 @@ describe('the schedule as the page shows it', () => {
   it('warns and records within the hour bounds the constants say', () => {
     expect(JOB_WARNING_INTERVAL_MS).toBe(60 * 60 * 1000);
     expect(JOB_QUIET_RECORD_INTERVAL_MS).toBe(60 * 60 * 1000);
+  });
+});
+
+describe('resultOf: a tick as the caller of the job reads it', () => {
+  it('the result of a run, undefined for a job that is off, and the error of a failed run thrown again', () => {
+    expect(resultOf({ ran: true, ok: true, result: 7 })).toBe(7);
+    expect(resultOf({ ran: false })).toBeUndefined();
+    const boom = new Error('boom');
+    expect(() => resultOf({ ran: true, ok: false, error: boom })).toThrow(boom);
+  });
+});
+
+describe('the server sets the store before any job starts', () => {
+  it('index.ts hands the wrapper the database store right after connecting, before the first job is started', () => {
+    const index = readFileSync(resolve(__dirname, '../../index.ts'), 'utf8');
+    const set = index.indexOf('setJobStore(prismaJobStore);');
+    expect(set).toBeGreaterThan(index.indexOf('await prisma.$connect();'));
+    for (const start of [
+      'startPresenceReaper(', 'initVoiceCluster(', 'startAttachmentCleanup();', 'startKeyShareCleanup();', 'startSessionSweep();',
+      'startRegistrationHygiene();', 'startOrphanCleanup();', 'startReportRetention();', 'startDiscoveryStats();',
+    ]) {
+      const at = index.indexOf(start, index.indexOf('async function main'));
+      expect(at, start).toBeGreaterThan(set);
+    }
   });
 });

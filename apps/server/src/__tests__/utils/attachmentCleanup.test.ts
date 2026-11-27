@@ -41,6 +41,9 @@ import {
 import { prisma } from '../../utils/prisma';
 import { deleteMultipleFromS3 } from '../../utils/s3';
 import { sendCleanupReport } from '../../utils/email';
+import { CLEANUP_HOUR } from '../../utils/attachmentCleanup';
+import { jobDefinition } from '../../utils/jobs';
+import { useFakeJobStore, restoreJobStore, type FakeJobStore } from '../helpers/jobStoreFake';
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -282,5 +285,88 @@ describe('attachmentCleanup — cluster lock', () => {
       stopAttachmentCleanup();
       vi.useRealTimers();
     }
+  });
+});
+
+// ─── The job registry ───────────────────────────────────────────────────────
+//
+// The scheduled slot goes through the registry's wrapper (utils/jobs.ts):
+// switched off it does nothing at all, and a run hands its counts over.
+
+describe('attachmentCleanup — the job registry', () => {
+  let store: FakeJobStore;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2024, 0, 15, 3, 59, 0, 0));
+    store = useFakeJobStore();
+    redisSet.mockResolvedValue('OK');
+    redisEval.mockResolvedValue(1);
+    // reset: a test above may leave a queued answer unread
+    vi.mocked(prisma.messageAttachment.findMany).mockReset()
+      .mockResolvedValueOnce([{ id: 'a1', s3Key: 'attachments/a1', fileSize: 10 }, { id: 'a2', s3Key: 'attachments/a2', fileSize: 20 }] as never)
+      .mockResolvedValue([] as never);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    stopAttachmentCleanup();
+    restoreJobStore();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('states the schedule the module keeps: daily at 04:00', () => {
+    expect(jobDefinition('attachment-cleanup')!.schedule).toEqual({ kind: 'daily', hour: CLEANUP_HOUR, minute: 0 });
+  });
+
+  it('the slot records a success with what it expired', async () => {
+    startAttachmentCleanup();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(store.readMode).toHaveBeenCalledWith('attachment-cleanup');
+    expect(store.runs).toHaveLength(1);
+    expect(store.runs[0]).toMatchObject({
+      job: 'attachment-cleanup', mode: 'on', outcome: 'success', skipReason: null,
+      summary: { filesExpired: 2, bytesFreed: 30 }, error: null,
+    });
+  });
+
+  it('switched off, the slot claims no lock, expires nothing, records nothing, and the next slot is tomorrow', async () => {
+    store.modes.set('attachment-cleanup', 'off');
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    startAttachmentCleanup();
+    const armed = setTimeoutSpy.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(prisma.messageAttachment.findMany).not.toHaveBeenCalled();
+    expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+    expect(store.runs).toHaveLength(0);
+    const rearm = setTimeoutSpy.mock.calls.slice(armed).map((c) => c[1] as number).filter((ms) => ms > 60 * 60 * 1000);
+    expect(rearm).toHaveLength(1);
+    expect(rearm[0]).toBeGreaterThan(23 * 60 * 60 * 1000);
+  });
+
+  it('a pass whose batches fail is recorded as failed with the error, the counts it reached and the slot kept', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(prisma.messageAttachment.findMany).mockReset().mockRejectedValue(new Error('db down'));
+    startAttachmentCleanup();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(store.runs[0]).toMatchObject({ outcome: 'failed', error: 'Error: db down', summary: { filesExpired: 0, bytesFreed: 0 } });
+    expect(redisEval).not.toHaveBeenCalled();
+  });
+
+  it('a node that lost the lock records nothing; Redis unreachable is recorded as a skip', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    redisSet.mockResolvedValueOnce(null);
+    startAttachmentCleanup();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(store.runs).toHaveLength(0);
+
+    stopAttachmentCleanup();
+    vi.setSystemTime(new Date(2024, 0, 16, 3, 59, 0, 0));
+    redisSet.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    startAttachmentCleanup();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(store.runs).toHaveLength(1);
+    expect(store.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'store-unavailable', summary: null });
   });
 });

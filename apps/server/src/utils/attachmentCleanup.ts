@@ -4,11 +4,12 @@ import { sendCleanupReport, describeEmailError } from './email';
 import { LIMITS } from '@voxium/shared';
 import { msUntilDailySlot, withClusterLock, wasSkipped, type ClusterLockSkip } from './dailySchedule';
 import { describeCaughtError, describeCaughtErrorWithStack, storeCall } from './loggableError';
+import { runJob, resultOf, noteClusterLock, type JobRun } from './jobs';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
 
-const CLEANUP_HOUR = 4; // 4 AM
+export const CLEANUP_HOUR = 4; // 4 AM
 const BATCH_SIZE = 100;
 
 // Production is multi-node and every node fires this slot. Without the lock
@@ -56,8 +57,10 @@ async function runCleanup() {
   if (stopped) return;
   let retrySoon = false;
   try {
-    const result = await runAttachmentCleanup();
-    retrySoon = wasSkipped(result) && result.skipped === 'unavailable';
+    // Through the job registry's wrapper: switched off, nothing runs and the
+    // next slot is taken as after a run
+    const result = resultOf(await runJob('attachment-cleanup', (run) => runAttachmentCleanup(run)));
+    retrySoon = result !== undefined && wasSkipped(result) && result.skipped === 'unavailable';
   } catch (err) {
     // The pass logs its own failures; this only catches the lock plumbing.
     console.error('[Cleanup] Attachment cleanup run failed:', describeCaughtError(err));
@@ -77,16 +80,20 @@ function scheduleRetry() {
  * the scheduler calls it from the timer. Resolves `{ skipped: 'locked' }` when
  * another node holds the lock — no rows are touched and no report is sent, the
  * holder's report is the night's — and `{ skipped: 'unavailable' }` when Redis
- * could not be reached (fail closed; the scheduler retries soon).
+ * could not be reached (fail closed; the scheduler retries soon). `run` (the
+ * job registry's handle, utils/jobs.ts) is told the lock's answer, the
+ * counts and an expiry error.
  */
-export async function runAttachmentCleanup(): Promise<AttachmentCleanupResult | ClusterLockSkip> {
-  return withClusterLock(
+export async function runAttachmentCleanup(run?: JobRun): Promise<AttachmentCleanupResult | ClusterLockSkip> {
+  const result = await withClusterLock(
     { key: ATTACHMENT_CLEANUP_LOCK_KEY, ttlSeconds: ATTACHMENT_CLEANUP_LOCK_TTL_SECONDS, tag: '[Cleanup]', holdOnSuccess: true },
-    expireAttachmentsAndReport,
+    () => expireAttachmentsAndReport(run),
   );
+  noteClusterLock(run, result);
+  return result;
 }
 
-async function expireAttachmentsAndReport(): Promise<AttachmentCleanupResult> {
+async function expireAttachmentsAndReport(run?: JobRun): Promise<AttachmentCleanupResult> {
   const startedAt = new Date();
   const cutoff = new Date(Date.now() - LIMITS.ATTACHMENT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
   let totalExpired = 0;
@@ -122,7 +129,10 @@ async function expireAttachmentsAndReport(): Promise<AttachmentCleanupResult> {
   } catch (err) {
     error = describeCaughtError(err);
     console.error('[Cleanup] Attachment cleanup error:', describeCaughtErrorWithStack(err));
+    run?.fail(err);
   }
+  run?.count('filesExpired', totalExpired);
+  run?.count('bytesFreed', totalSizeFreed);
 
   // Send report email
   const finishedAt = new Date();

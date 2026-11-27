@@ -350,6 +350,17 @@ export type JobTick<T> =
   | { ran: true; ok: false; error: unknown };
 
 /**
+ * The job's result, undefined when it did not run (it is off), and its error
+ * thrown again: for a caller whose own catch logs a failed run, as it did
+ * before the wrapper (that line and the retry it decides stay the job's).
+ */
+export function resultOf<T>(tick: JobTick<T>): T | undefined {
+  if (!tick.ran) return undefined;
+  if (!tick.ok) throw tick.error;
+  return tick.result;
+}
+
+/**
  * What withClusterLock answered, told to the run: a lock another node holds
  * is not recorded, and a Redis that could not be reached is a skip.
  */
