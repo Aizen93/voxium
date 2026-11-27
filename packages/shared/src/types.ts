@@ -1363,7 +1363,62 @@ export type AuditAction =
   | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user'
   | 'feature_flag.update' | 'feature_flag.reset'
   | 'webhook.disable' | 'webhook.enable' | 'webhook.delete'
-  | 'limits.update_global' | 'limits.update_server' | 'limits.reset_server';
+  | 'limits.update_global' | 'limits.update_server' | 'limits.reset_server'
+  | 'job.update';
+
+// ─── Scheduled jobs (admin) ────────────────────────────────────────────────
+
+/** A scheduled job's mode: `count` works out what it would do without doing it. */
+export type JobMode = 'off' | 'count' | 'on';
+export type JobRunOutcome = 'success' | 'failed' | 'skipped';
+
+export type AdminJobSchedule =
+  | { kind: 'daily'; hour: number; minute: number }
+  | { kind: 'interval'; seconds: number };
+
+/** One recorded run of a job. `summary` holds numbers and a few fixed words only. */
+export interface AdminJobRun {
+  id: number;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  nodeId: string;
+  mode: Exclude<JobMode, 'off'>;
+  outcome: JobRunOutcome;
+  skipReason: string | null;
+  summary: Record<string, number | string> | null;
+  /** A failure as the server's log describes it. */
+  error: string | null;
+}
+
+/** One job of the server's registry, as GET /admin/jobs lists it. */
+export interface AdminJob {
+  name: string;
+  title: string;
+  description: string;
+  schedule: AdminJobSchedule;
+  scheduleText: string;
+  switchable: boolean;
+  notSwitchableReason: string | null;
+  supportsCountOnly: boolean;
+  defaultMode: JobMode;
+  mode: JobMode;
+  /** When an administrator last set the mode, and who (null once that account is deleted). */
+  setAt: string | null;
+  setBy: { id: string; username: string } | null;
+  lastRun: AdminJobRun | null;
+  lastFailure: AdminJobRun | null;
+  /** The next slot of a daily job, in the server's time; null for an interval job. */
+  nextRunAt: string | null;
+  /** The last run started more than twice the longest gap its records can have ago (never for a job that is off). */
+  overdue: boolean;
+}
+
+/** GET /admin/jobs/:name/runs: newest first; `nextCursor` is the `before` of the next page. */
+export interface AdminJobRunsPage {
+  runs: AdminJobRun[];
+  nextCursor: string | null;
+}
 
 // ─── Announcements ─────────────────────────────────────────────────────────
 

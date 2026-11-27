@@ -39,6 +39,8 @@ import {
   webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion, disarmWebhookRowsHeldBy,
 } from '../utils/webhookLifecycle';
 import { describeCaughtError, describeCaughtErrorWithStack, storeCall } from '../utils/loggableError';
+import { JOBS, jobDefinition } from '../utils/jobs';
+import { listAdminJobs, readJobRunsPage, writeJobMode, isJobMode, shownJobMode, JOB_RUNS_PAGE_DEFAULT, JOB_RUNS_PAGE_MAX } from '../utils/jobStore';
 
 export const adminRouter = Router();
 
@@ -2457,6 +2459,81 @@ adminRouter.post('/feature-flags/:name/reset', async (req: Request<{ name: strin
     });
 
     res.json({ success: true, message: `Feature "${name}" reset to default` });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Scheduled jobs ─────────────────────────────────────────────────────────
+// The registry's jobs (utils/jobs.ts), their runs and their switch (the
+// statements: utils/jobStore.ts). Every administrator may read; switching a
+// job changes what the platform keeps (the session sweep, the hygiene sweep,
+// the retention jobs), so only a superadmin may switch one.
+
+/** The largest id a run can have (job_runs.id is an INTEGER). */
+const JOB_RUN_ID_MAX = 2_147_483_647;
+
+/** `limit`: absent is the default; otherwise a whole number from 1 to JOB_RUNS_PAGE_MAX. */
+function readJobRunsLimit(raw: unknown): number {
+  if (raw === undefined) return JOB_RUNS_PAGE_DEFAULT;
+  const n = typeof raw === 'string' && /^\d{1,3}$/.test(raw) ? Number(raw) : NaN;
+  if (!(n >= 1 && n <= JOB_RUNS_PAGE_MAX)) throw new BadRequestError(`limit must be a whole number from 1 to ${JOB_RUNS_PAGE_MAX}`);
+  return n;
+}
+
+/** `before`: absent for the first page; otherwise the id of a run (the `nextCursor` of the page before). */
+function readJobRunsBefore(raw: unknown): number | null {
+  if (raw === undefined) return null;
+  const n = typeof raw === 'string' && /^\d{1,10}$/.test(raw) ? Number(raw) : NaN;
+  if (!(n >= 1 && n <= JOB_RUN_ID_MAX)) throw new BadRequestError('before must be a run id');
+  return n;
+}
+
+adminRouter.get('/jobs', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({ success: true, data: await listAdminJobs(JOBS) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/jobs/:name/runs', async (req: Request<{ name: string }>, res: Response, next: NextFunction) => {
+  try {
+    const definition = jobDefinition(req.params.name);
+    if (!definition) throw new NotFoundError('Job');
+    const limit = readJobRunsLimit(req.query.limit);
+    const before = readJobRunsBefore(req.query.before);
+    res.json({ success: true, data: await readJobRunsPage(definition.name, limit, before) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Every refusal is a 400 here, an unknown job's too: the write names its job in the path
+adminRouter.put('/jobs/:name', requireSuperAdmin, async (req: Request<{ name: string }>, res: Response, next: NextFunction) => {
+  try {
+    const definition = jobDefinition(req.params.name);
+    if (!definition) throw new BadRequestError('Unknown job');
+    if (!definition.switchable) throw new BadRequestError('This job cannot be switched');
+    const { mode } = (req.body ?? {}) as { mode?: unknown };
+    if (!isJobMode(mode)) throw new BadRequestError('Provide a mode: "off", "count" or "on"');
+    if (mode === 'count' && !definition.supportsCountOnly) throw new BadRequestError('This job has no count mode');
+
+    const actorId = req.user!.userId;
+    const before = await prisma.jobSetting.findUnique({ where: { job: definition.name }, select: { mode: true } });
+    const oldMode = shownJobMode(definition, before?.mode);
+    await writeJobMode(definition.name, mode, actorId, new Date());
+
+    logAuditEvent({
+      actorId,
+      action: 'job.update',
+      targetType: 'job',
+      targetId: definition.name,
+      metadata: { oldMode, newMode: mode },
+    });
+
+    const [job] = await listAdminJobs([definition]);
+    res.json({ success: true, data: job });
   } catch (err) {
     next(err);
   }
