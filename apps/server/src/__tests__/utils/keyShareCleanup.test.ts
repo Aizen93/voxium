@@ -98,6 +98,18 @@ describe('E2E retention sweep — cluster lock', () => {
     error.mockRestore();
   });
 
+  it('a sweep that THROWS still re-arms its timer at the interval', async () => {
+    vi.mocked(prisma.e2EKeyShare.deleteMany).mockRejectedValue(new Error('db down'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    startKeyShareCleanup();
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    expect(await runSweep()).toBe(0);
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+    expect(setTimeoutSpy.mock.calls[0][1]).toBe(SWEEP_INTERVAL_MS);
+    setTimeoutSpy.mockRestore();
+    error.mockRestore();
+  });
+
   it('a node that loses the race deletes nothing and reports 0 — but still re-arms its timer', async () => {
     redisSet.mockResolvedValue(null);
     startKeyShareCleanup(); // arm the scheduler; a stopped scheduler never re-arms
@@ -155,6 +167,21 @@ describe('E2E retention sweep — the job registry', () => {
     expect(store.runs).toHaveLength(0);
     expect(setTimeoutSpy.mock.calls.map((c) => c[1])).toContain(SWEEP_INTERVAL_MS);
     setTimeoutSpy.mockRestore();
+  });
+
+  it('a mode that cannot be read skips the tick (no lock, no delete), records the skip, and still re-arms at its interval', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    store.readMode.mockRejectedValue(new Error('connection terminated'));
+    startKeyShareCleanup();
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    expect(await runSweep()).toBe(0);
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
+    expect(store.runs).toHaveLength(1);
+    expect(store.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'mode-unreadable' });
+    expect(setTimeoutSpy.mock.calls.map((c) => c[1])).toContain(SWEEP_INTERVAL_MS);
+    setTimeoutSpy.mockRestore();
+    error.mockRestore();
   });
 
   it('a failed sweep is recorded as failed and still logged as before; a lost lock is not recorded', async () => {

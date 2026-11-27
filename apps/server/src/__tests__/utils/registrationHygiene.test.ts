@@ -964,6 +964,7 @@ describe('registration hygiene sweep — the job registry', () => {
     expect(jobDefinition('registration-hygiene')!.schedule).toEqual({ kind: 'daily', hour: SWEEP_HOUR, minute: SWEEP_MINUTE });
     expect(jobDefinition('registration-hygiene')!.description).toContain(`within ${UNVERIFIED_ACCOUNT_TTL_DAYS} days`);
     expect(jobDefinition('registration-hygiene')!.description).toContain(`not seen for ${IP_RETENTION_DAYS} days`);
+    expect(jobDefinition('registration-hygiene')!.description).toContain(`${UNVERIFIED_ACCOUNT_TTL_DAYS} days`);
   });
 
   it('the slot records a success with every count of the sweep and of the sign-up purge', async () => {
@@ -1013,7 +1014,7 @@ describe('registration hygiene sweep — the job registry', () => {
     expect(error).toHaveBeenCalledWith('[RegHygiene] Sweep failed:', expect.any(HygieneBatchFailedError));
   });
 
-  it('the admin trigger is neither switched nor recorded', async () => {
+  it('the locked sweep called without a run handle is neither switched nor recorded', async () => {
     jobs.modes.set('registration-hygiene', 'off');
     const run = await runRegistrationHygieneLocked({ trigger: 'manual', actorId: 'admin-1' });
     expect(run).toMatchObject({ trigger: 'manual', deletedUsers: 2 });

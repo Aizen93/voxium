@@ -1,7 +1,8 @@
 import { E2E_LIMITS, IP_RECORD_RETENTION_DAYS, JOIN_REQUEST_DECLINE_COOLDOWN_DAYS, JOIN_REQUEST_PENDING_TTL_DAYS, LIMITS, ORPHAN_GRACE_DAYS, REPORT_RETENTION_MONTHS } from '@voxium/shared';
 import { NODE_ID } from './redis';
 import { msUntilDailySlot, wasSkipped } from './dailySchedule';
-import { describeCaughtError, errorLabel } from './loggableError';
+import { describeCaughtError, describeStoreError, errorLabel } from './loggableError';
+import { ConflictError, prismaErrorCode } from './errors';
 
 // The server's scheduled jobs: one registry that names and describes each of
 // them, and one wrapper every tick of every job goes through.
@@ -14,9 +15,10 @@ import { describeCaughtError, errorLabel } from './loggableError';
 // the run handle what it counted and how it ended.
 //
 // What it never does: throw. A job's own failure is handed back to the
-// caller (which logs it as it always did); the wrapper's reads and writes
-// fail on their own, each with one warning per job per hour, and never fail
-// or hold up the job.
+// caller (which logs it as it always did); the wrapper's writes fail on their
+// own, with one warning per job per hour, and never fail the job. Its mode
+// read can delay a start by up to JOB_STORE_TIMEOUT_MS, and a mode that cannot
+// be read skips the tick (see decideMode).
 
 /** The modes of a job. `count` works out what the job would do without doing it. */
 export const JOB_MODES = ['off', 'count', 'on'] as const;
@@ -43,15 +45,17 @@ export const JOB_SKIP_REASONS = [
   'guard-refused',
   // The presence reaper had no usable cluster snapshot
   'snapshot-refused',
+  // A switchable job's mode could not be read (not for want of the settings table): the tick is not run
+  'mode-unreadable',
 ] as const;
 export type JobSkipReason = typeof JOB_SKIP_REASONS[number];
 
 /**
  * The only words a run's summary may hold beside numbers: which check
- * refused a session sweep. A closed list, never a pattern: an id, a name, an
+ * refused a session sweep, and `manual` for a run an administrator asked for. A closed list, never a pattern: an id, a name, an
  * address, a key or a message would pass any pattern a word passes.
  */
-export const JOB_SUMMARY_WORDS = ['expiry', 'version', 'redemption-expiry'] as const;
+export const JOB_SUMMARY_WORDS = ['expiry', 'version', 'redemption-expiry', 'manual'] as const;
 export type JobSummaryWord = typeof JOB_SUMMARY_WORDS[number];
 
 export type JobSummary = Record<string, number | JobSummaryWord>;
@@ -140,12 +144,12 @@ export const JOBS = [
     supportsCountOnly: false,
     defaultMode: 'on',
     recording: 'every-run',
-    counts: ['deletedUsers', 'deletedAvatars', 'deletedIpRecords', 'purgedPendingRegistrations', 'purgedMailLedger'],
+    counts: ['deletedUsers', 'deletedAvatars', 'deletedIpRecords', 'purgedPendingRegistrations', 'purgedMailLedger', 'trigger'],
   },
   {
     name: 'orphan-cleanup',
     title: 'Object-store orphan sweep',
-    description: `Deletes the files of the object store that nothing in the database points at and that are older than ${ORPHAN_GRACE_DAYS} days, and refuses the whole run when the number looks wrong (over 50,000, or over a quarter of the store). It is the backstop of the delete paths. Switched off, such files stay in the store.`,
+    description: `Deletes the files of the object store that nothing in the database points at and that are older than ${ORPHAN_GRACE_DAYS} days, and refuses the whole run when the number looks wrong (over 50,000, or over a quarter of the store once it has more than 200 candidates). It is the backstop of the delete paths. Switched off, such files stay in the store.`,
     schedule: { kind: 'daily', hour: 5, minute: 0 },
     scheduleText: 'Daily at 05:00 (server time)',
     switchable: true,
@@ -153,7 +157,7 @@ export const JOBS = [
     supportsCountOnly: false,
     defaultMode: 'on',
     recording: 'every-run',
-    counts: ['scanned', 'orphaned', 'deleted', 'withinGrace', 'notOurs'],
+    counts: ['scanned', 'orphaned', 'deleted', 'withinGrace', 'notOurs', 'trigger'],
   },
   {
     name: 'report-retention',
@@ -224,6 +228,8 @@ export const JOB_QUIET_RECORD_INTERVAL_MS = 60 * 60 * 1000;
 export const JOB_WARNING_INTERVAL_MS = 60 * 60 * 1000;
 /** A read or a write of the wrapper that has not answered by then is given up (the job does not wait). */
 export const JOB_STORE_TIMEOUT_MS = 10_000;
+/** A failure the same as the one recorded before it is recorded again after this long (a job recorded on change, per node). */
+export const JOB_FAILURE_RECORD_INTERVAL_MS = 15 * 60 * 1000;
 /** A recorded error is cut to this many characters. */
 export const JOB_ERROR_MAX = 1000;
 
@@ -374,20 +380,24 @@ export function noteClusterLock(run: JobRun | undefined, result: unknown): void 
 const warnedAt = new Map<string, number>();
 /** The last record attempted for each `on-change` job (per node). */
 const lastRecorded = new Map<string, { signature: string; at: number }>();
+/** The last failure recorded for each `on-change` job, while no other outcome has been recorded since (per node). */
+const lastFailure = new Map<string, { text: string | null; at: number }>();
 
 /** Forget the warnings and the records made: for tests. */
 export function resetJobMemory(): void {
   warnedAt.clear();
   lastRecorded.clear();
+  lastFailure.clear();
 }
 
-function warnHourly(job: string, kind: string, message: string): void {
+function warnHourly(job: string, kind: string, message: string, level: 'warn' | 'error' = 'warn'): void {
   const key = `${job}\u0000${kind}`;
   const last = warnedAt.get(key);
   const now = Date.now();
   if (last !== undefined && now - last < JOB_WARNING_INTERVAL_MS) return;
   warnedAt.set(key, now);
-  console.warn(message);
+  if (level === 'error') console.error(message);
+  else console.warn(message);
 }
 
 /** `p`, or a rejection after JOB_STORE_TIMEOUT_MS (`p` is left to settle on its own). */
@@ -400,20 +410,29 @@ function bounded<T>(p: Promise<T>, what: string): Promise<T> {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
+/** What reading a job's mode came to. */
+type ModeDecision =
+  | { kind: 'run'; mode: RunMode }
+  // Switched off, or stored as a mode this job cannot run in: nothing runs, nothing is recorded
+  | { kind: 'off' }
+  // The mode could not be read: nothing runs, the tick is recorded as skipped
+  | { kind: 'unreadable'; err: unknown };
+
 /**
- * The mode this tick runs in, or null to run nothing. Never throws.
+ * The mode this tick runs in. Never throws.
  *
- * A mode that cannot be READ (the table is missing, the database answered an
- * error or did not answer) is the job's default mode, with one warning per
- * job per hour: these jobs ran before any switch existed, and an outage of
- * the switch must never silently stop retention and clean-up; nobody can
- * have switched a job off in a table that does not exist. A value that was
- * read but that this job cannot run in (`count` on a job without it, or a
- * value this server does not know) runs nothing, with the same warning: it
- * was written on purpose, by a server that knows more, and running the job
- * in full would do what it was set to avoid.
+ * Only a missing settings table (P2021) reads as the job's default mode, with
+ * one warning per job per hour: these jobs ran before any switch existed, and
+ * nobody can have switched a job off in a table that does not exist. ANY
+ * other failure of the read, the bound of JOB_STORE_TIMEOUT_MS included, is
+ * not a reason to run: the job may have been switched off for a reason (a
+ * clean-up that must not run), so the tick is skipped. A value that was read
+ * but that this job cannot run in (`count` on a job without it, or a value
+ * this server does not know) runs nothing either, with one warning: it was
+ * written on purpose, by a server that knows more, and running the job in
+ * full would do what it was set to avoid.
  */
-async function decideMode(definition: JobDefinition): Promise<RunMode | null> {
+async function decideMode(definition: JobDefinition): Promise<ModeDecision> {
   let mode: JobMode | null = definition.defaultMode;
   if (definition.switchable && store) {
     const current = store;
@@ -421,7 +440,8 @@ async function decideMode(definition: JobDefinition): Promise<RunMode | null> {
     try {
       stored = await bounded(current.readMode(definition.name), 'the mode read');
     } catch (err) {
-      warnHourly(definition.name, 'read', `[Jobs] The mode of ${definition.name} could not be read; it runs in its default mode (${definition.defaultMode}): ${describeCaughtError(err)}`);
+      if (prismaErrorCode(err) !== 'P2021') return { kind: 'unreadable', err };
+      warnHourly(definition.name, 'read', `[Jobs] The mode of ${definition.name} could not be read because its table does not exist; it runs in its default mode (${definition.defaultMode}): ${describeCaughtError(err)}`);
       stored = null;
     }
     mode = modeOf(definition, stored);
@@ -429,12 +449,22 @@ async function decideMode(definition: JobDefinition): Promise<RunMode | null> {
       warnHourly(definition.name, 'stored', `[Jobs] The stored mode of ${definition.name} is not one it runs in on this server; it is not run`);
     }
   }
-  return mode === null || mode === 'off' ? null : mode;
+  return mode === null || mode === 'off' ? { kind: 'off' } : { kind: 'run', mode };
+}
+
+const SYSTEM_ERROR_CODE_RE = /^E[A-Z0-9_]+$/;
+
+/** Whether the error, or its cause, carries a Node system error code. */
+function carriesSystemErrorCode(err: unknown): boolean {
+  const codeOf = (e: unknown): unknown => (typeof e === 'object' && e !== null ? (e as { code?: unknown }).code : undefined);
+  const causeOf = (e: unknown): unknown => (typeof e === 'object' && e !== null ? (e as { cause?: unknown }).cause : undefined);
+  return [codeOf(err), codeOf(causeOf(err))].some((code) => typeof code === 'string' && SYSTEM_ERROR_CODE_RE.test(code));
 }
 
 /** The error of a failed run, as the log describes it: the label and the text, never the object or a stack. */
 function describeRunError(err: unknown): string {
-  const text = `${errorLabel(err)}: ${describeCaughtError(err)}`;
+  // A Node system error (ECONNREFUSED, ENOTFOUND...) has a message that names a host and a port: only its name and code are stored
+  const text = carriesSystemErrorCode(err) ? describeStoreError(err) : `${errorLabel(err)}: ${describeCaughtError(err)}`;
   return text.length > JOB_ERROR_MAX ? `${text.slice(0, JOB_ERROR_MAX)}...` : text;
 }
 
@@ -450,10 +480,36 @@ export function runJob<T>(name: JobName, body: (run: JobRun) => Promise<T>): Pro
 
 /** runJob for a definition given whole (the tests give one the registry does not hold). */
 export async function runJobWith<T>(definition: JobDefinition, body: (run: JobRun) => Promise<T>): Promise<JobTick<T>> {
-  const mode = await decideMode(definition);
-  if (mode === null) return { ran: false };
+  const decision = await decideMode(definition);
+  if (decision.kind === 'off') return { ran: false };
+  if (decision.kind === 'unreadable') {
+    warnHourly(definition.name, 'unreadable', `[Jobs] The mode of ${definition.name} could not be read; this run is skipped: ${describeCaughtError(decision.err)}`, 'error');
+    const now = new Date();
+    await record(definition, definition.defaultMode === 'count' ? 'count' : 'on', now, now, { counts: {}, skipReason: 'mode-unreadable', failure: null, lockHeld: false });
+    return { ran: false };
+  }
+  return execute(definition, decision.mode, body, {});
+}
 
-  const state: RunState = { counts: {}, skipReason: null, failure: null, lockHeld: false };
+/**
+ * A run an administrator asks for, through the registry like a scheduled one:
+ * a job that is switched off is refused (409) and runs nothing; a mode that
+ * cannot be read (other than for want of its table) throws the error it got;
+ * otherwise `body` runs and the run is recorded with the summary word
+ * `trigger: manual`. It touches no timer. A failure of the job is recorded
+ * and thrown again.
+ */
+export async function runJobByHand<T>(name: JobName, body: (run: JobRun) => Promise<T>): Promise<T> {
+  const definition = jobDefinition(name)!;
+  const decision = await decideMode(definition);
+  if (decision.kind === 'off') throw new ConflictError('This job is switched off');
+  if (decision.kind === 'unreadable') throw decision.err;
+  const tick = await execute(definition, decision.mode, body, { trigger: 'manual' });
+  return resultOf(tick) as T;
+}
+
+async function execute<T>(definition: JobDefinition, mode: RunMode, body: (run: JobRun) => Promise<T>, counts: Record<string, unknown>): Promise<JobTick<T>> {
+  const state: RunState = { counts: { ...counts }, skipReason: null, failure: null, lockHeld: false };
   const run: JobRun = {
     job: definition.name,
     mode,
@@ -492,12 +548,18 @@ function dueForRecord(definition: JobDefinition, row: Omit<JobRunRecord, 'nodeId
   if (definition.recording !== 'on-change') return true;
   const signature = `${row.outcome}|${row.skipReason ?? ''}`;
   const last = lastRecorded.get(definition.name);
-  const counted = row.summary !== null && Object.values(row.summary).some((v) => typeof v === 'number' && v > 0);
-  const due = !last
-    || last.signature !== signature
-    || row.outcome === 'failed'
-    || counted
-    || now - last.at >= JOB_QUIET_RECORD_INTERVAL_MS;
+  let due: boolean;
+  if (row.outcome === 'failed') {
+    // A storm of the same failure is recorded once per JOB_FAILURE_RECORD_INTERVAL_MS; the first failure,
+    // a different one and one after another outcome was recorded are recorded at once
+    const before = lastFailure.get(definition.name);
+    due = !before || before.text !== row.error || now - before.at >= JOB_FAILURE_RECORD_INTERVAL_MS;
+    if (due) lastFailure.set(definition.name, { text: row.error, at: now });
+  } else {
+    const counted = row.summary !== null && Object.values(row.summary).some((v) => typeof v === 'number' && v > 0);
+    due = !last || last.signature !== signature || counted || now - last.at >= JOB_QUIET_RECORD_INTERVAL_MS;
+    if (due) lastFailure.delete(definition.name);
+  }
   // The bound applies to ATTEMPTS: a database that refuses the write is not
   // asked again at every tick
   if (due) lastRecorded.set(definition.name, { signature, at: now });

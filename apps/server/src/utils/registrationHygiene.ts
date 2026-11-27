@@ -393,8 +393,8 @@ export class HygieneBatchFailedError extends Error {
  *
  * A dry run takes no lock and records nothing: it deletes nothing, so there is
  * no concurrency to guard and no history worth keeping. `run` (the job
- * registry's handle, utils/jobs.ts, given by the scheduler only) is told the
- * lock's answer and the counts.
+ * registry's handle, utils/jobs.ts, given by the scheduler and by the admin
+ * trigger) is told the lock's answer and the counts.
  */
 export async function runRegistrationHygieneLocked(
   opts: { trigger: 'scheduled' | 'manual'; actorId?: string | null; dryRun?: boolean; run?: JobRun },

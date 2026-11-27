@@ -22,7 +22,11 @@ const SKIP_LABELS: Record<string, string> = {
   'over-fraction': 'over its share of the store',
   'guard-refused': 'refused by its check',
   'snapshot-refused': 'no cluster snapshot',
+  'mode-unreadable': 'its mode could not be read',
 };
+
+/** What the page says of a stored mode this server cannot run the job in. */
+const UNRUNNABLE_TEXT = 'Stored mode cannot be run by this server: not running';
 
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms} ms`;
@@ -57,11 +61,21 @@ function JobMarks({ job }: { job: AdminJob }) {
   );
 }
 
+const SWITCH_LABELS: Record<JobMode, string> = { off: 'Switch off', count: 'Count only', on: 'Switch on' };
+
+function CurrentMode({ job }: { job: AdminJob }) {
+  return (
+    <p className="text-sm text-vox-text-primary" data-testid="job-mode">
+      {job.modeUnrunnable ? UNRUNNABLE_TEXT : MODE_LABELS[job.mode]}
+    </p>
+  );
+}
+
 function ModeControl({ job, isSuperAdmin, onChoose }: { job: AdminJob; isSuperAdmin: boolean; onChoose: (mode: JobMode) => void }) {
   if (!job.switchable) {
     return (
       <div className="text-right max-w-xs">
-        <p className="text-sm text-vox-text-primary">{MODE_LABELS[job.mode]}</p>
+        <CurrentMode job={job} />
         <p className="text-[11px] text-vox-text-muted" data-testid="job-mode-reason">Cannot be switched. {job.notSwitchableReason}</p>
       </div>
     );
@@ -69,21 +83,30 @@ function ModeControl({ job, isSuperAdmin, onChoose }: { job: AdminJob; isSuperAd
   if (!isSuperAdmin) {
     return (
       <div className="text-right max-w-xs">
-        <p className="text-sm text-vox-text-primary">{MODE_LABELS[job.mode]}</p>
+        <CurrentMode job={job} />
         <p className="text-[11px] text-vox-text-muted" data-testid="job-mode-reason">Only a super admin can switch a job.</p>
       </div>
     );
   }
-  const modes: JobMode[] = job.supportsCountOnly || job.mode === 'count' ? ['off', 'count', 'on'] : ['off', 'on'];
+  // One button per mode the job supports and is not in; the mode it is in is text. A button acts on
+  // a click only, never on a key that merely moves through a list of choices
+  const modes: JobMode[] = job.supportsCountOnly ? ['off', 'count', 'on'] : ['off', 'on'];
   return (
-    <select
-      aria-label={`Mode of ${job.title}`}
-      value={job.mode}
-      onChange={(e) => onChoose(e.target.value as JobMode)}
-      className="px-2 py-1 text-sm rounded-md bg-vox-bg-hover border border-vox-border text-vox-text-primary focus:outline-none focus:border-vox-accent-primary"
-    >
-      {modes.map((m) => <option key={m} value={m}>{MODE_LABELS[m]}</option>)}
-    </select>
+    <div className="text-right max-w-xs">
+      <CurrentMode job={job} />
+      <div role="group" aria-label={`Mode of ${job.title}`} className="mt-1 flex justify-end gap-1.5">
+        {modes.filter((m) => m !== job.mode || job.modeUnrunnable).map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => onChoose(m)}
+            className="px-2 py-1 text-xs rounded-md border border-vox-border text-vox-text-secondary hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+          >
+            {SWITCH_LABELS[m]}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -147,8 +170,11 @@ function RunsPanel({ job }: { job: AdminJob }) {
   );
 }
 
-function LastRun({ run }: { run: AdminJobRun | null }) {
-  if (!run) return <p className="text-vox-text-muted">No run recorded yet</p>;
+function LastRun({ run, neverRecorded }: { run: AdminJobRun | null; neverRecorded: boolean }) {
+  if (!run) {
+    // A job that is on and has no record is not marked overdue: the page only says so
+    return <p className="text-vox-text-muted" data-testid={neverRecorded ? 'job-never-recorded' : undefined}>{neverRecorded ? 'No run recorded yet' : 'No run recorded'}</p>;
+  }
   return (
     <p className="text-vox-text-primary flex flex-wrap items-center gap-1.5">
       <OutcomeBadge run={run} />
@@ -211,7 +237,7 @@ export function AdminJobs() {
   };
 
   const choose = (job: AdminJob, mode: JobMode) => {
-    if (mode === job.mode) return;
+    if (mode === job.mode && !job.modeUnrunnable) return;
     setPending({ job, mode });
   };
 
@@ -274,7 +300,7 @@ export function AdminJobs() {
               </div>
               <div>
                 <p className="text-vox-text-muted">Last run</p>
-                <LastRun run={job.lastRun} />
+                <LastRun run={job.lastRun} neverRecorded={job.neverRecorded} />
               </div>
               <div>
                 <p className="text-vox-text-muted">Next run</p>

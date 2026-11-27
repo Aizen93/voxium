@@ -23,7 +23,8 @@ export const ENGLISH_ON_PURPOSE: EnglishGroup[] = [
     reason:
       'Routes only the admin dashboard calls: that app is English-only, and these files are never reached by a member',
     files: ['apps/server/src/routes/admin.ts', 'apps/server/src/middleware/requireSuperAdmin.ts'],
-    sentences: ['Feature flag not found'],
+    // Thrown by the job registry (utils/jobs.ts) for a manual run of a switched-off job: only the two admin routes that run one reach it
+    sentences: ['Feature flag not found', 'This job is switched off'],
   },
   {
     reason:

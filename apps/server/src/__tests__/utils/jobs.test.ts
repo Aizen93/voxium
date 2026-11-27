@@ -7,7 +7,7 @@ vi.mock('../../utils/redis', () => ({ NODE_ID: () => 'node-under-test', getRedis
 
 import {
   JOBS, JOB_MODES, JOB_RUNS_KEPT, JOB_QUIET_RECORD_INTERVAL_MS, JOB_WARNING_INTERVAL_MS, JOB_STORE_TIMEOUT_MS, JOB_ERROR_MAX,
-  jobDefinition, runJob, runJobWith, setJobStore, resetJobMemory, checkJobSummary, noteClusterLock, modeOf, resultOf,
+  jobDefinition, runJob, runJobWith, runJobByHand, setJobStore, resetJobMemory, checkJobSummary, noteClusterLock, modeOf, resultOf,
   jobOverdueAfterMs, nextJobSlot,
   type JobDefinition, type JobRunRecord, type JobStore,
 } from '../../utils/jobs';
@@ -231,17 +231,20 @@ describe('the wrapper: modes', () => {
   });
 });
 
+/** The error the real client throws for a table that does not exist. */
+const missingTable = () => Object.assign(new Error('The table `public.job_settings` does not exist in the current database.'), { name: 'PrismaClientKnownRequestError', code: 'P2021' });
+
 describe('the wrapper: a mode that cannot be read', () => {
-  it('runs the job in its default mode and warns once per job per hour', async () => {
+  it('a missing settings table (P2021) runs the job in its default mode and warns once per job per hour', async () => {
     vi.useFakeTimers({ now: new Date(2026, 10, 27, 12, 0, 0), toFake: ['Date'] });
-    store.readMode.mockRejectedValue(Object.assign(new Error('relation "job_settings" does not exist'), { code: '42P01' }));
+    store.readMode.mockRejectedValue(missingTable());
     const body = vi.fn(async () => 1);
 
     await runJobWith(definition(), body);
     await runJobWith(definition(), body);
     expect(body).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0][0])).toBe('[Jobs] The mode of test-job could not be read; it runs in its default mode (on): relation "job_settings" does not exist');
+    expect(String(warn.mock.calls[0][0])).toContain('[Jobs] The mode of test-job could not be read because its table does not exist; it runs in its default mode (on): ');
 
     vi.setSystemTime(new Date(2026, 10, 27, 12, 59, 0));
     await runJobWith(definition(), body);
@@ -250,10 +253,11 @@ describe('the wrapper: a mode that cannot be read', () => {
     await runJobWith(definition(), body);
     expect(warn).toHaveBeenCalledTimes(2);
     expect(body).toHaveBeenCalledTimes(4);
+    expect(store.runs.every((r) => r.outcome === 'success')).toBe(true);
   });
 
-  it('the warning of one job does not silence another\'s', async () => {
-    store.readMode.mockRejectedValue(new Error('db down'));
+  it("the warning of one job does not silence another's", async () => {
+    store.readMode.mockRejectedValue(missingTable());
     await runJobWith(definition({ name: 'job-a' }), async () => 1);
     await runJobWith(definition({ name: 'job-b' }), async () => 1);
     expect(warn).toHaveBeenCalledTimes(2);
@@ -268,24 +272,77 @@ describe('the wrapper: a mode that cannot be read', () => {
     expect(line).not.toContain('secret-value');
   });
 
-  it('a read that does not answer is given up after JOB_STORE_TIMEOUT_MS and the job runs in its default mode', async () => {
-    vi.useFakeTimers();
-    store.readMode.mockReturnValue(new Promise(() => { /* never answers */ }));
-    const body = vi.fn(async () => 1);
-    const tick = runJobWith(definition(), body);
-    await vi.advanceTimersByTimeAsync(JOB_STORE_TIMEOUT_MS);
-    expect(await tick).toEqual({ ran: true, ok: true, result: 1 });
-    expect(body).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0][0])).toContain(`did not answer within ${JOB_STORE_TIMEOUT_MS} ms`);
+  describe('any other failure of the read skips the tick', () => {
+    let error: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => { error = vi.spyOn(console, 'error').mockImplementation(() => {}); });
+
+    it('an error other than the missing table: the job does not run, and the skip is recorded with its reason', async () => {
+      store.readMode.mockRejectedValue(new Error('connection terminated'));
+      const body = vi.fn(async () => 1);
+      const tick = await runJobWith(definition(), body);
+      expect(tick).toEqual({ ran: false });
+      expect(body).not.toHaveBeenCalled();
+      expect(store.runs).toHaveLength(1);
+      expect(store.runs[0]).toMatchObject({ job: 'test-job', mode: 'on', outcome: 'skipped', skipReason: 'mode-unreadable', summary: null, error: null });
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('default mode'));
+    });
+
+    it('a Prisma error with another code (P1001) skips as well', async () => {
+      store.readMode.mockRejectedValue(Object.assign(new Error('unreachable'), { code: 'P1001' }));
+      const body = vi.fn(async () => 1);
+      expect(await runJobWith(definition(), body)).toEqual({ ran: false });
+      expect(body).not.toHaveBeenCalled();
+    });
+
+    it('a read that does not answer is given up after JOB_STORE_TIMEOUT_MS and the tick is skipped, not run', async () => {
+      vi.useFakeTimers();
+      store.readMode.mockReturnValue(new Promise(() => { /* never answers */ }));
+      const body = vi.fn(async () => 1);
+      const tick = runJobWith(definition(), body);
+      await vi.advanceTimersByTimeAsync(JOB_STORE_TIMEOUT_MS);
+      expect(await tick).toEqual({ ran: false });
+      expect(body).not.toHaveBeenCalled();
+      expect(String(error.mock.calls[0][0])).toContain(`did not answer within ${JOB_STORE_TIMEOUT_MS} ms`);
+      expect(store.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'mode-unreadable' });
+    });
+
+    it('says so with ONE console.error per job per hour, through the describing helper', async () => {
+      vi.useFakeTimers({ now: new Date(2026, 10, 27, 12, 0, 0), toFake: ['Date'] });
+      store.readMode.mockRejectedValue(Object.assign(new Error('Invalid `prisma.jobSetting.findUnique()` invocation: where { job: "secret-value" }'), { name: 'PrismaClientKnownRequestError', code: 'P2010' }));
+      await runJobWith(definition(), async () => 1);
+      await runJobWith(definition(), async () => 1);
+      expect(error).toHaveBeenCalledTimes(1);
+      const line = String(error.mock.calls[0][0]);
+      expect(line).toContain('[Jobs] The mode of test-job could not be read; this run is skipped: ');
+      expect(line).not.toContain('secret-value');
+      await runJobWith(definition({ name: 'other-job' }), async () => 1);
+      expect(error).toHaveBeenCalledTimes(2);
+      vi.setSystemTime(new Date(2026, 10, 27, 13, 0, 1));
+      await runJobWith(definition(), async () => 1);
+      expect(error).toHaveBeenCalledTimes(3);
+    });
+
+    it('a record that fails too does not throw: the tick still resolves as not run', async () => {
+      store.readMode.mockRejectedValue(new Error('db down'));
+      store.insertRun.mockRejectedValue(new Error('db down'));
+      await expect(runJobWith(definition(), async () => 1)).resolves.toEqual({ ran: false });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not be recorded'));
+    });
+
+    it('a job that cannot be switched never reads a mode, so it is never skipped for one', async () => {
+      store.readMode.mockRejectedValue(new Error('db down'));
+      const tick = await runJobWith(definition({ switchable: false, notSwitchableReason: 'it must run' }), async () => 1);
+      expect(tick.ran).toBe(true);
+    });
   });
 });
 
 describe('the wrapper: failures', () => {
   it('a job that throws is recorded as failed with the error described, the tick resolves the error, and the next tick runs', async () => {
-    const boom = Object.assign(new Error('the store\nrefused'), { code: 'ECONNRESET' });
+    const boom = Object.assign(new Error('the store\nrefused'), { code: 'LOCKED' });
     const tick = await runJobWith(definition(), async (run) => { run.count('deleted', 4); throw boom; });
     expect(tick).toEqual({ ran: true, ok: false, error: boom });
-    expect(store.runs[0]).toMatchObject({ outcome: 'failed', skipReason: null, summary: { deleted: 4 }, error: 'Error [ECONNRESET]: the store\\nrefused' });
+    expect(store.runs[0]).toMatchObject({ outcome: 'failed', skipReason: null, summary: { deleted: 4 }, error: 'Error [LOCKED]: the store\\nrefused' });
 
     const next = await runJobWith(definition(), async () => 'again');
     expect(next).toEqual({ ran: true, ok: true, result: 'again' });
@@ -296,6 +353,18 @@ describe('the wrapper: failures', () => {
     const tick = await runJobWith(definition(), async () => { throw { secret: 'x' }; });
     expect(tick.ran && !tick.ok).toBe(true);
     expect(store.runs[0].error).toBe('Error: Non-error value thrown (object)');
+  });
+
+  it.each([
+    ['the error', (m: string) => Object.assign(new Error(m), { code: 'ECONNREFUSED' })],
+    ['its cause', (m: string) => new Error('the sweep failed', { cause: Object.assign(new Error(m), { code: 'ENOTFOUND' }) })],
+  ])('a Node system error code on %s stores its name and code, never the message that names a host and a port', async (_name, make) => {
+    await runJobWith(definition(), async () => { throw make('connect ECONNREFUSED 203.0.113.7:6379 (cache.internal.example)'); });
+    const stored = store.runs[0].error!;
+    expect(stored).toMatch(/ECONNREFUSED|ENOTFOUND/);
+    expect(stored).not.toContain('203.0.113.7');
+    expect(stored).not.toContain('6379');
+    expect(stored).not.toContain('cache.internal.example');
   });
 
   it('cuts a long error', async () => {
@@ -450,12 +519,86 @@ describe('the wrapper: the bound of a job recorded on change (the 60-second reap
     expect(store.insertRun).toHaveBeenCalledTimes(1);
   });
 
+  it('a storm of the SAME failure is recorded once per 15 minutes; a different error, a success between, and the first failure are recorded at once', async () => {
+    const fail = (m: string) => async () => { throw new Error(m); };
+    await tickAt(minute(0), fail('db down'));
+    await tickAt(minute(1), fail('db down'));
+    await tickAt(minute(14), fail('db down'));
+    expect(store.runs.map((r) => r.error)).toEqual(['Error: db down']);
+    await tickAt(minute(15), fail('db down'));
+    expect(store.runs).toHaveLength(2);
+    await tickAt(minute(16), fail('db down'));
+    expect(store.runs).toHaveLength(2);
+    // a different error is recorded at once
+    await tickAt(minute(17), fail('lock timeout'));
+    expect(store.runs.map((r) => r.error)).toEqual(['Error: db down', 'Error: db down', 'Error: lock timeout']);
+    // a success after the failures is recorded at once, and the failure after it is a first failure again
+    await tickAt(minute(18), async () => 0);
+    await tickAt(minute(19), fail('lock timeout'));
+    expect(store.runs.map((r) => r.outcome)).toEqual(['failed', 'failed', 'failed', 'success', 'failed']);
+  });
+
+  it('the failure bound is per job', async () => {
+    const other = () => definition({ name: 'other-reaper', recording: 'on-change', switchable: false, notSwitchableReason: 'must run', schedule: { kind: 'interval', seconds: 60 } });
+    vi.setSystemTime(minute(0));
+    await runJobWith(reaper(), async () => { throw new Error('db down'); });
+    await runJobWith(other(), async () => { throw new Error('db down'); });
+    expect(store.runs.map((r) => r.job)).toEqual(['reaper', 'other-reaper']);
+  });
+
+  it('a job recorded at every run is not bounded, failures included', async () => {
+    for (let m = 0; m < 3; m++) {
+      vi.setSystemTime(minute(m));
+      await runJobWith(definition(), async () => { throw new Error('same'); });
+    }
+    expect(store.runs).toHaveLength(3);
+  });
+
   it('a job recorded at every run is not bounded', async () => {
     for (let m = 0; m < 5; m++) {
       vi.setSystemTime(minute(m));
       await runJobWith(definition(), async () => 0);
     }
     expect(store.runs).toHaveLength(5);
+  });
+});
+
+describe('a run an administrator asks for (runJobByHand)', () => {
+  it('refuses a job that is switched off with a 409 and runs and records nothing', async () => {
+    store.modes.set('orphan-cleanup', 'off');
+    const body = vi.fn(async () => 1);
+    await expect(runJobByHand('orphan-cleanup', body)).rejects.toMatchObject({ statusCode: 409, message: 'This job is switched off' });
+    expect(body).not.toHaveBeenCalled();
+    expect(store.insertRun).not.toHaveBeenCalled();
+  });
+
+  it('runs a job that is on, resolves its result and records it with the word manual', async () => {
+    const result = await runJobByHand('orphan-cleanup', async (run) => { run.count('deleted', 2); return 'r'; });
+    expect(result).toBe('r');
+    expect(store.runs).toHaveLength(1);
+    expect(store.runs[0]).toMatchObject({ job: 'orphan-cleanup', outcome: 'success', summary: { deleted: 2, trigger: 'manual' } });
+  });
+
+  it('a mode that cannot be read throws the error it got and runs nothing; a missing table runs', async () => {
+    const boom = new Error('connection terminated');
+    store.readMode.mockRejectedValueOnce(boom);
+    const body = vi.fn(async () => 1);
+    await expect(runJobByHand('orphan-cleanup', body)).rejects.toBe(boom);
+    expect(body).not.toHaveBeenCalled();
+    expect(store.insertRun).not.toHaveBeenCalled();
+    store.readMode.mockRejectedValueOnce(missingTable());
+    await expect(runJobByHand('orphan-cleanup', body)).resolves.toBe(1);
+  });
+
+  it('records a failure and throws it again', async () => {
+    const boom = new Error('refused');
+    await expect(runJobByHand('orphan-cleanup', async () => { throw boom; })).rejects.toBe(boom);
+    expect(store.runs[0]).toMatchObject({ outcome: 'failed', summary: { trigger: 'manual' } });
+  });
+
+  it('the word manual is one the summary validator takes, under a key the two sweeps declare', () => {
+    expect(checkJobSummary(['trigger'], { trigger: 'manual' })).toEqual({ trigger: 'manual' });
+    for (const name of ['registration-hygiene', 'orphan-cleanup']) expect(jobDefinition(name)!.counts).toContain('trigger');
   });
 });
 

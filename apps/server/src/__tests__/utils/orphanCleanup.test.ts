@@ -447,6 +447,30 @@ describe('orphan sweep — the job registry', () => {
     expect(jobDefinition('orphan-cleanup')!.schedule).toEqual({ kind: 'daily', hour: SWEEP_HOUR, minute: SWEEP_MINUTE });
   });
 
+  it('the description names the numbers the sweep uses: its grace, its ceiling, its share and the floor below which the share does not apply', () => {
+    const { description } = jobDefinition('orphan-cleanup')!;
+    expect(description).toContain(`older than ${ORPHAN_GRACE_DAYS} days`);
+    expect(description).toContain(`over ${ORPHAN_MAX_DELETES_PER_RUN.toLocaleString('en-US')}`);
+    expect(ORPHAN_MAX_FRACTION).toBe(0.25);
+    expect(description).toContain('over a quarter of the store');
+    expect(description).toContain(`more than ${ORPHAN_FRACTION_FLOOR} candidates`);
+  });
+
+  it('a mode that cannot be read skips the slot (no lock, no listing), records the skip, and re-arms for tomorrow', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    jobs.readMode.mockRejectedValue(new Error('connection terminated'));
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    startOrphanCleanup();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockRedisSet).not.toHaveBeenCalled();
+    expect(mockList).not.toHaveBeenCalled();
+    expect(jobs.runs).toHaveLength(1);
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'mode-unreadable' });
+    const rearm = setTimeoutSpy.mock.calls.map((c) => c[1] as number).filter((ms) => ms > 60 * 60 * 1000);
+    expect(rearm).toHaveLength(1);
+    expect(rearm[0]).toBeGreaterThan(23 * 60 * 60 * 1000);
+  });
+
   it('the slot records a success with every count of the sweep', async () => {
     mockList.mockResolvedValue([s3('avatars/old.webp', 30 * DAY), s3('avatars/new.webp', DAY), s3('dumps/db.sql', 30 * DAY)]);
     startOrphanCleanup();
@@ -494,7 +518,7 @@ describe('orphan sweep — the job registry', () => {
     expect(error.mock.calls.some((c) => String(c[0]) === '[OrphanSweep] Sweep failed:')).toBe(true);
   });
 
-  it('the admin sweep is neither switched nor recorded', async () => {
+  it('the sweep called without a run handle is neither switched nor recorded', async () => {
     jobs.modes.set('orphan-cleanup', 'off');
     await runScheduledOrphanCleanup({ force: true });
     expect(mockRedisSet).toHaveBeenCalledTimes(1);

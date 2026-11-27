@@ -39,8 +39,8 @@ import {
   webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion, disarmWebhookRowsHeldBy,
 } from '../utils/webhookLifecycle';
 import { describeCaughtError, describeCaughtErrorWithStack, storeCall } from '../utils/loggableError';
-import { JOBS, jobDefinition } from '../utils/jobs';
-import { listAdminJobs, readJobRunsPage, writeJobMode, isJobMode, shownJobMode, JOB_RUNS_PAGE_DEFAULT, JOB_RUNS_PAGE_MAX } from '../utils/jobStore';
+import { JOBS, jobDefinition, runJobByHand } from '../utils/jobs';
+import { listAdminJobs, readJobRunsPage, writeJobMode, isJobMode, jobAsWritten, JOB_RUNS_PAGE_DEFAULT, JOB_RUNS_PAGE_MAX } from '../utils/jobStore';
 
 export const adminRouter = Router();
 
@@ -177,11 +177,13 @@ adminRouter.get('/registration/hygiene', async (_req: Request, res: Response, ne
 adminRouter.post('/registration/hygiene', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
-    const result = await runRegistrationHygieneLocked({
-      trigger: 'manual',
-      actorId: req.user!.userId,
-      dryRun,
-    });
+    // A run that deletes goes through the job registry like a scheduled one
+    // (refused while the job is switched off, recorded); a dry run deletes
+    // nothing, so an operator can always look
+    const actor = { trigger: 'manual', actorId: req.user!.userId } as const;
+    const result = dryRun
+      ? await runRegistrationHygieneLocked({ ...actor, dryRun })
+      : await runJobByHand('registration-hygiene', (run) => runRegistrationHygieneLocked({ ...actor, run }));
 
     if ('skipped' in result) {
       // A sweep is already running — on this node or a peer. Saying so is more
@@ -2503,7 +2505,7 @@ adminRouter.get('/jobs/:name/runs', async (req: Request<{ name: string }>, res: 
     if (!definition) throw new NotFoundError('Job');
     const limit = readJobRunsLimit(req.query.limit);
     const before = readJobRunsBefore(req.query.before);
-    res.json({ success: true, data: await readJobRunsPage(definition.name, limit, before) });
+    res.json({ success: true, data: await readJobRunsPage(definition, limit, before) });
   } catch (err) {
     next(err);
   }
@@ -2521,8 +2523,10 @@ adminRouter.put('/jobs/:name', requireSuperAdmin, async (req: Request<{ name: st
 
     const actorId = req.user!.userId;
     const before = await prisma.jobSetting.findUnique({ where: { job: definition.name }, select: { mode: true } });
-    const oldMode = shownJobMode(definition, before?.mode);
-    await writeJobMode(definition.name, mode, actorId, new Date());
+    // The RAW stored value (a job with no row was in its default mode)
+    const oldMode = before ? before.mode : definition.defaultMode;
+    const setAt = new Date();
+    await writeJobMode(definition.name, mode, actorId, setAt);
 
     logAuditEvent({
       actorId,
@@ -2532,7 +2536,14 @@ adminRouter.put('/jobs/:name', requireSuperAdmin, async (req: Request<{ name: st
       metadata: { oldMode, newMode: mode },
     });
 
-    const [job] = await listAdminJobs([definition]);
+    // The switch is written and audited: a re-read that fails never reports it as failed
+    let job;
+    try {
+      [job] = await listAdminJobs([definition]);
+    } catch (err) {
+      console.warn(`[Admin] The job ${definition.name} was switched, but the list could not be read again: ${describeCaughtError(err)}`);
+      job = jobAsWritten(definition, mode, { id: actorId, username: req.user!.username }, setAt);
+    }
     res.json({ success: true, data: job });
   } catch (err) {
     next(err);
@@ -2914,7 +2925,7 @@ adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response,
     // be able to look.
     const result = dryRun
       ? await runOrphanCleanup({ dryRun: true })
-      : await runScheduledOrphanCleanup({ force });
+      : await runJobByHand('orphan-cleanup', (run) => runScheduledOrphanCleanup({ force, run }));
     if (result.skipped === 'not-leader') {
       res.status(409).json({ success: false, error: 'An orphan sweep is already running. Try again once it finishes.' });
       return;

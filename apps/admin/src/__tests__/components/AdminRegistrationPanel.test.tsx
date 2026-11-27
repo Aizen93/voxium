@@ -15,6 +15,7 @@ vi.mock('../../services/api', () => ({ api }));
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }));
 vi.mock('../../stores/toastStore', () => ({ toast }));
 
+import { AxiosError, AxiosHeaders } from 'axios';
 import { IP_RECORD_RETENTION_DAYS } from '@voxium/shared';
 import { AdminRegistrationPanel } from '../../components/AdminRegistrationPanel';
 
@@ -66,5 +67,23 @@ describe('AdminRegistrationPanel — wording', () => {
     const text = document.body.textContent ?? '';
     expect(text).toContain('This permanently deletes 2 accounts that never verified their email address and are older than 7 days');
     expect(text).toContain(`It also deletes IP records not seen for ${IP_RECORD_RETENTION_DAYS} days.`);
+  });
+
+  it('a 409 to a run shows the sentence of the server, and any other failure keeps its words', async () => {
+    const refusal = (status: number, error: string) => new AxiosError('failed', 'ERR_BAD_REQUEST', undefined, null, {
+      status, statusText: '', headers: {}, config: { headers: new AxiosHeaders() }, data: { success: false, error },
+    });
+    await render();
+    const runNow = () => buttons().find((b) => b.textContent?.includes('Run now'))!;
+    const confirm = () => buttons().find((b) => b.textContent === 'Run cleanup')!;
+    api.post.mockRejectedValueOnce(refusal(409, 'This job is switched off'));
+    await act(async () => { runNow().click(); });
+    await act(async () => { confirm().click(); });
+    expect(toast.error).toHaveBeenLastCalledWith('This job is switched off');
+
+    api.post.mockRejectedValueOnce(refusal(500, 'Internal server error'));
+    await act(async () => { runNow().click(); });
+    await act(async () => { confirm().click(); });
+    expect(toast.error).toHaveBeenLastCalledWith('Failed to run the hygiene sweep');
   });
 });

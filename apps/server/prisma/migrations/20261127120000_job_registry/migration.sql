@@ -55,8 +55,9 @@
 -- (the server image's entrypoint applies it before the server starts). A
 -- server OLDER than this migration runs on the schema after it unaffected: it
 -- never reads the two tables. A server NEWER than it, started on a database
--- without it, keeps every job running: a job's mode that cannot be read is
--- its default mode (on), with one warning per job per hour, and a run that
+-- without it, keeps every job running: the missing settings table reads as
+-- the default mode (on), with one warning per job per hour (a mode that
+-- cannot be read for any other reason skips that tick), and a run that
 -- cannot be recorded is not recorded (one warning per job per hour); nothing
 -- is switched and nothing is recorded until the migration is in, and the
 -- admin Jobs page answers an error.

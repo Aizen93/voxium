@@ -122,7 +122,7 @@ function scheduleNext(afterRun: boolean) {
  *  `force` lifts the proportional bound only (never the absolute ceiling) and
  *  is reachable from the admin endpoint alone — the scheduler never passes it.
  *  `run` (the job registry's handle, utils/jobs.ts) is given by the scheduler
- *  alone and told the lock's answer, a refusal and the counts. */
+ *  and by the admin trigger, and told the lock's answer, a refusal and the counts. */
 export async function runScheduledOrphanCleanup(opts: { force?: boolean; run?: JobRun } = {}): Promise<OrphanSweepResult> {
   const owner = lockToken();
   let claimed: string | null;

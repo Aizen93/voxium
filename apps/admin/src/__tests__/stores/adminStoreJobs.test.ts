@@ -19,8 +19,8 @@ import { toast } from '../../stores/toastStore';
 function job(over: Partial<AdminJob> = {}): AdminJob {
   return {
     name: 'session-sweep', title: 'Session sweep', description: 'd', schedule: { kind: 'interval', seconds: 21600 }, scheduleText: 's',
-    switchable: true, notSwitchableReason: null, supportsCountOnly: false, defaultMode: 'on', mode: 'on', setAt: null, setBy: null,
-    lastRun: null, lastFailure: null, nextRunAt: null, overdue: false, ...over,
+    switchable: true, notSwitchableReason: null, supportsCountOnly: false, defaultMode: 'on', mode: 'on', modeUnrunnable: false, setAt: null, setBy: null,
+    lastRun: null, lastFailure: null, nextRunAt: null, overdue: false, neverRecorded: false, ...over,
   };
 }
 function run(id: number): AdminJobRun {
@@ -56,6 +56,47 @@ describe('adminStore — jobs', () => {
     expect(useAdminStore.getState().jobs).toEqual([job()]);
     expect(useAdminStore.getState().jobsError).toBe(true);
     expect(error).toHaveBeenCalledWith('Failed to fetch jobs:', 'Internal server error');
+    error.mockRestore();
+  });
+
+  it('a list answered after a later request was sent is not applied, and neither is one answered before a switch\'s answer', async () => {
+    const answers: Array<(v: unknown) => void> = [];
+    api.get.mockImplementation(() => new Promise((resolve) => { answers.push(resolve); }));
+    const first = useAdminStore.getState().fetchJobs();
+    const second = useAdminStore.getState().fetchJobs();
+    answers[1]({ data: { data: [job({ title: 'newer' })] } });
+    await second;
+    answers[0]({ data: { data: [job({ title: 'older' })] } });
+    await first;
+    expect(useAdminStore.getState().jobs![0].title).toBe('newer');
+
+    // a list asked for before a switch, answered after the switch's answer
+    useAdminStore.setState({ jobs: [job()] });
+    const beforeSwitch = useAdminStore.getState().fetchJobs();
+    api.put.mockResolvedValue({ data: { data: job({ mode: 'off' }) } });
+    await useAdminStore.getState().setJobMode('session-sweep', 'off');
+    answers[2]({ data: { data: [job({ mode: 'on' })] } });
+    await beforeSwitch;
+    expect(useAdminStore.getState().jobs![0].mode).toBe('off');
+
+    // a list asked for after the switch's answer is applied
+    const afterSwitch = useAdminStore.getState().fetchJobs();
+    answers[3]({ data: { data: [job({ mode: 'off', title: 'fresh' })] } });
+    await afterSwitch;
+    expect(useAdminStore.getState().jobs![0].title).toBe('fresh');
+  });
+
+  it('a stale list that fails neither reports an error nor logs', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const rejects: Array<(e: unknown) => void> = [];
+    api.get.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejects.push(reject); }));
+    const stale = useAdminStore.getState().fetchJobs();
+    api.get.mockResolvedValueOnce({ data: { data: [job()] } });
+    await useAdminStore.getState().fetchJobs();
+    rejects[0](refusal(500, 'late failure'));
+    await stale;
+    expect(useAdminStore.getState().jobsError).toBe(false);
+    expect(error).not.toHaveBeenCalled();
     error.mockRestore();
   });
 

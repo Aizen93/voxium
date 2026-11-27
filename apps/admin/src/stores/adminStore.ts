@@ -30,6 +30,9 @@ let serverWebhooksFetchSeq = 0;
 // A job's history: a first page asked again while an earlier one is out (a
 // row closed and opened, a switch) must not be overwritten by the older answer
 const jobRunsFetchSeq = new Map<string, number>();
+// The job list: one number, bumped when a list is ASKED for and when a switch is ANSWERED, so
+// an answer older than a later request, or older than a switch's answer, is not applied
+let jobsSeq = 0;
 
 /** One job's history as the Jobs page holds it: newest first, then each page appended. */
 export interface JobRunsState {
@@ -977,10 +980,13 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   fetchJobs: async () => {
+    const seq = ++jobsSeq;
     try {
       const { data } = await api.get('/admin/jobs');
+      if (seq !== jobsSeq) return;
       set({ jobs: data.data as AdminJob[], jobsError: false });
     } catch (err) {
+      if (seq !== jobsSeq) return;
       set({ jobsError: true });
       console.error('Failed to fetch jobs:', logMessage(err));
     }
@@ -1022,7 +1028,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       console.error('Failed to switch the job:', logMessage(err));
       return false;
     }
-    // The answer is the job as the list shows it
+    // The answer is the job as the list shows it, and newer than any list asked for before it
+    jobsSeq += 1;
     set((state) => ({ jobs: state.jobs ? state.jobs.map((j) => (j.name === job.name ? job : j)) : state.jobs }));
     return true;
   },

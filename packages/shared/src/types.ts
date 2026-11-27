@@ -1403,6 +1403,8 @@ export interface AdminJob {
   supportsCountOnly: boolean;
   defaultMode: JobMode;
   mode: JobMode;
+  /** The stored mode is one this server cannot run the job in: the job does not run (`mode` reads `off`). */
+  modeUnrunnable: boolean;
   /** When an administrator last set the mode, and who (null once that account is deleted). */
   setAt: string | null;
   setBy: { id: string; username: string } | null;
@@ -1412,6 +1414,8 @@ export interface AdminJob {
   nextRunAt: string | null;
   /** The last run started more than twice the longest gap its records can have ago (never for a job that is off). */
   overdue: boolean;
+  /** A switchable job that is on and has no recorded run yet (not overdue). */
+  neverRecorded: boolean;
 }
 
 /** GET /admin/jobs/:name/runs: newest first; `nextCursor` is the `before` of the next page. */

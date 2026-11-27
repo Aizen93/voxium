@@ -152,12 +152,14 @@ describe('GET /admin/jobs', () => {
       supportsCountOnly: false,
       defaultMode: 'on',
       mode: 'on',
+      modeUnrunnable: false,
       setAt: null,
       setBy: null,
       lastRun: null,
       lastFailure: null,
       nextRunAt: null,
       overdue: false,
+      neverRecorded: true,
     });
     const presence = res.body.data.find((j: { name: string }) => j.name === 'presence-reaper');
     expect(presence).toMatchObject({ switchable: false, notSwitchableReason: expect.stringContaining('online for ever') });
@@ -183,7 +185,44 @@ describe('GET /admin/jobs', () => {
     const byName = Object.fromEntries(res.body.data.map((j: { name: string }) => [j.name, j]));
     expect(byName['report-retention']).toMatchObject({ mode: 'off', setAt: '2026-11-26T10:00:00.000Z', setBy: { id: 'superadmin-1', username: 'root' }, nextRunAt: null });
     expect(byName['presence-reaper'].mode).toBe('on');
+    // a row stored for a job that cannot be switched is ignored: no "set by" line for a reaper either
+    expect(byName['presence-reaper']).toMatchObject({ setAt: null, setBy: null, modeUnrunnable: false });
     expect(prismaMock.jobSetting.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { job: { in: JOBS.map((j) => j.name) } } }));
+  });
+
+  it.each([
+    ['count on a job without a count mode', 'count'],
+    ['a word this server does not know', 'paused'],
+  ])('tells the truth about %s: shown as not running (off), flagged unrunnable, no next slot, never "on"', async (_name, stored) => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 27, 5, 10, 0), toFake: ['Date'] });
+    prismaMock.jobSetting.findMany.mockResolvedValue([
+      { job: 'report-retention', mode: stored, setAt: new Date('2026-11-26T10:00:00.000Z'), setBy: { id: 'superadmin-1', username: 'root' } },
+    ]);
+    const res = await request(app).get('/api/v1/admin/jobs').set('Authorization', `Bearer ${admin}`);
+    const job = res.body.data.find((j: { name: string }) => j.name === 'report-retention');
+    expect(job).toMatchObject({ mode: 'off', modeUnrunnable: true, nextRunAt: null, overdue: false, setBy: { id: 'superadmin-1', username: 'root' } });
+    const others = res.body.data.filter((j: { name: string }) => j.name !== 'report-retention');
+    expect(others.every((j: { modeUnrunnable: boolean }) => j.modeUnrunnable === false)).toBe(true);
+  });
+
+  it('a switchable job that is on with no recorded run is flagged neverRecorded, not overdue; one with a run, one that is off and a reaper are not', async () => {
+    lastRuns([run({ job: 'session-sweep', startedAt: new Date(), finishedAt: new Date() })], []);
+    prismaMock.jobSetting.findMany.mockResolvedValue([{ job: 'report-retention', mode: 'off', setAt: new Date(), setBy: null }]);
+    const res = await request(app).get('/api/v1/admin/jobs').set('Authorization', `Bearer ${admin}`);
+    const byName = Object.fromEntries(res.body.data.map((j: { name: string }) => [j.name, j]));
+    expect(byName['orphan-cleanup']).toMatchObject({ neverRecorded: true, overdue: false });
+    expect(byName['session-sweep'].neverRecorded).toBe(false);
+    expect(byName['report-retention'].neverRecorded).toBe(false);
+    expect(byName['presence-reaper'].neverRecorded).toBe(false);
+  });
+
+  it('checks a stored summary against the keys the job DECLARES: a row holding an undeclared key leaves its summary out', async () => {
+    lastRuns([run({ summary: { sessions: 2, redemptions: 1, orphaned: 5 } })], []);
+    const res = await request(app).get('/api/v1/admin/jobs').set('Authorization', `Bearer ${admin}`);
+    expect(res.body.data.find((j: { name: string }) => j.name === 'session-sweep').lastRun.summary).toBeNull();
+    lastRuns([run({ summary: { sessions: 2, redemptions: 1 } })], []);
+    const again = await request(app).get('/api/v1/admin/jobs').set('Authorization', `Bearer ${admin}`);
+    expect(again.body.data.find((j: { name: string }) => j.name === 'session-sweep').lastRun.summary).toEqual({ sessions: 2, redemptions: 1 });
   });
 
   it('gives each job its last run and its last failure, read by one DISTINCT ON statement each', async () => {
@@ -326,6 +365,28 @@ describe('PUT /admin/jobs/:name', () => {
     prismaMock.jobSetting.findUnique.mockResolvedValue({ mode: 'off' });
     await put('report-retention', { mode: 'on' });
     expect(logAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ targetId: 'report-retention', metadata: { oldMode: 'off', newMode: 'on' } }));
+  });
+
+  it('audits the RAW stored value as the old mode, one this server cannot run included', async () => {
+    prismaMock.jobSetting.findUnique.mockResolvedValue({ mode: 'count' });
+    await put('report-retention', { mode: 'on' });
+    expect(logAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ metadata: { oldMode: 'count', newMode: 'on' } }));
+  });
+
+  it('answers 200 with the job built from what it knows when the re-read fails after the write, and logs one warning', async () => {
+    vi.useFakeTimers({ now: new Date('2026-11-27T12:00:00.000Z'), toFake: ['Date'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    prismaMock.jobSetting.findMany.mockRejectedValue(new Error('db went away'));
+    const res = await put('session-sweep', { mode: 'off' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.jobSetting.upsert).toHaveBeenCalledTimes(1);
+    expect(logAuditEvent).toHaveBeenCalledTimes(1);
+    expect(res.body.data).toMatchObject({
+      name: 'session-sweep', mode: 'off', modeUnrunnable: false, setAt: '2026-11-27T12:00:00.000Z',
+      setBy: { id: 'superadmin-1', username: 'superadmin-1' }, lastRun: null, lastFailure: null, nextRunAt: null, overdue: false, neverRecorded: false,
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('session-sweep');
   });
 
   it('refuses an administrator who is not a superadmin, and writes nothing', async () => {

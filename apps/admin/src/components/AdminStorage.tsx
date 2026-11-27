@@ -5,6 +5,8 @@ import { AdminStatCard } from './AdminStatCard';
 import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { toast } from '../stores/toastStore';
+import axios from 'axios';
+import { apiErrorMessage } from '../utils/apiError';
 import { ORPHAN_GRACE_DAYS } from '@voxium/shared';
 import type { StorageTopUploader } from '@voxium/shared';
 
@@ -92,8 +94,9 @@ export function AdminStorage() {
       } else {
         toast.success(`Cleaned up ${result.deleted} of ${result.found} orphaned files`);
       }
-    } catch {
-      toast.error('Failed to cleanup orphans');
+    } catch (err) {
+      // A 409 is the server's own answer (a sweep already running, or the job switched off): say it
+      toast.error(axios.isAxiosError(err) && err.response?.status === 409 ? apiErrorMessage(err, 'Failed to cleanup orphans') : 'Failed to cleanup orphans');
     }
     setShowCleanup(false);
   };

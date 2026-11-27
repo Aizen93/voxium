@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { AdminJob, AdminJobRun } from '@voxium/shared';
-import { mount, click, choose, deferred, getByRole, queryByRole, queryAllByRole, bodyText, flush, type Mounted } from '../helpers/dom';
+import { mount, click, keyDown, deferred, getByRole, queryByRole, queryAllByRole, bodyText, flush, type Mounted } from '../helpers/dom';
 
 /**
  * The Jobs page: one card per job of the server's registry, with its
@@ -40,8 +40,8 @@ function job(over: Partial<AdminJob> = {}): AdminJob {
   return {
     name: 'session-sweep', title: 'Session sweep', description: 'Deletes the sign-in sessions that have ended. Switched off, ended sessions stay in the database.',
     schedule: { kind: 'interval', seconds: 21600 }, scheduleText: 'Every 6 hours', switchable: true, notSwitchableReason: null,
-    supportsCountOnly: false, defaultMode: 'on', mode: 'on', setAt: null, setBy: null,
-    lastRun: run(), lastFailure: null, nextRunAt: null, overdue: false, ...over,
+    supportsCountOnly: false, defaultMode: 'on', mode: 'on', modeUnrunnable: false, setAt: null, setBy: null,
+    lastRun: run(), lastFailure: null, nextRunAt: null, overdue: false, neverRecorded: false, ...over,
   };
 }
 
@@ -66,7 +66,13 @@ const ORPHANS = job({
 
 let view: Mounted;
 const cardOf = (name: string) => document.body.querySelector(`[data-job="${name}"]`) as HTMLElement;
-const modeSelect = (title: string) => queryByRole('combobox', `Mode of ${title}`) as HTMLSelectElement | null;
+const modeGroup = (title: string) => queryByRole('group', `Mode of ${title}`);
+/** The button of the mode control of a job, by its label ("Switch off", "Switch on", "Count only"). */
+const modeButton = (title: string, label: string) => {
+  const hits = Array.from(modeGroup(title)?.querySelectorAll('button') ?? []).filter((b) => b.textContent === label);
+  return hits[0] as HTMLButtonElement | undefined;
+};
+const inDialog = (label: string) => Array.from(getByRole('dialog').querySelectorAll('button')).find((b) => b.textContent === label) as HTMLButtonElement;
 // the helper's roles do not include a native table: found by its accessible name
 const runsTable = (title: string) => document.body.querySelector(`table[aria-label="Runs of ${title}"]`) as HTMLTableElement | null;
 
@@ -109,7 +115,8 @@ describe('AdminJobs — the list', () => {
   it('says when a job never ran, when it is off, and who switched it', async () => {
     await renderJobs();
     const card = cardOf('orphan-cleanup');
-    expect(card.textContent).toContain('No run recorded yet');
+    expect(card.textContent).toContain('No run recorded');
+    expect(card.querySelector('[data-testid="job-never-recorded"]')).toBeNull();
     expect(card.textContent).toContain('None while off');
     expect(card.textContent).toContain(`Set to off by root on ${new Date('2026-11-26T10:00:00.000Z').toLocaleString()}`);
   });
@@ -120,6 +127,14 @@ describe('AdminJobs — the list', () => {
     expect(cardOf('report-retention').querySelector('[data-testid="job-mark"]')!.textContent).toContain('Last run failed');
     expect(cardOf('presence-reaper').querySelector('[data-testid="job-mark"]')!.textContent).toContain('Overdue');
     expect(cardOf('session-sweep').querySelector('[data-testid="job-mark"]')).toBeNull();
+  });
+
+  it('a job that is on and has no recorded run says "No run recorded yet" in the place of its last run, and is not marked overdue', async () => {
+    store.jobs = [job({ name: 'report-retention', title: 'Report retention', lastRun: null, neverRecorded: true })];
+    await renderJobs();
+    const card = cardOf('report-retention');
+    expect(card.querySelector('[data-testid="job-never-recorded"]')!.textContent).toBe('No run recorded yet');
+    expect(card.querySelector('[data-testid="job-mark"]')).toBeNull();
   });
 
   it('says it is loading before the first answer, and that the list failed when it did', async () => {
@@ -141,11 +156,14 @@ describe('AdminJobs — the list', () => {
 });
 
 describe('AdminJobs — the switch', () => {
-  it('a superadmin gets a control on every job that can be switched, and none on one that cannot, with its reason', async () => {
+  it('a superadmin gets a button for every mode a job can be switched to, the mode it is in as text, and no control on a job that cannot be switched, with its reason', async () => {
     await renderJobs();
-    expect(modeSelect('Session sweep')!.value).toBe('on');
-    expect(modeSelect('Object-store orphan sweep')!.value).toBe('off');
-    expect(modeSelect('Presence reaper')).toBeNull();
+    expect(document.body.querySelectorAll('select')).toHaveLength(0);
+    expect(cardOf('session-sweep').querySelector('[data-testid="job-mode"]')!.textContent).toBe('On');
+    expect(Array.from(modeGroup('Session sweep')!.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Switch off']);
+    expect(cardOf('orphan-cleanup').querySelector('[data-testid="job-mode"]')!.textContent).toBe('Off');
+    expect(Array.from(modeGroup('Object-store orphan sweep')!.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Switch on']);
+    expect(modeGroup('Presence reaper')).toBeNull();
     expect(cardOf('presence-reaper').querySelector('[data-testid="job-mode-reason"]')!.textContent)
       .toBe('Cannot be switched. It keeps presence true: switched off, people would stay online for ever.');
   });
@@ -153,7 +171,8 @@ describe('AdminJobs — the switch', () => {
   it('an administrator who is not a superadmin gets no control at all, and the reason', async () => {
     viewer.role = 'admin';
     await renderJobs();
-    expect(queryAllByRole('combobox')).toHaveLength(0);
+    expect(queryAllByRole('group')).toHaveLength(0);
+    expect(queryAllByRole('button', /^Switch |^Count only$/)).toHaveLength(0);
     expect(cardOf('session-sweep').querySelector('[data-testid="job-mode-reason"]')!.textContent).toBe('Only a super admin can switch a job.');
     expect(cardOf('session-sweep').textContent).toContain('On');
     expect(cardOf('presence-reaper').querySelector('[data-testid="job-mode-reason"]')!.textContent).toContain('Cannot be switched.');
@@ -162,20 +181,45 @@ describe('AdminJobs — the switch', () => {
   it('offers count only on a job that has it', async () => {
     store.jobs = [SESSIONS, { ...RETENTION, supportsCountOnly: true }];
     await renderJobs();
-    const options = (title: string) => Array.from(modeSelect(title)!.options).map((o) => o.textContent);
-    expect(options('Session sweep')).toEqual(['Off', 'On']);
-    expect(options('Report retention')).toEqual(['Off', 'Count only', 'On']);
+    const labels = (title: string) => Array.from(modeGroup(title)!.querySelectorAll('button')).map((b) => b.textContent);
+    expect(labels('Session sweep')).toEqual(['Switch off']);
+    // on now: the buttons are the other two modes
+    expect(labels('Report retention')).toEqual(['Switch off', 'Count only']);
+  });
+
+  it('a stored mode this server cannot run the job in is shown as not running, for a superadmin and for the others', async () => {
+    store.jobs = [job({ mode: 'off', modeUnrunnable: true, setAt: '2026-11-26T10:00:00.000Z', setBy: { id: 'sa', username: 'root' } })];
+    await renderJobs();
+    expect(cardOf('session-sweep').querySelector('[data-testid="job-mode"]')!.textContent).toBe('Stored mode cannot be run by this server: not running');
+    expect(modeButton('Session sweep', 'Switch off')).toBeDefined();
+    expect(modeButton('Session sweep', 'Switch on')).toBeDefined();
+    view.unmount();
+    view = mount();
+    viewer.role = 'admin';
+    await renderJobs();
+    expect(cardOf('session-sweep').querySelector('[data-testid="job-mode"]')!.textContent).toBe('Stored mode cannot be run by this server: not running');
+  });
+
+  it('there is no list to move through: an arrow key on a control opens nothing, only a click on a button does', async () => {
+    await renderJobs();
+    const button = modeButton('Session sweep', 'Switch off')!;
+    await keyDown(button, 'ArrowDown');
+    await keyDown(button, 'ArrowUp');
+    expect(queryByRole('dialog')).toBeNull();
+    expect(store.setJobMode).not.toHaveBeenCalled();
+    await click(button);
+    expect(getByRole('dialog')).toBeTruthy();
   });
 
   it('a change asks for confirmation first; Cancel sends nothing and the control keeps the mode', async () => {
     await renderJobs();
-    await choose(modeSelect('Session sweep')!, 'off');
+    await click(modeButton('Session sweep', 'Switch off')!);
     const dialog = getByRole('dialog');
     expect(dialog.textContent).toContain('Switch "Session sweep" off');
     expect(dialog.textContent).toContain('stops running on every node from its next tick');
     expect(dialog.textContent).toContain('Switched off, ended sessions stay in the database.');
     expect(store.setJobMode).not.toHaveBeenCalled();
-    expect(modeSelect('Session sweep')!.value).toBe('on');
+    expect(cardOf('session-sweep').querySelector('[data-testid="job-mode"]')!.textContent).toBe('On');
     await click(getByRole('button', 'Cancel'));
     expect(queryByRole('dialog')).toBeNull();
     expect(store.setJobMode).not.toHaveBeenCalled();
@@ -183,8 +227,8 @@ describe('AdminJobs — the switch', () => {
 
   it('confirming sends the job and the mode, says so and closes the dialog', async () => {
     await renderJobs();
-    await choose(modeSelect('Session sweep')!, 'off');
-    await click(getByRole('button', 'Switch off'));
+    await click(modeButton('Session sweep', 'Switch off')!);
+    await click(inDialog('Switch off'));
     await flush();
     expect(store.setJobMode).toHaveBeenCalledTimes(1);
     expect(store.setJobMode).toHaveBeenCalledWith('session-sweep', 'off');
@@ -194,8 +238,8 @@ describe('AdminJobs — the switch', () => {
 
   it('switching a job back on is a primary action, not a destructive one', async () => {
     await renderJobs();
-    await choose(modeSelect('Object-store orphan sweep')!, 'on');
-    const confirm = getByRole('button', 'Switch on');
+    await click(modeButton('Object-store orphan sweep', 'Switch on')!);
+    const confirm = inDialog('Switch on');
     expect(confirm.className).toContain('bg-vox-accent-primary');
     await click(confirm);
     await flush();
@@ -205,21 +249,21 @@ describe('AdminJobs — the switch', () => {
   it('a refused change says nothing of success, changes nothing on screen and leaves the dialog open', async () => {
     store.setJobMode.mockResolvedValue(false);
     await renderJobs();
-    await choose(modeSelect('Session sweep')!, 'off');
-    await click(getByRole('button', 'Switch off'));
+    await click(modeButton('Session sweep', 'Switch off')!);
+    await click(inDialog('Switch off'));
     await flush();
     expect(store.setJobMode).toHaveBeenCalledTimes(1);
     expect(toast.success).not.toHaveBeenCalled();
     expect(getByRole('dialog')).toBeTruthy();
-    expect(modeSelect('Session sweep')!.value).toBe('on');
+    expect(cardOf('session-sweep').querySelector('[data-testid="job-mode"]')!.textContent).toBe('On');
   });
 
   it('while the change runs, the dialog cannot be confirmed twice', async () => {
     const pending = deferred<boolean>();
     store.setJobMode.mockReturnValue(pending.promise);
     await renderJobs();
-    await choose(modeSelect('Session sweep')!, 'off');
-    await click(getByRole('button', 'Switch off'));
+    await click(modeButton('Session sweep', 'Switch off')!);
+    await click(inDialog('Switch off'));
     await click(getByRole('button', 'Processing...'));
     expect(store.setJobMode).toHaveBeenCalledTimes(1);
     pending.resolve(true);
