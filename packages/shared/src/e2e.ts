@@ -107,7 +107,7 @@ export const E2E_LIMITS = {
    */
   MESSAGE_KEY_STORE_CAP: 20_000,
   /**
-   * Max message-key backups per POST /e2e/message-keys batch (plan §4.4). A
+   * Max message-key backups per POST /e2e/message-keys batch (docs/e2e-always-on-plan.md §4.4). A
    * device catching up seals every inbound Megolm session it holds, so the
    * upload is naturally bulk — but each entry is an independent upsert, so the
    * batch also bounds how much work one request can ask of the database.

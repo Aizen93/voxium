@@ -611,7 +611,7 @@ function SecurityTab() {
       {/* Account-level encryption: devices, linking, recovery key, identity
           reset. It is here rather than behind a DM's lock badge because all of
           it has always been account-scoped — one device list, one account key,
-          one backup (plan §4.5). */}
+          one backup (docs/e2e-always-on-plan.md §4.5). */}
       <E2EDevicesSection />
       {/* Last, and visually separate: the one action in here that cannot be
           undone. */}

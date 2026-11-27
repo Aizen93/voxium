@@ -5,8 +5,7 @@ import { useDiscoveryStore } from '../stores/discoveryStore';
 import { toast } from '../stores/toastStore';
 
 /**
- * The four server-discovery socket events, as MainLayout registers them
- * (docs/local/server-discovery-plan.html, "Socket handlers in MainLayout").
+ * The four server-discovery socket events, as MainLayout registers them.
  *
  * Two are user-targeted (the requester's `user:{id}` room): join_approved
  * and join_declined. Two reach the moderator audience: join_request and

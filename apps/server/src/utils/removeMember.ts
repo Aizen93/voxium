@@ -87,8 +87,7 @@ async function waitForHeldWebhookRows(userId: string, serverId: string): Promise
  * The ONE path that removes a member from a server: the kick route's teardown
  * lifted out, plus the ban upsert, the join-request delete and the inline
  * memberCount decrement in its transaction. The leave route calls it without
- * a ban so a voluntary leave keeps the count right too
- * (docs/local/server-discovery-plan.html).
+ * a ban so a voluntary leave keeps the count right too.
  *
  * The caller has already verified the membership exists (and whatever
  * permission or hierarchy rule applies) for a fast answer; the transaction

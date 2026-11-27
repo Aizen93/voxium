@@ -582,7 +582,7 @@ describe('e2eStore own-device actions', () => {
   });
 });
 
-describe('e2eStore device linking (plan §4.3)', () => {
+describe('e2eStore device linking', () => {
   const LINKED = {
     deviceId: 'laptop',
     createdAt: '2026-07-30T09:15:00.000Z',

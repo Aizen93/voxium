@@ -8,7 +8,7 @@ import i18n from '../i18n';
 /**
  * The server's member directory for a picker: everyone in the space, paged
  * by the signed keyset cursor the directory already uses, filtered
- * server-side by the search text (CLAUDE.md "Server Membership").
+ * server-side by the search text.
  *
  * The rows the client holds are only a slice of a big server (the People
  * panel: online members above PEOPLE_MAX_ROWS), so a picker listing them

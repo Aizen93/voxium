@@ -85,7 +85,7 @@ const ChannelSendRefusedNotice = forwardRef<HTMLDivElement, { takeFocus: boolean
 export function MessageInput({ channelId, conversationId, channelName, placeholderName }: Props) {
   const { t } = useTranslation();
   const { sendMessage, sendDMMessage, replyingTo, clearReplyingTo } = useChatStore();
-  // Every DM is encrypted (plan §4.2), so "this is a DM" IS "encrypt this":
+  // Every DM is encrypted (docs/e2e-always-on-plan.md §4.2), so "this is a DM" IS "encrypt this":
   // attachment bytes are encrypted client-side before upload. Deliberately not
   // gated on the conversation being in the store — a not-yet-loaded row must
   // not silently downgrade a send the server would reject anyway.

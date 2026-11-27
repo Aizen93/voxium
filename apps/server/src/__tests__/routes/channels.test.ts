@@ -44,7 +44,11 @@ vi.mock('../../utils/permissionCalculator', () => ({
 }));
 
 // Secure-channel lifecycle (the DELETE route hands secure channels to it)
-const mockDeleteSecureChannel = vi.fn().mockResolvedValue(true);
+// It runs the caller's decision as the real helper does (once early, then once per attempt)
+const mockDeleteSecureChannel = vi.fn(async (_channelId: string, authorize?: () => Promise<void>) => {
+  if (authorize) await authorize();
+  return true;
+});
 vi.mock('../../utils/secureChannelLifecycle', () => ({
   deleteSecureChannel: (...args: unknown[]) => mockDeleteSecureChannel(...args),
 }));
@@ -1286,6 +1290,135 @@ describe('Channel Routes', () => {
       expect(mockEmit).toHaveBeenCalledWith('channel:deleted', { channelId: 'ch-1', serverId: 'srv-1' });
     });
 
+    describe('a delete that loses a deadlock is tried again', () => {
+      const deadlock = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+      const KEY = 'attachments/ch-1/clmsg1-photo.png';
+      let warn: ReturnType<typeof vi.spyOn>;
+
+      beforeEach(() => {
+        warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'owner' });
+        prismaMock.channel.findFirst.mockReset().mockResolvedValue({ id: 'ch-1', name: 'general', type: 'text', serverId: 'srv-1', secure: false });
+        prismaMock.channel.delete.mockReset().mockResolvedValue({});
+        prismaMock.webhook.count.mockResolvedValue(0);
+        prismaMock.messageAttachment.findMany.mockReset().mockResolvedValueOnce([{ id: 'a1', s3Key: KEY }]).mockResolvedValue([]);
+        mockDeleteMultipleFromS3.mockReset().mockImplementation(async (keys: string[]) => keys.length);
+        mockBroadcastChannelVoiceCleanup.mockReset().mockResolvedValue(undefined);
+      });
+      afterEach(() => warn.mockRestore());
+
+      const deleteChannel = () => request(app)
+        .delete('/api/v1/servers/srv-1/channels/ch-1')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      const deletedNotices = () => mockEmit.mock.calls.filter(([event]) => event === 'channel:deleted');
+
+      it('a deadlock on the first attempt, then success: deletes twice at the database, announces and deletes files once', async () => {
+        prismaMock.channel.delete.mockRejectedValueOnce(deadlock());
+
+        const res = await deleteChannel();
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(2);
+        expect(deletedNotices()).toHaveLength(1);
+        expect(mockDeleteMultipleFromS3).toHaveBeenCalledTimes(1);
+        expect(mockBroadcastChannelVoiceCleanup).toHaveBeenCalledTimes(1);
+        expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith([KEY]);
+      });
+
+      it('makes every check again before the second attempt', async () => {
+        prismaMock.channel.delete.mockRejectedValueOnce(deadlock());
+        mockHasChannelPermission.mockClear();
+
+        await deleteChannel();
+
+        // early check + one per attempt
+        expect(mockHasChannelPermission).toHaveBeenCalledTimes(3);
+        expect(prismaMock.channel.findFirst).toHaveBeenCalledTimes(3);
+      });
+
+      it('a caller whose permission is gone at the second attempt is refused: nothing more is deleted or announced', async () => {
+        prismaMock.channel.delete.mockRejectedValueOnce(deadlock());
+        // the early check passes, the first attempt's check passes, the second's refuses
+        mockHasServerPermission.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+        const res = await deleteChannel();
+
+        expect(res.status).toBe(403);
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(1);
+        expect(deletedNotices()).toHaveLength(0);
+        expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      });
+
+      it('a caller who can no longer see the channel at the second attempt gets the missing-channel answer', async () => {
+        prismaMock.channel.delete.mockRejectedValueOnce(deadlock());
+        mockHasChannelPermission.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+        const res = await deleteChannel();
+
+        expect(res.status).toBe(404);
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(1);
+        expect(deletedNotices()).toHaveLength(0);
+      });
+
+      it('a channel gone at the second attempt answers 404 Channel and announces nothing', async () => {
+        prismaMock.channel.delete.mockRejectedValueOnce(deadlock());
+        prismaMock.channel.findFirst
+          .mockResolvedValueOnce({ id: 'ch-1', secure: false, createdById: null, server: { ownerId: 'owner-1' } })
+          .mockResolvedValueOnce({ id: 'ch-1', secure: false })
+          .mockResolvedValueOnce(null);
+
+        const res = await deleteChannel();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Channel not found');
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(1);
+        expect(deletedNotices()).toHaveLength(0);
+        expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      });
+
+      it('a row gone between the check and the delete (P2025) answers 404 Channel, not 500', async () => {
+        prismaMock.channel.delete.mockRejectedValueOnce(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+
+        const res = await deleteChannel();
+
+        expect(res.status).toBe(404);
+        expect(prismaMock.channel.delete).toHaveBeenCalledTimes(1);
+        expect(deletedNotices()).toHaveLength(0);
+      });
+
+      it('an error that is not a conflict is not retried', async () => {
+        const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          prismaMock.channel.delete.mockRejectedValueOnce(new Error('db gone'));
+
+          const res = await deleteChannel();
+
+          expect(res.status).toBe(500);
+          expect(prismaMock.channel.delete).toHaveBeenCalledTimes(1);
+          expect(deletedNotices()).toHaveLength(0);
+        } finally {
+          errorLog.mockRestore();
+        }
+      });
+
+      it('a conflict on every attempt surfaces as before: 500, nothing announced, no file deleted', async () => {
+        const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          prismaMock.channel.delete.mockRejectedValue(deadlock());
+
+          const res = await deleteChannel();
+
+          expect(res.status).toBe(500);
+          // the first attempt and two retries
+          expect(prismaMock.channel.delete).toHaveBeenCalledTimes(3);
+          expect(deletedNotices()).toHaveLength(0);
+          expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+        } finally {
+          errorLog.mockRestore();
+        }
+      });
+    });
+
     describe('attachment files', () => {
       const KEYS = ['attachments/ch-1/clmsg1-photo.png', 'attachments/ch-1/clmsg2-notes.txt'];
 
@@ -1496,7 +1629,7 @@ describe('Channel Routes', () => {
         .set('Authorization', `Bearer ${token}`);
 
       expect(res.status).toBe(200);
-      expect(mockDeleteSecureChannel).toHaveBeenCalledWith('sec-1');
+      expect(mockDeleteSecureChannel).toHaveBeenCalledWith('sec-1', expect.any(Function));
       expect(prismaMock.serverMember.findUnique).toHaveBeenCalledWith({
         where: { userId_serverId: { userId: 'creator-9', serverId: 'srv-1' } },
         select: { userId: true },
@@ -1527,7 +1660,8 @@ describe('Channel Routes', () => {
 
       expect(res.status).toBe(403);
       expect(res.body.error).toBe('You do not have permission to delete channels');
-      expect(mockDeleteSecureChannel).not.toHaveBeenCalled();
+      // the helper's early decision refused: nothing was deleted
+      await expect(mockDeleteSecureChannel.mock.results[0].value).rejects.toBeDefined();
     });
 
     it('DELETE: a creator who is no longer a member of the space has no lever over the channel', async () => {
@@ -1548,7 +1682,8 @@ describe('Channel Routes', () => {
       // what this caller gets for an id that does not exist
       expect(res.status).toBe(403);
       expect(res.body.error).toBe('You do not have permission to delete channels');
-      expect(mockDeleteSecureChannel).not.toHaveBeenCalled();
+      // the helper's early decision refused: nothing was deleted
+      await expect(mockDeleteSecureChannel.mock.results[0].value).rejects.toBeDefined();
     });
 
     it('DELETE: the server owner can delete-by-id (opaque moderation lever)', async () => {
@@ -1563,7 +1698,7 @@ describe('Channel Routes', () => {
         .set('Authorization', `Bearer ${token}`);
 
       expect(res.status).toBe(200);
-      expect(mockDeleteSecureChannel).toHaveBeenCalledWith('sec-1');
+      expect(mockDeleteSecureChannel).toHaveBeenCalledWith('sec-1', expect.any(Function));
     });
 
     it('DELETE: an ADMINISTRATOR can delete-by-id; a mere MANAGE_CHANNELS holder gets 404', async () => {
@@ -1576,7 +1711,7 @@ describe('Channel Routes', () => {
         .delete('/api/v1/servers/srv-1/channels/sec-1')
         .set('Authorization', `Bearer ${token}`);
       expect(res.status).toBe(200);
-      expect(mockDeleteSecureChannel).toHaveBeenCalledWith('sec-1');
+      expect(mockDeleteSecureChannel).toHaveBeenCalledWith('sec-1', expect.any(Function));
 
       // MANAGE_CHANNELS alone → indistinguishable from nonexistent
       mockDeleteSecureChannel.mockClear();
@@ -1585,7 +1720,139 @@ describe('Channel Routes', () => {
         .delete('/api/v1/servers/srv-1/channels/sec-1')
         .set('Authorization', `Bearer ${token}`);
       expect(res.status).toBe(404);
-      expect(mockDeleteSecureChannel).not.toHaveBeenCalled();
+      // the helper's early decision refused: nothing was deleted
+      await expect(mockDeleteSecureChannel.mock.results[0].value).rejects.toBeDefined();
+    });
+
+    describe('DELETE: the decision is made again on each attempt, with the answers of a first refusal', () => {
+      const CREATOR = { id: 'creator-9', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0) };
+      const del = (userId = 'user-1') => request(app)
+        .delete('/api/v1/servers/srv-1/channels/sec-1')
+        .set('Authorization', `Bearer ${makeToken({ userId })}`);
+      /** The helper's retry: the decision runs for the early check, attempt one, attempt two */
+      const runThreeTimes = async (_id: string, authorize?: () => Promise<void>) => {
+        await authorize!();
+        await authorize!();
+        await authorize!();
+        return true;
+      };
+
+      beforeEach(() => {
+        prismaMock.channel.findFirst.mockResolvedValue(secureCh);
+        mockComputeServerPermissions.mockResolvedValue(0n);
+      });
+
+      it('the owner keeps the lever on every attempt, without reading the creator rows', async () => {
+        prismaMock.user.findUnique.mockResolvedValue({ ...CREATOR, id: 'owner-7' });
+        mockDeleteSecureChannel.mockImplementationOnce(runThreeTimes);
+
+        const res = await del('owner-7');
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.channel.findFirst).toHaveBeenCalledTimes(4); // the branch read + three decisions
+        expect(prismaMock.channelMember.findUnique).not.toHaveBeenCalled();
+      });
+
+      it('an ADMINISTRATOR keeps the lever on every attempt', async () => {
+        mockComputeServerPermissions.mockResolvedValue(Permissions.ADMINISTRATOR);
+        mockDeleteSecureChannel.mockImplementationOnce(runThreeTimes);
+
+        const res = await del();
+
+        expect(res.status).toBe(200);
+        expect(mockComputeServerPermissions).toHaveBeenCalledTimes(3);
+      });
+
+      it('the creator keeps the lever on every attempt: membership and creator row are read each time', async () => {
+        prismaMock.user.findUnique.mockResolvedValue(CREATOR);
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'creator-9' });
+        prismaMock.channelMember.findUnique.mockResolvedValue({ isCreator: true });
+        mockDeleteSecureChannel.mockImplementationOnce(runThreeTimes);
+
+        const res = await del('creator-9');
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.serverMember.findUnique).toHaveBeenCalledTimes(3);
+        expect(prismaMock.channelMember.findUnique).toHaveBeenCalledTimes(3);
+      });
+
+      it('a creator whose creator row is gone at a later attempt gets the answer of a first refusal: 403 without MANAGE_CHANNELS', async () => {
+        prismaMock.user.findUnique.mockResolvedValue(CREATOR);
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'creator-9' });
+        prismaMock.channelMember.findUnique.mockResolvedValueOnce({ isCreator: true }).mockResolvedValue(null);
+        mockHasServerPermission.mockResolvedValue(false);
+        mockDeleteSecureChannel.mockImplementationOnce(runThreeTimes);
+
+        const res = await del('creator-9');
+
+        expect(res.status).toBe(403);
+        expect(res.body.error).toBe('You do not have permission to delete channels');
+      });
+
+      it('the same creator holding MANAGE_CHANNELS gets 404, as on a first refusal', async () => {
+        prismaMock.user.findUnique.mockResolvedValue(CREATOR);
+        prismaMock.serverMember.findUnique.mockResolvedValue(null);
+        mockHasServerPermission.mockResolvedValue(true);
+        mockDeleteSecureChannel.mockImplementationOnce(runThreeTimes);
+
+        const res = await del('creator-9');
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Channel not found');
+      });
+
+      it('a channel that is gone at a later attempt answers 404 Channel', async () => {
+        mockComputeServerPermissions.mockResolvedValue(Permissions.ADMINISTRATOR);
+        prismaMock.channel.findFirst.mockResolvedValueOnce(secureCh).mockResolvedValueOnce(secureCh).mockResolvedValue(null);
+        mockDeleteSecureChannel.mockImplementationOnce(runThreeTimes);
+
+        const res = await del();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Channel not found');
+      });
+
+      it('a caller with no lever and no MANAGE_CHANNELS gets the nonexistent-id answer (403) when the channel is gone between the first read and the decision', async () => {
+        mockHasServerPermission.mockResolvedValue(false);
+        prismaMock.channel.findFirst.mockResolvedValueOnce(secureCh).mockResolvedValue(null);
+
+        const res = await del();
+
+        expect(res.status).toBe(403);
+        expect(res.body.error).toBe('You do not have permission to delete channels');
+      });
+
+      it('the same with MANAGE_CHANNELS but no lever: 404, as for a nonexistent id', async () => {
+        mockHasServerPermission.mockResolvedValue(true);
+        prismaMock.channel.findFirst.mockResolvedValueOnce(secureCh).mockResolvedValue(null);
+
+        const res = await del();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Channel not found');
+      });
+
+      it('a row the helper found gone answers 404 Channel, not a 200', async () => {
+        mockComputeServerPermissions.mockResolvedValue(Permissions.ADMINISTRATOR);
+        mockDeleteSecureChannel.mockImplementationOnce(async () => false);
+
+        const res = await del();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Channel not found');
+      });
+
+      it('an id that is not in the space (or not there) keeps the nonexistent-id answer: 403 without MANAGE_CHANNELS, 404 with it', async () => {
+        prismaMock.channel.findFirst.mockResolvedValue(null);
+        mockHasServerPermission.mockResolvedValue(false);
+        let res = await del();
+        expect(res.status).toBe(403);
+
+        mockHasServerPermission.mockResolvedValue(true);
+        res = await del();
+        expect(res.status).toBe(404);
+        expect(mockDeleteSecureChannel).not.toHaveBeenCalled();
+      });
     });
 
     it('PUT /reorder: a secure channel id fails like a foreign id', async () => {

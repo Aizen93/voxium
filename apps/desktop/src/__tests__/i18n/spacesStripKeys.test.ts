@@ -6,7 +6,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /**
- * The spaces strip's own strings (issue 6, docs/local/spaces-dm-navigation-plan.html):
+ * The spaces strip's own strings:
  * the Messages tab and zone caption, the Spaces caption, New space, the notch
  * and the pin of the folded strip, and the Appearance setting that folds it.
  * A missing translation does not throw — i18next renders the raw key where

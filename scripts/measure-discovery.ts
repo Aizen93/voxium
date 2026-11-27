@@ -1,13 +1,12 @@
 #!/usr/bin/env tsx
 /**
  * Measure every query shape the directory serves against a seeded throwaway
- * database (docs/local/server-discovery-plan.html, "Measurement, part of step
- * 2"): 20 runs each, p50/p95, plus EXPLAIN (ANALYZE, BUFFERS) for one run of
+ * database: 20 runs each, p50/p95, plus EXPLAIN (ANALYZE, BUFFERS) for one run of
  * each shape. FAILS if any plan contains a sequential scan of servers,
  * server_members or messages.
  *
  *   DATABASE_URL=postgresql://.../voxium_discovery_load DISCOVERY_LOAD_DB=1 \
- *     npx tsx scripts/measure-discovery.ts [report.md]
+ *     npx tsx scripts/measure-discovery.ts [report-file]
  *
  * The Prisma queries are the ROUTE's queries (same where/orderBy/cursor/take),
  * captured through the client's query log so the plans are for the SQL Prisma

@@ -5,7 +5,7 @@ import type { Conversation, User } from '@voxium/shared';
 
 /**
  * Account-level E2E management moved out of the DM lock badge and into
- * Settings → Security (plan §4.5). Two things have to hold for that move to be
+ * Settings → Security (docs/e2e-always-on-plan.md §4.5). Two things have to hold for that move to be
  * a move rather than a removal:
  *
  *  1. Something can point at the Security tab — `openSettings('security')` —

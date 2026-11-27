@@ -20,8 +20,7 @@ interface Props {
 const SEARCH_DEBOUNCE_MS = 300;
 
 /**
- * Explore: the public directory (docs/local/server-discovery-plan.html,
- * "The shape of it"). A search box (3+ characters, debounced), tag chips, a
+ * Explore: the public directory. A search box (3+ characters, debounced), tag chips, a
  * sort select, a Featured row on the first unsearched page, the ranked grid,
  * Load more on the cursor, and one footer line about the daily figures.
  *

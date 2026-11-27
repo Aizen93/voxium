@@ -254,7 +254,7 @@ serverRouter.get('/:serverId/limits', async (req: Request<{ serverId: string }>,
 
 // ─── Member lists ───────────────────────────────────────────────────────────
 //
-// Two views, two contracts (CLAUDE.md "Server Membership"):
+// Two views, two contracts:
 //   GET /:serverId/members          the DIRECTORY (Server settings → Members):
 //                                   server-paged by keyset cursor, searched and
 //                                   filtered server-side — the one place every

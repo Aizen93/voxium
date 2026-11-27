@@ -29,7 +29,7 @@ describe('index.html SEO contract', () => {
 
   it('claims only what the app does', () => {
     // No camera video exists (voice is microphone-only, video is screen
-    // sharing; camera support is still a roadmap item), only DMs and
+    // sharing), only DMs and
     // invite-only secure channels (text and voice) are end-to-end encrypted,
     // and the server does keep what running the service needs (account
     // e-mail, IP records): "no data collection" was not true, "no data
@@ -86,14 +86,13 @@ describe('index.html SEO contract', () => {
     expect(html).toMatch(/location\.pathname !== '\/'/);
   });
 
-  it('makes no pricing promises the roadmap cannot keep', () => {
-    // ROADMAP.md §9: free for individuals, resource-based tiers for big
-    // communities, self-hosting always free. "Free forever" / "nothing to
-    // buy" style claims contradict the planned Plus and server tiers.
+  it('makes no pricing promises it cannot keep', () => {
+    // The landing copy never promises that everything stays free for ever:
+    // "Free forever" / "nothing to buy" style claims are not ours to make.
     expect(html).not.toMatch(/forever|nothing to buy|always be free|free for everyone/i);
   });
 
-  // The claims the roadmap cannot keep (ROADMAP.md §9). Used for the locale
+  // The claims the landing copy must not make. Used for the locale
   // scan below; the shell check above keeps its own literal.
   const FORBIDDEN_CLAIMS = /forever|nothing to buy|always be free|free for everyone|no subscriptions?\b/i;
 
@@ -105,8 +104,8 @@ describe('index.html SEO contract', () => {
 
   it('the translated landing copy makes no such promise either', () => {
     // The shell check above never saw the locale strings: "No subscription."
-    // sat in landing.cta.subtitle for months while the roadmap planned Plus
-    // and server tiers. The English source is the one translators follow.
+    // sat in landing.cta.subtitle for months. The English source is the one
+    // translators follow.
     const en = JSON.parse(readFileSync(resolve(ROOT, 'src/i18n/locales/en.json'), 'utf8')) as { landing: unknown };
     const flat = (v: unknown): string[] => (typeof v === 'string' ? [v] : v && typeof v === 'object' ? Object.values(v as object).flatMap(flat) : []);
     const texts = flat(en.landing);

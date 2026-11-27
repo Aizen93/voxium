@@ -20,7 +20,7 @@ type PurgeClient = Pick<
  * order `deleteAccountRows` (utils/accountDeletion.ts) documents for this step.
  *
  * The two backup tables — `E2EKeyBackup` (spec §15) and `E2EMessageKeyBackup`
- * (plan §4.4) — are deliberately ABSENT: both hold rows designed to outlive
+ * (docs/e2e-always-on-plan.md §4.4) — are deliberately ABSENT: both hold rows designed to outlive
  * every device, so both were given a real FK cascade instead, and the delete
  * this function runs alongside already reclaims them. Adding them here would
  * be dead code that reads like the cascade is not trusted.
