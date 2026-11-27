@@ -382,6 +382,28 @@ export interface DeletedAccountConversations {
 }
 
 /**
+ * Step 1 of settleConversationsOfDeletedAccount on its own: every
+ * conversation row of the account FOR UPDATE, in id order, in one statement,
+ * its sides read under the lock. An account deletion that keeps the
+ * account's moderation reports (flag account_deletion_keeps_reports) runs it
+ * first, settles the reports, and only then runs the settlement below, whose
+ * own lock then meets rows the transaction already holds: no report row is
+ * then written twice in the transaction (see deleteAccountRows,
+ * utils/accountDeletion.ts).
+ */
+export async function lockConversationsOfAccount(
+  tx: Prisma.TransactionClient,
+  userId: string,
+): Promise<Array<{ id: string; user1Id: string | null; user2Id: string | null }>> {
+  return tx.$queryRaw<Array<{ id: string; user1Id: string | null; user2Id: string | null }>>`
+    SELECT id, user1_id AS "user1Id", user2_id AS "user2Id"
+    FROM conversations
+    WHERE user1_id = ${userId} OR user2_id = ${userId}
+    ORDER BY id
+    FOR UPDATE`;
+}
+
+/**
  * What an account deletion does with every direct conversation of the
  * account, inside the deletion's transaction (utils/accountDeletion.ts; the
  * registration hygiene sweep runs it too, for each stale unverified account
@@ -429,12 +451,7 @@ export async function settleConversationsOfDeletedAccount(
   userId: string,
   opts: { keep: boolean },
 ): Promise<DeletedAccountConversations> {
-  const conversations = await tx.$queryRaw<Array<{ id: string; user1Id: string | null; user2Id: string | null }>>`
-    SELECT id, user1_id AS "user1Id", user2_id AS "user2Id"
-    FROM conversations
-    WHERE user1_id = ${userId} OR user2_id = ${userId}
-    ORDER BY id
-    FOR UPDATE`;
+  const conversations = await lockConversationsOfAccount(tx, userId);
   const result: DeletedAccountConversations = { kept: [], deleted: [], attachmentKeys: [] };
   if (conversations.length === 0) return result;
 

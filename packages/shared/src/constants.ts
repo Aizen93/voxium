@@ -380,6 +380,12 @@ export const JOIN_REQUEST_PENDING_TTL_DAYS = 30;
 
 /** IpRecord rows unseen for this long are deleted by the registration hygiene sweep. */
 export const IP_RECORD_RETENTION_DAYS = 180;
+/**
+ * A moderation report filed by or about an account that was deleted is kept
+ * this many calendar months after that deletion (the earlier one when both
+ * sides are gone), then deleted by the report retention job.
+ */
+export const REPORT_RETENTION_MONTHS = 12;
 /** The orphan sweep never deletes an unreferenced S3 object younger than this. */
 export const ORPHAN_GRACE_DAYS = 7;
 /** Lifetime of the trusted-device token a successful TOTP sign-in issues (skips TOTP on that device). */

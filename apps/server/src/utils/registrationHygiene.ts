@@ -25,6 +25,7 @@ import { purgeExpiredSignupState } from '../services/signupService';
 import { isFeatureEnabled } from './featureFlags';
 import { retryOnTransactionConflict } from './transactionRetry';
 import { settleConversationsOfDeletedAccount, type DeletedAccountConversations } from './conversationLifecycle';
+import { settleReportsOfDeletedAccounts } from './reportSettlement';
 import { announceConversationsOfDeletedAccount } from './accountDeletion';
 import { deleteAttachmentBlobs } from './attachmentBlobs';
 import { IP_RECORD_RETENTION_DAYS } from '@voxium/shared';
@@ -233,6 +234,9 @@ function describeBatchError(err: unknown): { name: string; code: string | null }
  * account: what happens to the other person's conversation is the same
  * whatever those keys say. The flag that decides it
  * (account_deletion_keeps_conversations) is read once for the whole sweep.
+ * Their moderation reports are settled the same way, by the step and the
+ * flag (account_deletion_keeps_reports, read once too) an account deletion
+ * uses (settleReportsOfDeletedAccounts, utils/reportSettlement.ts).
  *
  * THE GUARDS, and what each reads: unverified (`users.email_verified`), older
  * than the cutoff (`users.created_at`), role `user` (`users.role`), owning no
@@ -251,12 +255,26 @@ function describeBatchError(err: unknown): { name: string; code: string | null }
  *     granted: the locked accounts that own a space NOW are dropped;
  *  3. every conversation of the accounts left, FOR UPDATE in id order, in one
  *     statement (one order for all of them, as an account deletion takes its
- *     own), then the conversation step for each account that is a side of
- *     one: flag off, each conversation deleted with its rows; flag on, kept
- *     for the other person read-only (an account that never wrote leaves
- *     only its side, set NULL, and the other person's hidden side unhidden)
- *     or deleted when nobody can reach it;
- *  4. the accounts deleted by id, every guard repeated once more; a count
+ *     own);
+ *  4. with account_deletion_keeps_reports on, BETWEEN that lock and anything
+ *     done in a conversation: the reports filed by or about every account
+ *     left, in ONE call for the batch (an account need not be a side of any
+ *     conversation to be reported), the messages they name, then the
+ *     reports, each in id order, then the update that unlinks the accounts
+ *     (a report between two accounts of the batch settled once, both sides)
+ *     and leaves no link a later statement of the batch would set NULL. The
+ *     order of an account deletion's own (accounts, conversations' lock,
+ *     messages and reports, conversations' outcome), documented on
+ *     deleteAccountRows with the rule it keeps: no report row is written
+ *     twice in the transaction. Flag off: no statement, and the delete below
+ *     takes the reports through the cascade, as before;
+ *  5. the conversation step for each account that is a side of one (its own
+ *     lock meets rows the batch already holds): flag off, each conversation
+ *     deleted with its rows; flag on, kept for the other person read-only
+ *     (an account that never wrote leaves only its side, set NULL, and the
+ *     other person's hidden side unhidden) or deleted when nobody can reach
+ *     it;
+ *  6. the accounts deleted by id, every guard repeated once more; a count
  *     other than the number of accounts the step settled throws
  *     (SweepDeleteMismatchError) and rolls the whole batch back, so no guard
  *     added later can commit a settlement without its delete.
@@ -273,6 +291,7 @@ async function deleteStaleUnverifiedAccounts(
   cutoff: Date,
 ): Promise<{ deletedIds: string[]; failedBatch: { name: string; code: string | null } | null }> {
   const keepConversations = isFeatureEnabled('account_deletion_keeps_conversations');
+  const keepReports = isFeatureEnabled('account_deletion_keeps_reports');
   const deletedIds: string[] = [];
   for (let at = 0; at < ids.length; at += SWEEP_ACCOUNTS_PER_TRANSACTION) {
     const batch = ids.slice(at, at + SWEEP_ACCOUNTS_PER_TRANSACTION);
@@ -303,6 +322,11 @@ async function deleteStaleUnverifiedAccounts(
           WHERE user1_id = ANY(${eligible}::text[]) OR user2_id = ANY(${eligible}::text[])
           ORDER BY id
           FOR UPDATE`;
+        // Their reports, for every account left, between the conversations'
+        // lock above and what is done in them below (step 4), so that no
+        // report row is written twice in the batch
+        if (keepReports) await settleReportsOfDeletedAccounts(tx, eligible);
+
         const sideIds = new Set(sides.flatMap((c) => [c.user1Id, c.user2Id]));
         for (const userId of eligible) {
           if (!sideIds.has(userId)) continue;

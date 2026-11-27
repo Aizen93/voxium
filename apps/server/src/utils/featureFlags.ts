@@ -43,6 +43,16 @@ const DEFAULTS = {
   // reduced to placeholders. OFF until the Privacy Policy has given its
   // notice of the change.
   account_deletion_keeps_conversations: { name: 'account_deletion_keeps_conversations', label: 'Conversations Outlive Deleted Accounts', description: 'When an account is deleted, the other person keeps each direct conversation read-only, with the deleted account\'s messages reduced to placeholders (off: the conversation is deleted for both)', enabled: false },
+  // What an account deletion does with the moderation reports filed by or
+  // about the account (utils/accountDeletion.ts and the registration hygiene
+  // sweep, read once per deletion before its transaction). OFF: they are
+  // deleted with the account, through the foreign keys' cascade, as before.
+  // ON: each is kept without its link to the account (a reported account by
+  // its username, the reported content as filed), its deletion marked
+  // (utils/reportSettlement.ts), and deleted REPORT_RETENTION_MONTHS after
+  // that deletion (utils/reportRetention.ts, which runs whatever this flag
+  // says). OFF until the Privacy Policy has given its notice of the change.
+  account_deletion_keeps_reports: { name: 'account_deletion_keeps_reports', label: 'Reports Outlive Deleted Accounts', description: 'When an account is deleted, the moderation reports filed by or about it are kept without the link to the account, with the reported username and content, for a fixed period (off: they are deleted with the account)', enabled: false },
   // What a renewal does with a refresh token that a renewal already replaced,
   // presented after the grace window, or an older one (services/
   // sessionService.ts, read at each such presentation). OFF (observe): the

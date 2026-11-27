@@ -35,7 +35,17 @@ vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: unkno
 // conversationLifecycle.test.ts and on a real database): here its place in
 // the transaction, the flag it is given and what follows its commit
 const settle = vi.hoisted(() => vi.fn());
-vi.mock('../../utils/conversationLifecycle', () => ({ settleConversationsOfDeletedAccount: (...a: unknown[]) => settle(...a) }));
+// With the flag account_deletion_keeps_reports on, the step's own first
+// statement (the conversations' lock) also runs on its own, before the reports
+const lockConversations = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/conversationLifecycle', () => ({
+  settleConversationsOfDeletedAccount: (...a: unknown[]) => settle(...a),
+  lockConversationsOfAccount: (...a: unknown[]) => lockConversations(...a),
+}));
+// The reports step (its statements are tested in reportSettlement.test.ts):
+// here whether it runs, where, with what
+const settleReports = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/reportSettlement', () => ({ settleReportsOfDeletedAccounts: (...a: unknown[]) => settleReports(...a) }));
 const flag = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/featureFlags', () => ({ isFeatureEnabled: (...a: unknown[]) => flag(...a) }));
 const endCall = vi.hoisted(() => vi.fn());
@@ -125,6 +135,8 @@ beforeEach(() => {
   prismaMock.messageAttachment.findMany.mockImplementation(async () => { order.push('attachment-keys'); return []; });
   deleteMultipleFromS3.mockImplementation(async (keys: string[]) => { order.push('s3:attachments'); return keys.length; });
   settle.mockImplementation(() => lazyStatement(order, 'conversations', { kept: [], deleted: [], attachmentKeys: [] }));
+  settleReports.mockImplementation(() => lazyStatement(order, 'reports', 0));
+  lockConversations.mockImplementation(() => lazyStatement(order, 'lock:conversations', []));
   flag.mockImplementation((name: string) => { order.push(`flag:${name}`); return false; });
   endCall.mockImplementation(async () => []);
   io.to.mockImplementation(() => ({ emit: io.emit }));
@@ -142,7 +154,7 @@ describe('deleteUserAccount', () => {
     // without its avatar)
     expect(order.filter((step) => !step.startsWith('count:'))).toEqual([
       'left:s-1', 'left:s-2', 'force:logout', 'disconnect:local', 'disconnect',
-      'flag:account_deletion_keeps_conversations',
+      'flag:account_deletion_keeps_conversations', 'flag:account_deletion_keeps_reports',
       'attachment-keys', 'attachment-keys',
       'txn:start', 'memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'registry:since', 'conversations', 'delete', 'txn:end',
       'force:logout', 'disconnect:local', 'disconnect', 'secure:notices', 's3',
@@ -750,8 +762,7 @@ describe('deleteUserAccount', () => {
       try {
         await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
 
-        expect(flag).toHaveBeenCalledTimes(1);
-        expect(flag).toHaveBeenCalledWith('account_deletion_keeps_conversations');
+        expect(flag.mock.calls.filter(([name]) => name === 'account_deletion_keeps_conversations')).toHaveLength(1);
         expect(order.indexOf('flag:account_deletion_keeps_conversations')).toBeLessThan(order.indexOf('txn:start'));
         // both attempts got the same rule
         expect(settle).toHaveBeenCalledTimes(2);
@@ -886,6 +897,83 @@ describe('deleteUserAccount', () => {
       expect(io.emit).not.toHaveBeenCalledWith('dm:conversation:read_only', expect.anything());
       expect(endCall).not.toHaveBeenCalled();
       expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the reports filed by or about the account (#48)', () => {
+    const reportsFlag = (on: boolean) => flag.mockImplementation((name: string) => {
+      order.push(`flag:${name}`);
+      return name === 'account_deletion_keeps_reports' ? on : false;
+    });
+
+    it('with the flag off the transaction issues exactly the statements, in exactly the order, it issued before the step existed', async () => {
+      reportsFlag(false);
+
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+      expect(settleReports).not.toHaveBeenCalled();
+      expect(lockConversations).not.toHaveBeenCalled();
+      const inTx = order.slice(order.indexOf('txn:start') + 1, order.indexOf('txn:end'));
+      expect(inTx).toEqual(['memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'registry:since', 'conversations', 'delete']);
+      // the raw statements of the transaction: the two member-row deletes and
+      // the account lock, nothing more
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(3);
+    });
+
+    it('with the flag on the step runs on the transaction\'s client for the account, under the account row lock, BETWEEN the conversations\' lock and what is done in them, so no report row is written twice (recorded when each runs)', async () => {
+      reportsFlag(true);
+
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+      expect(lockConversations).toHaveBeenCalledTimes(1);
+      expect(lockConversations).toHaveBeenCalledWith(expect.objectContaining({ $queryRaw: prismaMock.$queryRaw }), 'u-1');
+      expect(settleReports).toHaveBeenCalledTimes(1);
+      expect(settleReports).toHaveBeenCalledWith(expect.objectContaining({ $queryRaw: prismaMock.$queryRaw }), ['u-1']);
+      const inTx = order.slice(order.indexOf('txn:start') + 1, order.indexOf('txn:end'));
+      expect(inTx).toEqual(['memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'registry:since', 'lock:conversations', 'reports', 'conversations', 'delete']);
+    });
+
+    it('the flag is read ONCE per deletion, before the transaction, and the step runs again in every attempt', async () => {
+      reportsFlag(true);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.user.delete.mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: 'P2034' }));
+      try {
+        await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+        expect(flag.mock.calls.filter(([name]) => name === 'account_deletion_keeps_reports')).toHaveLength(1);
+        expect(order.indexOf('flag:account_deletion_keeps_reports')).toBeLessThan(order.indexOf('txn:start'));
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        // the aborted attempt ran it, and the committed one ran it again, after its own account lock
+        expect(order.filter((step) => step === 'reports')).toHaveLength(2);
+        const second = order.lastIndexOf('txn:start');
+        expect(order.indexOf('lock:account', second)).toBeLessThan(order.indexOf('lock:conversations', second));
+        expect(order.indexOf('lock:conversations', second)).toBeLessThan(order.indexOf('reports', second));
+        expect(order.indexOf('reports', second)).toBeLessThan(order.indexOf('conversations', second));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('an account found gone under its row lock settles no report', async () => {
+      reportsFlag(true);
+      prismaMock.$queryRaw.mockImplementation(async () => []);
+
+      await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).rejects.toMatchObject({ statusCode: 404 });
+
+      expect(settleReports).not.toHaveBeenCalled();
+    });
+
+    it('a step that throws fails the deletion: the account and its reports survive, and nothing is announced after it', async () => {
+      reportsFlag(true);
+      settleReports.mockImplementation(async () => { throw new Error('db gone'); });
+
+      await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).rejects.toThrow('db gone');
+
+      expect(prismaMock.user.delete).not.toHaveBeenCalled();
+      expect(announceSecure).not.toHaveBeenCalled();
+      expect(deleteFromS3).not.toHaveBeenCalled();
+      // only the first revocation (before the transaction) went out
+      expect(io.disconnectSockets).toHaveBeenCalledTimes(1);
     });
   });
 

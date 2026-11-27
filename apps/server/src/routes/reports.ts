@@ -37,6 +37,10 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
     // Who the report is against. For a server report the owner is resolved
     // below from the listing itself; the client never names them.
     let reportedUserId: string;
+    // The reported account's username, kept on the report: a report outlives
+    // the account it concerns once that account is deleted (#48), and is then
+    // shown by this name
+    let reportedUsername: string;
     if (type === 'server') {
       if (!req.body.serverId || typeof req.body.serverId !== 'string') {
         throw new BadRequestError('serverId is required for server reports');
@@ -71,7 +75,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
       // a hidden server exists.
       const server = await prisma.server.findUnique({
         where: { id: req.body.serverId as string },
-        select: { id: true, name: true, description: true, ownerId: true, discoveryListed: true },
+        select: { id: true, name: true, description: true, ownerId: true, discoveryListed: true, owner: { select: { username: true } } },
       });
       if (!server || !server.discoveryListed) throw new NotFoundError('Server');
       if (server.ownerId === userId) throw new BadRequestError('You cannot report your own server');
@@ -85,6 +89,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
       }
 
       reportedUserId = server.ownerId;
+      reportedUsername = server.owner.username;
       serverId = server.id;
       // The listing as the reporter saw it — name and description snapshot,
       // so an edit after the report does not erase what was reported.
@@ -98,9 +103,10 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
       // Validate reported user exists
       const reportedUser = await prisma.user.findUnique({
         where: { id: reportedUserId },
-        select: { id: true },
+        select: { id: true, username: true },
       });
       if (!reportedUser) throw new NotFoundError('User');
+      reportedUsername = reportedUser.username;
 
       // Check for existing pending report from this user against the same target
       const existingReport = await prisma.report.findFirst({
@@ -193,6 +199,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
           reason,
           reporterId: userId,
           reportedUserId,
+          reportedUsername,
           messageId: type === 'message' ? messageId : null,
           messageContent,
           contentSource,

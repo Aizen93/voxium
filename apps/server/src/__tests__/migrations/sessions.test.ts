@@ -36,7 +36,7 @@ function model(name: string): string {
 describe('the sessions migration', () => {
   it('sorts after the last migration shipped before it', () => {
     const folders = readdirSync(MIGRATIONS).filter((f) => /^\d{14}_/.test(f)).sort();
-    expect(folders[folders.length - 1]).toBe(NAME);
+    expect(folders).toContain(NAME);
     expect(folders.indexOf(NAME)).toBeGreaterThan(folders.indexOf('20261116120000_conversation_lifecycle_expand'));
   });
 
