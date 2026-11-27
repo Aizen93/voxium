@@ -13,6 +13,7 @@ import { useDiscoveryStore, resetDiscoveryModuleState } from './discoveryStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
 import { resetUndecryptedRows } from '../services/e2e/undecryptedRows';
 import { resetClearedHistory } from '../services/dmClearedHistory';
+import { resetCacheSweep } from '../services/cacheSweep';
 import { stopE2EDeviceListWatch } from './e2eStore';
 import { resetServerPermissionsCache } from '../hooks/useServerPermissions';
 import { resetChannelPermissionsCache } from '../services/channelPermissionsCache';
@@ -96,6 +97,9 @@ export function resetAccountStores(): void {
   // The floors of the histories it cleared, and the purges still owed for
   // them (a pass still running applies nothing)
   resetClearedHistory();
+  // A sweep of the plaintext cache still running applies nothing more, and
+  // the next session decides afresh from the vault's record
+  resetCacheSweep();
   // Media files the leaving account played, held as blobs in memory
   resetMediaCache();
   // The deletes and versions its chat view remembered (outside the slice), and

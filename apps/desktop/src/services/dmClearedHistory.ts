@@ -57,12 +57,13 @@ import type { PlaintextPurgeEntry } from './e2e/vault';
  * (resetClearedHistory, from resetAccountStores); a pass of the account that
  * left applies nothing.
  *
- * KNOWN LIMITS: a conversation really deleted on the server (nobody could
- * reach it any more) while a device was offline leaves that device's cached
- * entries of it in its vault, unreachable from the interface (no list names
- * it again, so nothing displays or searches them). So do the removed
+ * What no list teaches: a conversation really deleted on the server (nobody
+ * could reach it any more) while a device was offline, and the removed
  * conversations beyond the DM_CLEARED_LIST_MAX newest floors, for a device
- * that missed their removal. A 2.1.x client ignores floors.
+ * that missed their removal. The device's daily sweep of its cache
+ * (services/cacheSweep.ts) asks the server about every scope it caches: a
+ * deleted conversation's entries go there, and a floor it is answered comes
+ * here like any other (source 'scope states'). A 2.1.x client ignores floors.
  *
  * No store is imported here (dmStore imports this module); the E2E service
  * and the E2E store are loaded when a purge runs.

@@ -42,6 +42,12 @@ vi.mock('../../services/sdpUtils', () => ({
   optimizeOpusSDP: vi.fn((sdp: string) => sdp),
 }));
 
+// the real sweep, its reset watched
+vi.mock('../../services/cacheSweep', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/cacheSweep')>();
+  return { ...actual, resetCacheSweep: vi.fn(actual.resetCacheSweep) };
+});
+
 vi.mock('@timephy/rnnoise-wasm', () => ({
   NoiseSuppressorWorklet_Name: 'NoiseSuppressorWorklet',
 }));
@@ -95,6 +101,7 @@ import { arrivalMark, hasDueRows, noteSessionsAvailable, noteUndecrypted, syncWi
 import { registerE2ESessionUser } from '../../services/e2e/session';
 import { clearedFloorOf, isAtOrBelowClearedFloor } from '../../services/e2e/clearedFloors';
 import { applyClearedFloor, clearedHistoryPurgesSettled } from '../../services/dmClearedHistory';
+import { resetCacheSweep } from '../../services/cacheSweep';
 import { handleMessageBulkDeleted, isPurgedWebhookMessage, UNREAD_REFRESH_DEBOUNCE_MS } from '../../services/webhookSocketHandlers';
 import type { Server, ServerMember, Conversation, Friendship, Message } from '@voxium/shared';
 
@@ -378,6 +385,12 @@ describe('resetAccountStores (HIGH-14b)', () => {
     } finally {
       registerE2ESessionUser(null);
     }
+  });
+
+  it('stops the sweep of the plaintext cache: a run still going applies nothing for the next account', () => {
+    vi.mocked(resetCacheSweep).mockClear();
+    resetAccountStores();
+    expect(resetCacheSweep).toHaveBeenCalledTimes(1);
   });
 
   it('store actions still work after a replace-reset', () => {
