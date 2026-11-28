@@ -76,7 +76,7 @@ vi.mock('../../hooks/useConnectionStatus', () => ({ useConnectionStatus: () => '
 // The user card also asks for the viewer's permissions (its nickname editor): not what these tests look at
 vi.mock('../../hooks/useServerPermissions', () => ({ useServerPermissions: () => null }));
 vi.mock('../../hooks/useLocalSpeaking', () => ({ useLocalSpeaking: () => false }));
-vi.mock('../../services/audioAnalyser', () => ({ getAudioLevel: () => 0 }));
+vi.mock('../../services/audioAnalyser', () => ({ isSpeechDetected: () => false }));
 vi.mock('../../utils/serverErrors', () => ({ getTranslatedError: () => 'err' }));
 vi.mock('../../components/voice/ConnectionQuality', () => ({ ConnectionQuality: () => null }));
 vi.mock('../../components/common/UserHoverTarget', () => ({

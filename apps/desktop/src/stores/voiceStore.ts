@@ -2,7 +2,8 @@ import { create } from 'zustand';
 import { Device } from 'mediasoup-client';
 import type { Transport, Producer, Consumer, RtpCapabilities, IceParameters, IceCandidate, DtlsParameters, RtpParameters } from 'mediasoup-client/types';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused, onNoiseSuppressionFailure, getSpeakingDetectionMode, resendSpeaking } from '../services/audioAnalyser';
+import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused, onNoiseSuppressionFailure, getSpeakingDetectionMode, resendSpeaking, getSpeakingDecider } from '../services/audioAnalyser';
+import { GATE_LOOKAHEAD_MS } from '../services/noiseGate';
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
 import { teardownComposite, prepareComposite, attachCompositeProducerHandles } from '../services/screenComposite';
@@ -816,6 +817,11 @@ async function produceMicOn(sendTransport: Transport, device: Device): Promise<P
     return null;
   }
 
+  // A new mic producer: a release's pending pause was for the one before.
+  // Tidiness in practice: nothing makes a mic producer while an older one is
+  // still open, and when it fires that pause skips every producer it was not
+  // scheduled for (pauseIfStillReleased)
+  cancelPendingMicPause();
   const newProducers = new Map(state().msProducers);
   newProducers.set(producer.id, producer);
   useVoiceStore.setState({ msProducers: newProducers });
@@ -865,13 +871,101 @@ function followSpeakingWithMicProducer(speaking: boolean) {
   }
 }
 
+// ─── The mic producer's pause on a push-to-talk release ─────────────────────
+//
+// The producer's pause disables the track it sends, the gated one, at once,
+// while the audio-thread gate's look-ahead line still holds the last
+// GATE_LOOKAHEAD_MS of what was said up to the release. Under that gate the
+// pause therefore waits for the line to drain. The raw microphone is disabled
+// at the release itself (usePushToTalk), so nothing said after it is ever
+// captured: during the wait the gated track carries the end of the words,
+// then silence. The page timer (while the gate's module loads, the fallback)
+// has no look-ahead, so the pause is immediate there.
+//
+// A mute and a deafen still pause at once, and are not delayed: their pause
+// of the detection closes the gate at the same moment (its gain ramps to 0
+// over GATE_CLOSE_RAMP_MS on the delayed audio) and the server pauses the
+// producer at the SFU as soon as their voice:mute or voice:deaf arrives, as
+// before the gate had a look-ahead; a later client pause would add no more
+// than that fading ramp of what preceded the mute. A direct call needs none
+// of this: nothing disables the gated track its peers hold, and the line
+// drains to them.
+
+/**
+ * How long after a push-to-talk release the mic producer is paused under the
+ * audio-thread gate: its look-ahead plus 25 ms for what lies between the
+ * gate's output and the encoder (a render quantum, 2.9 ms at 44.1 kHz, and
+ * the 10 ms chunks a track's audio is taken in) and the page timer firing a
+ * few ms late. Waiting longer only sends silence; the delay stays well under
+ * the 150 ms after which the release's voice:mute reaches the server.
+ */
+export const PTT_RELEASE_PAUSE_DELAY_MS = GATE_LOOKAHEAD_MS + 25;
+
+/** The one pause a push-to-talk release left pending, or null. */
+let pendingMicPause: { timer: ReturnType<typeof setTimeout>; producers: Producer[]; session: number } | null = null;
+
+/**
+ * A push-to-talk release in a voice channel: pause the mic producers, after
+ * the look-ahead under the audio-thread gate, at once under the page timer.
+ * The pending pause is cancelled by the key pressed again
+ * (cancelPendingMicPause, nothing paused), a new mic producer and the
+ * session's teardown; a mute, a deafen, a server mute, a voice-mode switch
+ * and a pipeline rebuild make it immediate (pausePendingMicNow). A timer a
+ * hidden page fires late only delays the pause of a track that already
+ * carries silence.
+ */
+export function pauseMicProducersOnPushToTalkRelease(): void {
+  cancelPendingMicPause();
+  const producers = [...useVoiceStore.getState().msProducers.values()].filter((p) => isMicProducer(p) && !p.closed);
+  if (producers.length === 0) return;
+  if (getSpeakingDecider() !== 'audio-thread') {
+    for (const producer of producers) producer.pause();
+    return;
+  }
+  const session = voiceSessionGeneration;
+  const timer = setTimeout(() => {
+    if (pendingMicPause?.timer !== timer) return;
+    pendingMicPause = null;
+    pauseIfStillReleased(producers, session);
+  }, PTT_RELEASE_PAUSE_DELAY_MS);
+  pendingMicPause = { timer, producers, session };
+}
+
+/** The pending pause is dropped: nothing is paused. */
+export function cancelPendingMicPause(): void {
+  if (!pendingMicPause) return;
+  clearTimeout(pendingMicPause.timer);
+  pendingMicPause = null;
+}
+
+/** The pending pause happens now (under the same conditions as when it fires). */
+function pausePendingMicNow(): void {
+  const pending = pendingMicPause;
+  if (!pending) return;
+  cancelPendingMicPause();
+  pauseIfStillReleased(pending.producers, pending.session);
+}
+
+/** Only the producers the pause was scheduled for, still registered and open,
+ *  with the key still up, in the session it was scheduled in. The session
+ *  check is a backstop: every end of a session drops the pending pause first
+ *  (endVoiceChannelSession). */
+function pauseIfStillReleased(producers: Producer[], session: number): void {
+  const state = useVoiceStore.getState();
+  if (session !== voiceSessionGeneration || state.pttActive) return;
+  for (const producer of producers) {
+    if (!producer.closed && state.msProducers.get(producer.id) === producer) producer.pause();
+  }
+}
+
 /**
  * (Re)build noise suppression and speaking detection over `stream` for the
  * current voice session, then give the new audio to whatever already sends:
- * the mic producer (server voice, the gated stream) and the DM peers' audio
- * senders (the suppressed stream, or the raw one). It keys on what exists, not
- * on activeChannelId: a secure join builds its pipeline before it sets that,
- * and its producer, made later, reads the gated stream itself.
+ * the mic producer (server voice) and the DM peers' audio senders, both on
+ * the gated stream (the suppressed or raw one when detection could not
+ * start). It keys on what exists, not on activeChannelId: a secure join
+ * builds its pipeline before it sets that, and its producer, made later,
+ * reads the gated stream itself.
  *
  * Tracks are swapped with replaceTrack on the existing producer and sender,
  * never by producing again: the secure-voice frame transform lives on the
@@ -883,6 +977,8 @@ async function rebuildMicPipeline(stream: MediaStream, mode: 'server' | 'dm'): P
   const generation = ++micPipelineGeneration;
   const session = voiceSessionGeneration;
   const current = () => generation === micPipelineGeneration && session === voiceSessionGeneration;
+  // The old pipeline's look-ahead goes with it: a release's pause, now
+  pausePendingMicNow();
 
   setNoiseGateThreshold(useSettingsStore.getState().noiseGateThreshold);
   setNoiseSuppression(rnnoiseWanted());
@@ -892,7 +988,9 @@ async function rebuildMicPipeline(stream: MediaStream, mode: 'server' | 'dm'): P
 
   onSpeakingChange(null);
   stopSpeakingDetection();
-  // Speaking detection taps the suppressed stream (the raw one without suppression)
+  // Speaking detection and the noise gate run on the suppressed stream (the
+  // raw one without suppression); the gated stream they make is what the
+  // call sends
   startSpeakingDetection(suppressed, mode);
   if (mode === 'server') onSpeakingChange(followSpeakingWithMicProducer);
 
@@ -912,7 +1010,7 @@ async function rebuildMicPipeline(stream: MediaStream, mode: 'server' | 'dm'): P
       if (!current()) return 'superseded';
     }
   }
-  const peerTrack = (getSuppressedStream() || stream).getAudioTracks()[0];
+  const peerTrack = (getGatedStream() || getSuppressedStream() || stream).getAudioTracks()[0];
   if (peers.size > 0 && peerTrack?.readyState === 'live') {
     for (const [peerId, peerConn] of peers.entries()) {
       const audioSender = peerConn.pc.getSenders().find((s) => s.track?.kind === 'audio');
@@ -1039,11 +1137,12 @@ function createPeerInternal(
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   const peerConn: PeerConnection = { pc, makingOffer: false, pendingCandidates: [] };
 
-  // Use the best available processed stream:
-  // - DM P2P: suppressed stream (clean RNNoise pipeline: source → worklet → dest)
-  // - SFU: gated stream (suppressed + gain gate for producer pause/resume)
-  // Falls back to raw mic if neither is ready.
-  const audioStream = getSuppressedStream() || getGatedStream() || localStream;
+  // The gated stream, as a space call's producer sends: the noise gate
+  // decides what goes out (while the page timer decides, the gate's module
+  // loading or the fallback, a direct call's gain stays open on that same
+  // stream). Then the suppressed stream, then the raw mic, while no gated
+  // stream exists.
+  const audioStream = getGatedStream() || getSuppressedStream() || localStream;
   if (audioStream) {
     audioStream.getAudioTracks().forEach((track) => {
       pc.addTrack(track, audioStream);
@@ -1347,6 +1446,7 @@ function endVoiceChannelSession(
 ) {
   const { get, set } = stateAccessors;
   voiceSessionGeneration++; // cancel any in-flight join's mic acquisition
+  cancelPendingMicPause();
   const socket = getSocket();
   const { localStream, activeChannelId, localUserId } = get();
 
@@ -2195,6 +2295,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     if (userId === localUserId) {
       if (serverMuted && !get().selfMute) {
         // Force our local mute state on — pause the mic producer
+        pausePendingMicNow();
         for (const producer of get().msProducers.values()) {
           if (isMicProducer(producer)) producer.pause();
         }
@@ -2284,6 +2385,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         return;
       }
     }
+    // A mute pauses at once, never after the look-ahead (see the pending
+    // pause above): a release's pending pause happens now too
+    pausePendingMicNow();
     const isPTT = useSettingsStore.getState().voiceMode === 'push_to_talk';
 
     if (localStream) {
@@ -2319,7 +2423,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({ selfMute: newMute });
     persistVoicePrefs({ selfMute: newMute, selfDeaf: get().selfDeaf });
 
-    // Pause speaking detection processing when muted to save CPU
+    // Muted: speaking detection says "not speaking" at once and nothing more
+    // until the unmute (a space call's gate closes); the page timer also
+    // skips its work, the audio-thread gate goes on processing
     setSpeakingDetectionPaused(newMute);
   },
 
@@ -2337,6 +2443,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         return;
       }
     }
+    // As a mute: at once, and a release's pending pause now
+    pausePendingMicNow();
 
     remoteAudios.forEach((audio) => {
       audio.muted = newDeaf;
@@ -2903,9 +3011,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      // RNNoise noise suppression, then speaking detection on its output
-      // (read-only side-chain; DM calls never gate). Failing at this start,
-      // the mic is opened again with the browser's own
+      // RNNoise noise suppression, then speaking detection and the noise
+      // gate on its output, whose gated stream the call sends. Failing at
+      // this start, the mic is opened again with the browser's own
       const built = await buildJoinMicPipeline(stream, 'dm');
       // Superseded while the pipeline started — release only this join's streams
       if (built === 'superseded' || generation !== voiceSessionGeneration) {
@@ -3280,7 +3388,7 @@ async function sendNewMicIfNothingSends(stream: MediaStream, mode: 'server' | 'd
     }
     return;
   }
-  const source = getSuppressedStream() || stream;
+  const source = getGatedStream() || getSuppressedStream() || stream;
   const track = source.getAudioTracks()[0];
   if (!track || track.readyState !== 'live') return;
   for (const [peerId, peerConn] of state.peers.entries()) {
@@ -3434,6 +3542,8 @@ useSettingsStore.subscribe((state, prevState) => {
 
   const { activeChannelId, dmCallConversationId, localStream, selfMute, msProducers } = useVoiceStore.getState();
   if ((!activeChannelId && !dmCallConversationId) || !localStream) return;
+  // The mode decides the producer from here: a release's pending pause, now
+  pausePendingMicNow();
 
   const socket = getSocket();
 

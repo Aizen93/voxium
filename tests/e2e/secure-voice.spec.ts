@@ -39,6 +39,14 @@ function diagOf(page: Page): Promise<Diag | null> {
   }) as Promise<Diag | null>;
 }
 
+/** Which decider gates the page's microphone (a DEV-only hook), or null. */
+function deciderOf(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const fn = (window as unknown as { __voxSpeakingDecider?: () => string | null }).__voxSpeakingDecider;
+    return fn ? fn() : null;
+  });
+}
+
 async function okFrom(page: Page, senderUserId: string): Promise<number> {
   const diag = await diagOf(page);
   return diag?.receivers?.[senderUserId]?.ok ?? 0;
@@ -60,11 +68,12 @@ async function openServer(page: Page, serverName: string) {
   await expect(page.locator('textarea')).toBeVisible({ timeout: 30_000 });
 }
 
-// RNNoise classifies the harness's steady fake-mic tone as noise and
-// suppresses it to silence, so the 300ms silence gate pauses the producer
-// at the SFU and the frame counters starve (blocks the Firefox run; Chromium's
-// pulsed beep pattern only escapes by luck). This test is about E2E frames,
-// not noise suppression — keep the fake mic "speaking".
+// Firefox's fake microphone is a steady tone, which RNNoise classifies as
+// noise and suppresses to silence: with it on, the frame counters this test
+// reads starved. Chromium's fake microphone beeps for about 100 to 130 ms
+// every 500 ms, which opens the noise gate with noise suppression on or off.
+// This test is about E2E frames, not noise suppression: it is off for every
+// member who joins the voice channel.
 function disableNoiseSuppression(page: Page) {
   return page.addInitScript(() => {
     window.localStorage.setItem('voxium_settings', JSON.stringify({ enableNoiseSuppression: false }));
@@ -156,14 +165,21 @@ test.describe('Secure voice channels — E2E audio through the SFU', () => {
     await expect(page.locator(PANEL)).toBeVisible({ timeout: 20_000 });
     await expect(page.locator(LOCK)).toBeVisible({ timeout: 10_000 });
     await expect(page.locator(`${PANEL} button[title="Share Screen"]`)).toHaveCount(0);
+    // The audio-thread gate, not the page timer (its fallback, which would
+    // hide a gate that never loaded), gates alice's microphone
+    await expect.poll(() => deciderOf(page), { timeout: 15_000 }).toBe('audio-thread');
 
     await pageC.locator(CHANNEL).click();
     await expect(pageC.locator(PANEL)).toBeVisible({ timeout: 20_000 });
     await expect(pageC.locator(LOCK)).toBeVisible({ timeout: 10_000 });
 
     // ── 4. Keyed members actually DECRYPT each other's audio ──
-    // The fake mic produces a tone, speaking detection keeps producers live,
-    // and the frame worker's ok-counters prove end-to-end decryption.
+    // The fake mic's sound opens each member's noise gate and its "speaking"
+    // resumes the producer at the SFU: on Firefox the steady tone keeps it
+    // open; on Chromium every beep opens it and it closes about a third of a
+    // second after the beep, shortly before the next, so frames flow for most
+    // of every half second. The frame worker's ok-counters prove end-to-end
+    // decryption.
     await expect.poll(() => okFrom(page, dataC.user.id), { timeout: 30_000 }).toBeGreaterThan(0);
     await expect.poll(() => okFrom(pageC, dataA.user.id), { timeout: 30_000 }).toBeGreaterThan(0);
 

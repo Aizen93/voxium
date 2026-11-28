@@ -1874,3 +1874,98 @@ describe('switching the input device during a call (#190)', () => {
     });
   });
 });
+
+// ─── A direct call sends the gated track ─────────────────────────────────────
+
+describe('a direct call sends the gated microphone track, as a space call does', () => {
+  /** A pipeline whose suppression answers `suppressed`, and whose detector makes a gated stream over what it is started on. */
+  function pipelineStreams() {
+    const suppressed = fakeStream('suppressed');
+    aa.applyNoiseSuppression.mockImplementation(async () => {
+      aa.state.suppressed = suppressed;
+      return suppressed;
+    });
+    aa.startSpeakingDetection.mockImplementation((stream: MediaStream, mode: 'server' | 'dm' = 'server') => {
+      aa.state.mode = mode;
+      aa.state.gated = fakeStream(`gated-${stream.id}`);
+    });
+    return suppressed;
+  }
+  /** A rebuild of the running call's pipeline (the noise-suppression switch). */
+  const rebuild = () => useSettingsStore.getState().setEnableNoiseSuppression(false);
+  const gatedTrack = () => aa.state.gated!.getAudioTracks()[0];
+
+  it('a new peer is given the gated track, not the suppressed one', () => {
+    const addTrack = vi.fn();
+    const pc = { addTrack, getSenders: () => [], close: vi.fn() };
+    vi.stubGlobal('RTCPeerConnection', vi.fn(function FakePeerConnection() { return pc; }));
+    try {
+      const gated = fakeStream('gated');
+      aa.state.gated = gated;
+      aa.state.suppressed = fakeStream('suppressed');
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', localStream: fakeStream('raw') });
+
+      useVoiceStore.getState().createDMPeer('peer-1', false);
+
+      expect(addTrack).toHaveBeenCalledTimes(1);
+      expect(addTrack).toHaveBeenCalledWith(gated.track, gated);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('a rebuild mid-call gives the peer\'s audio sender the new gated track, by replaceTrack', async () => {
+    const suppressed = pipelineStreams();
+    const { sender, peer } = fakePeer();
+    const addTrack = vi.fn();
+    (peer.pc as unknown as { addTrack: typeof addTrack }).addTrack = addTrack;
+    useVoiceStore.setState({ dmCallConversationId: 'conv-1', localStream: fakeStream('raw'), peers: new Map([['peer-1', peer as never]]) });
+
+    rebuild();
+    await flush();
+
+    expect(aa.startSpeakingDetection).toHaveBeenLastCalledWith(suppressed, 'dm');
+    expect(sender.replaceTrack).toHaveBeenCalledTimes(1);
+    expect(sender.replaceTrack).toHaveBeenCalledWith(gatedTrack());
+    expect(addTrack).not.toHaveBeenCalled();
+  });
+
+  it('a peer with no audio to send yet gets the gated track added', async () => {
+    pipelineStreams();
+    const addTrack = vi.fn();
+    const peer = { pc: { getSenders: () => [], addTrack, close: vi.fn() }, makingOffer: false, pendingCandidates: [] };
+    useVoiceStore.setState({ dmCallConversationId: 'conv-1', localStream: fakeStream('raw'), peers: new Map([['peer-1', peer as never]]) });
+
+    rebuild();
+    await flush();
+
+    expect(addTrack).toHaveBeenCalledTimes(1);
+    expect(addTrack).toHaveBeenCalledWith(gatedTrack(), aa.state.gated);
+  });
+
+  it('without a gated stream (detection could not start), the peer gets the suppressed track', async () => {
+    const suppressed = pipelineStreams();
+    aa.startSpeakingDetection.mockImplementation((_stream: MediaStream, mode: 'server' | 'dm' = 'server') => { aa.state.mode = mode; });
+    const { sender, peer } = fakePeer();
+    useVoiceStore.setState({ dmCallConversationId: 'conv-1', localStream: fakeStream('raw'), peers: new Map([['peer-1', peer as never]]) });
+
+    rebuild();
+    await flush();
+
+    expect(sender.replaceTrack).toHaveBeenCalledWith(suppressed.track);
+  });
+
+  it('a space call\'s mic producer still takes the gated track, by replaceTrack', async () => {
+    const suppressed = pipelineStreams();
+    const mic = fakeProducer('audio');
+    useVoiceStore.setState({ activeChannelId: 'ch-1', localStream: fakeStream('raw'), msProducers: new Map<string, Producer>([[mic.id, mic as unknown as Producer]]) });
+
+    rebuild();
+    await flush();
+
+    expect(aa.startSpeakingDetection).toHaveBeenLastCalledWith(suppressed, 'server');
+    expect(mic.replaceTrack).toHaveBeenCalledTimes(1);
+    expect(mic.replaceTrack).toHaveBeenCalledWith({ track: gatedTrack() });
+    expect(mic.close).not.toHaveBeenCalled();
+  });
+});
