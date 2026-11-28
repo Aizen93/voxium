@@ -119,7 +119,7 @@ import {
   getSpeakingDetectionMode,
   getSpeakingDecider,
   getGatedStream,
-  getAudioLevel,
+  isSpeechDetected,
 } from '../../services/audioAnalyser';
 import { DEFAULT_NOISE_GATE_THRESHOLD } from '../../services/audioDefaults';
 
@@ -520,6 +520,23 @@ describe('the audio-thread noise gate, from the page', () => {
     expect(getSpeakingDetectionMode()).toBeNull();
   });
 
+  it('a start that fails halfway leaves no gated stream: its destination\'s track is stopped and its context closed', () => {
+    for (const mode of ['server', 'dm'] as const) {
+      FakeContext.nextSetup = (ctx) => {
+        ctx.createMediaStreamSource = () => { throw new Error('NotSupportedError: no audio track'); };
+      };
+      startSpeakingDetection(mic(), mode);
+      const ctx = lastContext();
+      expect(getGatedStream()).toBeNull();
+      expect(ctx.destination.stream.getTracks()[0].stop).toHaveBeenCalled();
+      expect(ctx.close).toHaveBeenCalled();
+      expect(getSpeakingDetectionMode()).toBeNull();
+      expect(ctx.loads).toEqual([]); // nothing loads on it
+      vi.advanceTimersByTime(1_000);
+      expect(sent()).toEqual([]);
+    }
+  });
+
   it('getSpeakingDecider() names what decides, and the DEV hook of the end-to-end run answers the same', async () => {
     const hook = () => (globalThis as { __voxSpeakingDecider?: () => string | null }).__voxSpeakingDecider?.();
     expect(getSpeakingDecider()).toBeNull();
@@ -542,17 +559,38 @@ describe('the audio-thread noise gate, from the page', () => {
     expect(getSpeakingDecider()).toBe('page-timer');
   });
 
-  it('the level meter is read from the analyser when asked while the gate decides, and kept while paused', async () => {
-    await attached();
-    analyserLevel = 0.075;
-    expect(getAudioLevel()).toBeCloseTo(0.5, 6);
-    setSpeakingDetectionPaused(true);
+  it('isSpeechDetected() is what the others are told, under either decider, and false while paused or stopped', async () => {
+    // The page timer, while the module loads: at the user's threshold
+    startSpeakingDetection(mic(), 'dm');
+    setNoiseGateThreshold(0.02);
+    analyserLevel = 0.015;
+    vi.advanceTimersByTime(100);
+    expect(isSpeechDetected()).toBe(false);
+    analyserLevel = 0.03;
+    vi.advanceTimersByTime(20);
+    expect(isSpeechDetected()).toBe(true);
+    expect(sent().at(-1)).toEqual(['dm:voice:speaking', true]);
+
+    // The audio-thread gate: its reports, not the level
+    lastContext().load.resolve();
+    await settle();
+    const node = lastNode();
     analyserLevel = 0;
-    expect(getAudioLevel()).toBeCloseTo(0.5, 6);
+    vi.advanceTimersByTime(2_000);
+    expect(isSpeechDetected()).toBe(true);
+    node.report(false);
+    expect(isSpeechDetected()).toBe(false);
+    node.report(true);
+    expect(isSpeechDetected()).toBe(true);
+
+    setSpeakingDetectionPaused(true);
+    expect(isSpeechDetected()).toBe(false);
+    node.report(true); // sent before the pause reached it
+    expect(isSpeechDetected()).toBe(false);
     setSpeakingDetectionPaused(false);
-    expect(getAudioLevel()).toBe(0);
+    node.report(true);
+    expect(isSpeechDetected()).toBe(true);
     stopSpeakingDetection();
-    analyserLevel = 0.15;
-    expect(getAudioLevel()).toBe(0);
+    expect(isSpeechDetected()).toBe(false);
   });
 });

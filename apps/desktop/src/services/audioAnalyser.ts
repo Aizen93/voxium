@@ -9,7 +9,9 @@ import { NOISE_GATE_PROCESSOR_NAME, readNoiseGateReport, type NoiseGateCommand, 
 //
 // Clean, isolated pipeline: source → RNNoise AudioWorklet → destination
 // No analyser, no gain gate — just noise suppression.
-// The processed track replaces the original mic track on WebRTC connections.
+// The processed stream feeds speaking detection and the noise gate (below),
+// whose gated track the call sends; the processed track itself goes out only
+// while no gated stream exists.
 
 let nsContext: AudioContext | null = null;
 let nsSource: MediaStreamAudioSourceNode | null = null;
@@ -276,8 +278,8 @@ export function stopNoiseSuppression() {
     }
     nsWorklet = null;
   }
-  // The suppressed track ends with its pipeline: whatever sent it (a DM peer,
-  // a mic producer made without a gated stream) leaves it alone
+  // The suppressed track ends with its pipeline: whatever sent it (a mic
+  // producer or a DM peer, only while no gated stream existed) leaves it alone
   stopDestinationTracks(nsDestination);
   nsDestination = null;
   if (nsContext) {
@@ -300,10 +302,10 @@ export function stopNoiseSuppression() {
 //   slowed to one a second or less);
 // - the page timer, every 20 ms on an AnalyserNode, with a gain node as the
 //   gate: the decider while the gate's module loads, and the fallback where it
-//   cannot load or fails. A direct call keeps its gain open there: the timer
-//   only detects speaking, as it always has (a slowed timer in a hidden page
-//   would otherwise silence the call).
-// The analyser stays in the path for the level meter (getAudioLevel).
+//   cannot load or fails. Whenever it decides, the load included, a direct
+//   call keeps its gain open: the timer only detects speaking, as it always
+//   has (a slowed timer in a hidden page would otherwise silence the call).
+// The analyser stays in the path for the page timer, which the fallback needs.
 
 let sdContext: AudioContext | null = null;
 let sdSource: MediaStreamAudioSourceNode | null = null;
@@ -313,7 +315,6 @@ let sdDestination: MediaStreamAudioDestinationNode | null = null;
 let tickInterval: ReturnType<typeof setInterval> | null = null;
 let isSpeaking = false;
 let silenceStart = 0;
-let currentLevel = 0;
 
 /** Bumped by every start and every stop: a module load still pending for an
  *  earlier pipeline gives up, on its own context, and touches nothing. */
@@ -324,8 +325,6 @@ let sdDecider: 'timer' | 'worklet' | null = null;
 let gateNode: AudioWorkletNode | null = null;
 /** The one warning a pipeline logs when its audio-thread gate cannot run. */
 let gateFailureWarned = false;
-/** The meter's buffer when the level is read on demand. */
-let levelData: Float32Array<ArrayBuffer> | null = null;
 
 const SILENCE_DELAY_MS = 300;
 const TICK_INTERVAL_MS = 20;
@@ -353,7 +352,9 @@ export function onSpeakingChange(cb: ((speaking: boolean) => void) | null) {
  * audio-thread gate is told too and goes on processing every block (it
  * still delays the audio): in a space call it closes, in a direct call it
  * goes on gating the audio (push-to-talk overrides the mute there); either
- * way it reports nothing until the pause ends, as the timer does.
+ * way the page takes no report from it until the pause ends, as the timer
+ * makes none (the one "not speaking" the gate posts at a pause is what the
+ * page has already said).
  */
 export function setSpeakingDetectionPaused(paused: boolean) {
   detectionPaused = paused;
@@ -373,22 +374,12 @@ export function setSpeakingDetectionPaused(paused: boolean) {
 }
 
 /**
- * The microphone level, 0..1: the RMS of the analyser's 2048-sample window
- * over 0.15. The timer measures it at each tick; under the audio-thread gate
- * nothing ticks on the page, so the same measure is taken here, when asked.
- * While paused it keeps its last value, as the paused tick does.
+ * Whether the detector says the local user is speaking: the state the others
+ * are told (voice:speaking, dm:voice:speaking), whichever decider runs. False
+ * while paused (muted), and when detection is not running.
  */
-export function getAudioLevel(): number {
-  if (sdDecider === 'worklet' && sdAnalyser && !detectionPaused) {
-    if (levelData === null || levelData.length !== sdAnalyser.fftSize) levelData = new Float32Array(sdAnalyser.fftSize);
-    sdAnalyser.getFloatTimeDomainData(levelData);
-    let sum = 0;
-    for (let i = 0; i < levelData.length; i++) {
-      sum += levelData[i] * levelData[i];
-    }
-    currentLevel = Math.min(Math.sqrt(sum / levelData.length) / 0.15, 1);
-  }
-  return currentLevel;
+export function isSpeechDetected(): boolean {
+  return isSpeaking;
 }
 
 /**
@@ -409,9 +400,16 @@ export function getSpeakingDetectionMode(): 'server' | 'dm' | null {
 }
 
 /**
- * Returns the noise-gated stream for SFU producer use.
- * For SFU: the gain gate silences audio when not speaking (saves bandwidth).
- * For DM P2P: not used — DM uses the suppressed stream directly.
+ * Returns the noise-gated stream, the one a call sends.
+ * For SFU: the mic producer's track; the gate silences audio when not
+ * speaking (saves bandwidth).
+ * For DM P2P: the peers' audio track, gated the same way by the audio-thread
+ * gate; while the page timer decides (the gate's module loading, the
+ * fallback), its gain stays open.
+ * Null when speaking detection does not run, its start included when it
+ * failed halfway: a direct call's senders and a rebuild's swap of the
+ * producers already made then take the suppressed stream, or the raw one; a
+ * microphone producer made afterwards takes the raw microphone.
  */
 export function getGatedStream(): MediaStream | null {
   return sdDestination?.stream ?? null;
@@ -447,13 +445,14 @@ export function resendSpeaking(): void {
  * timer decides (the gate's module loading, the fallback), the gain gate is
  * open and the timer only detects speaking.
  *
- * Synchronous: the gated stream exists when it returns, and its track stays
- * the same object for the pipeline's life. The audio-thread gate is attached
+ * Synchronous: the gated stream exists when it returns (none when the start
+ * failed halfway), and its track stays the same object for the pipeline's
+ * life. The audio-thread gate is attached
  * to this pipeline once its module has loaded (attachAudioThreadGate); until
  * then the page timer decides. A space call's gain starts closed, so nothing
- * passes ungated meanwhile; a direct call's starts open, as in the fallback
- * (a direct call does not send this track: only its speaking state comes
- * from here).
+ * passes ungated meanwhile; a direct call's starts open, as in the fallback,
+ * so a load that is slow or never settles leaves the call heard (a peer
+ * already holds this track).
  */
 export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm' = 'server') {
   speakingMode = mode;
@@ -475,6 +474,10 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
     sdSource = sdContext.createMediaStreamSource(stream);
   } catch (err) {
     console.warn('[SpeakingDetection] Failed to create AudioContext:', err);
+    // What was built goes, its gated track stopped: getGatedStream() answers
+    // null and every caller falls back to another stream (see there), never
+    // to a destination nothing feeds
+    stopSpeakingDetection();
     return;
   }
 
@@ -521,10 +524,10 @@ function startTimerDecider() {
       sum += dataArray[i] * dataArray[i];
     }
     const rms = Math.sqrt(sum / dataArray.length);
-    currentLevel = Math.min(rms / 0.15, 1);
 
     const now = Date.now();
-    // DM: never gate (audio goes directly via suppressed stream, not through this gate)
+    // DM: the timer never gates (its gain stays open: a slowed timer in a
+    // hidden page would silence the call); it only detects speaking
     const bypassGate = speakingMode === 'dm';
 
     if (rms > threshold) {
@@ -690,9 +693,9 @@ function detachGateNode(node: AudioWorkletNode) {
 
 /**
  * The audio-thread gate cannot run on this pipeline: the timer decides, on
- * the gain node, with one warning. A direct call keeps today's bypass there
- * (its gain open), a space call's gain follows the timer from the state the
- * page holds. The call goes on either way.
+ * the gain node, with one warning. A direct call keeps the timer's bypass
+ * there (its gain open), a space call's gain follows the timer from the
+ * state the page holds. The call goes on either way.
  */
 function fallBackToTimerGate(reason: string) {
   if (!gateFailureWarned) {
@@ -761,7 +764,6 @@ export function stopSpeakingDetection() {
   // next producer from the same pipeline
   stopDestinationTracks(sdDestination);
   sdDestination = null;
-  currentLevel = 0;
   silenceStart = 0;
   detectionPaused = false;
 }

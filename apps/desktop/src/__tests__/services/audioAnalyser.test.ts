@@ -100,7 +100,7 @@ import {
   setNoiseGateThreshold,
   onSpeakingChange,
   onNoiseSuppressionFailure,
-  getAudioLevel,
+  isSpeechDetected,
   getGatedStream,
   getSuppressedStream,
   getSpeakingDetectionMode,
@@ -157,9 +157,9 @@ describe('audioAnalyser', () => {
     });
   });
 
-  describe('getAudioLevel', () => {
-    it('should return 0 initially', () => {
-      expect(getAudioLevel()).toBe(0);
+  describe('isSpeechDetected', () => {
+    it('should answer false initially', () => {
+      expect(isSpeechDetected()).toBe(false);
     });
   });
 
@@ -404,11 +404,11 @@ describe('audioAnalyser', () => {
       expect(getSpeakingDetectionMode()).toBeNull();
     });
 
-    it('should reset audio level to 0 after stopping', () => {
+    it('should answer not speaking after stopping', () => {
       const mockStream = { getAudioTracks: () => [{ kind: 'audio' }] } as unknown as MediaStream;
       startSpeakingDetection(mockStream, 'server');
       stopSpeakingDetection();
-      expect(getAudioLevel()).toBe(0);
+      expect(isSpeechDetected()).toBe(false);
     });
 
     it('should emit speaking:false when stopping while speaking', () => {

@@ -3,12 +3,13 @@ import { act, Profiler, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 /**
- * The DM call panels draw the local user's speaking ring from the mic level,
- * which the speaking detector updates every 20 ms in ANY voice session. They
- * used to copy that level into React state on every animation frame, and the
- * sidebar panel did it before its "no DM call" early return: both sidebars'
- * panels re-rendered about 50 times a second in a voice channel, rendering
- * nothing. These count renders against a level that changes every frame.
+ * The DM call panels draw the local user's speaking ring from the speaking
+ * detector's answer, read every animation frame, in ANY voice session. They
+ * used to copy the mic level into React state on every frame, and the sidebar
+ * panel did it before its "no DM call" early return: both sidebars' panels
+ * re-rendered about 50 times a second in a voice channel, rendering nothing.
+ * These count renders against a level that changes every frame, the mocked
+ * detector answering "speaking" above 0.05 of it.
  */
 
 vi.mock('react-i18next', async (importOriginal) => {
@@ -16,8 +17,9 @@ vi.mock('react-i18next', async (importOriginal) => {
   return { ...actual, useTranslation: () => ({ t: (k: string) => k }) };
 });
 
-const audio = vi.hoisted(() => ({ level: 0 }));
-vi.mock('../../services/audioAnalyser', () => ({ getAudioLevel: () => audio.level }));
+// As the real detector: paused (a mute pauses it) it answers "not speaking"
+const audio = vi.hoisted(() => ({ level: 0, paused: false }));
+vi.mock('../../services/audioAnalyser', () => ({ isSpeechDetected: () => !audio.paused && audio.level > 0.05 }));
 
 vi.mock('../../stores/voiceStore', async () => {
   const { create } = await import('zustand');
@@ -104,6 +106,7 @@ beforeEach(() => {
   cancelFrame.mockClear();
   renders = 0;
   audio.level = 0;
+  audio.paused = false;
   useVoiceStore.setState({ dmCallConversationId: null, dmCallUsers: [], selfMute: false, pttActive: false });
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -189,9 +192,15 @@ describe('DMCallPanel (the conversation header)', () => {
     expect(renders).toBe(2);
   });
 
-  it('push-to-talk held while muted still lights the ring', () => {
+  it('push-to-talk held while muted: the ring shows the detector\'s answer, "not speaking" under a mute', () => {
     useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallUsers: [me, peer], selfMute: true, pttActive: true });
+    audio.paused = true; // what the mute did to the detector
     mount(<DMCallPanel />);
+    playFrames(5, () => 0.5);
+    // Heard (push-to-talk overrides the mute) with no ring, here as on the other side
+    expect(container.querySelector('[data-testid="avatar-Me"]')!.getAttribute('data-speaking')).toBe('false');
+    // The ring is not hidden by the mute: it follows the detector once that answers again
+    audio.paused = false;
     playFrames(5, () => 0.5);
     expect(container.querySelector('[data-testid="avatar-Me"]')!.getAttribute('data-speaking')).toBe('true');
   });

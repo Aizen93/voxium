@@ -817,7 +817,10 @@ async function produceMicOn(sendTransport: Transport, device: Device): Promise<P
     return null;
   }
 
-  // A new mic producer: a release's pending pause was for the one before
+  // A new mic producer: a release's pending pause was for the one before.
+  // Tidiness in practice: nothing makes a mic producer while an older one is
+  // still open, and when it fires that pause skips every producer it was not
+  // scheduled for (pauseIfStillReleased)
   cancelPendingMicPause();
   const newProducers = new Map(state().msProducers);
   newProducers.set(producer.id, producer);
@@ -881,8 +884,8 @@ function followSpeakingWithMicProducer(speaking: boolean) {
 //
 // A mute and a deafen still pause at once, and are not delayed: their pause
 // of the detection closes the gate at the same moment (its gain ramps to 0
-// over GATE_CLOSE_RAMP_MS on the delayed audio) and the page says "not
-// speaking" at once, on which the server pauses the producer at the SFU, as
+// over GATE_CLOSE_RAMP_MS on the delayed audio) and the server pauses the
+// producer at the SFU as soon as their voice:mute or voice:deaf arrives, as
 // before the gate had a look-ahead; a later client pause would add no more
 // than that fading ramp of what preceded the mute. A direct call needs none
 // of this: nothing disables the gated track its peers hold, and the line
@@ -944,7 +947,9 @@ function pausePendingMicNow(): void {
 }
 
 /** Only the producers the pause was scheduled for, still registered and open,
- *  with the key still up, in the session it was scheduled in. */
+ *  with the key still up, in the session it was scheduled in. The session
+ *  check is a backstop: every end of a session drops the pending pause first
+ *  (endVoiceChannelSession). */
 function pauseIfStillReleased(producers: Producer[], session: number): void {
   const state = useVoiceStore.getState();
   if (session !== voiceSessionGeneration || state.pttActive) return;
@@ -956,10 +961,11 @@ function pauseIfStillReleased(producers: Producer[], session: number): void {
 /**
  * (Re)build noise suppression and speaking detection over `stream` for the
  * current voice session, then give the new audio to whatever already sends:
- * the mic producer (server voice, the gated stream) and the DM peers' audio
- * senders (the suppressed stream, or the raw one). It keys on what exists, not
- * on activeChannelId: a secure join builds its pipeline before it sets that,
- * and its producer, made later, reads the gated stream itself.
+ * the mic producer (server voice) and the DM peers' audio senders, both on
+ * the gated stream (the suppressed or raw one when detection could not
+ * start). It keys on what exists, not on activeChannelId: a secure join
+ * builds its pipeline before it sets that, and its producer, made later,
+ * reads the gated stream itself.
  *
  * Tracks are swapped with replaceTrack on the existing producer and sender,
  * never by producing again: the secure-voice frame transform lives on the
@@ -982,7 +988,9 @@ async function rebuildMicPipeline(stream: MediaStream, mode: 'server' | 'dm'): P
 
   onSpeakingChange(null);
   stopSpeakingDetection();
-  // Speaking detection taps the suppressed stream (the raw one without suppression)
+  // Speaking detection and the noise gate run on the suppressed stream (the
+  // raw one without suppression); the gated stream they make is what the
+  // call sends
   startSpeakingDetection(suppressed, mode);
   if (mode === 'server') onSpeakingChange(followSpeakingWithMicProducer);
 
@@ -1002,7 +1010,7 @@ async function rebuildMicPipeline(stream: MediaStream, mode: 'server' | 'dm'): P
       if (!current()) return 'superseded';
     }
   }
-  const peerTrack = (getSuppressedStream() || stream).getAudioTracks()[0];
+  const peerTrack = (getGatedStream() || getSuppressedStream() || stream).getAudioTracks()[0];
   if (peers.size > 0 && peerTrack?.readyState === 'live') {
     for (const [peerId, peerConn] of peers.entries()) {
       const audioSender = peerConn.pc.getSenders().find((s) => s.track?.kind === 'audio');
@@ -1129,11 +1137,12 @@ function createPeerInternal(
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   const peerConn: PeerConnection = { pc, makingOffer: false, pendingCandidates: [] };
 
-  // Use the best available processed stream:
-  // - DM P2P: suppressed stream (clean RNNoise pipeline: source → worklet → dest)
-  // - SFU: gated stream (suppressed + gain gate for producer pause/resume)
-  // Falls back to raw mic if neither is ready.
-  const audioStream = getSuppressedStream() || getGatedStream() || localStream;
+  // The gated stream, as a space call's producer sends: the noise gate
+  // decides what goes out (while the page timer decides, the gate's module
+  // loading or the fallback, a direct call's gain stays open on that same
+  // stream). Then the suppressed stream, then the raw mic, while no gated
+  // stream exists.
+  const audioStream = getGatedStream() || getSuppressedStream() || localStream;
   if (audioStream) {
     audioStream.getAudioTracks().forEach((track) => {
       pc.addTrack(track, audioStream);
@@ -2414,9 +2423,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     set({ selfMute: newMute });
     persistVoicePrefs({ selfMute: newMute, selfDeaf: get().selfDeaf });
 
-    // Muted: speaking detection says "not speaking" at once and reports
-    // nothing until the unmute (a space call's gate closes); the page timer
-    // also skips its work, the audio-thread gate goes on processing
+    // Muted: speaking detection says "not speaking" at once and nothing more
+    // until the unmute (a space call's gate closes); the page timer also
+    // skips its work, the audio-thread gate goes on processing
     setSpeakingDetectionPaused(newMute);
   },
 
@@ -3002,9 +3011,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      // RNNoise noise suppression, then speaking detection on its output
-      // (read-only side-chain; DM calls never gate). Failing at this start,
-      // the mic is opened again with the browser's own
+      // RNNoise noise suppression, then speaking detection and the noise
+      // gate on its output, whose gated stream the call sends. Failing at
+      // this start, the mic is opened again with the browser's own
       const built = await buildJoinMicPipeline(stream, 'dm');
       // Superseded while the pipeline started — release only this join's streams
       if (built === 'superseded' || generation !== voiceSessionGeneration) {
@@ -3379,7 +3388,7 @@ async function sendNewMicIfNothingSends(stream: MediaStream, mode: 'server' | 'd
     }
     return;
   }
-  const source = getSuppressedStream() || stream;
+  const source = getGatedStream() || getSuppressedStream() || stream;
   const track = source.getAudioTracks()[0];
   if (!track || track.readyState !== 'live') return;
   for (const [peerId, peerConn] of state.peers.entries()) {
