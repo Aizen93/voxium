@@ -5,6 +5,8 @@
 // prekey signatures are computed over. No crypto happens here — only encoding
 // and validation.
 
+import { OPAQUE_ID_RE } from './constants.js';
+
 /**
  * Engine identifier for envelope `e` field.
  * `olm1` = pairwise Olm (legacy 1:1 sessions + key-share transport),
@@ -178,6 +180,63 @@ export function parseE2EScope(
     return { kind: 'channel', channelId: scope.slice(E2E_CHANNEL_SCOPE_PREFIX.length) };
   }
   return { kind: 'dm', conversationId: scope };
+}
+
+// ─── Which cached scopes still exist for the caller ──────────────────────────
+//
+// `POST /e2e/scopes/states` (docs/e2e-dm-spec.md §9.1, "What a device asks
+// about its cache"): a device names the scopes its plaintext cache holds and
+// learns, per scope, whether the account can still reach it. Only a direct
+// conversation's id or a secure channel's `ch:{channelId}` is a scope here;
+// never a voice scope (`chv:`), which caches no text.
+
+/** At most this many scopes per `POST /e2e/scopes/states`. */
+export const E2E_SCOPE_STATES_MAX = 100;
+
+/**
+ * What the account can still reach of a scope: `open` (a side of the
+ * conversation with it on their list, or a member of the secure channel),
+ * `hidden` (a conversation of theirs they removed from their list), `gone`
+ * (nothing: no such conversation of theirs, no such secure channel they are a
+ * member of; one answer whatever the reason).
+ */
+export type E2EScopeState = 'open' | 'hidden' | 'gone';
+
+export const E2E_SCOPE_STATES: readonly E2EScopeState[] = ['open', 'hidden', 'gone'];
+
+/** `POST /e2e/scopes/states`: 1 to E2E_SCOPE_STATES_MAX scopes, each once (isE2EScopeStatesScope). */
+export interface E2EScopeStatesRequest {
+  scopes: string[];
+}
+
+/** One scope of the answer, in the order asked. */
+export interface E2EScopeStateEntry {
+  scope: string;
+  state: E2EScopeState;
+  /**
+   * The caller's floor of a conversation (the server's ISO time), present
+   * whenever their read row holds one, hidden or not: what `GET /dm` serves
+   * as `clearedUntil`. Never on a secure channel, never on `gone`.
+   */
+  clearedUntil?: string;
+}
+
+/** The answer: exactly one entry per scope asked, in the order asked. */
+export interface E2EScopeStatesResponse {
+  success: true;
+  data: E2EScopeStateEntry[];
+}
+
+/**
+ * Whether a string is a scope `POST /e2e/scopes/states` takes: a direct
+ * conversation's id (OPAQUE_ID_RE), or `ch:` followed by a channel id
+ * (OPAQUE_ID_RE). The server refuses anything else with a 400, and a device
+ * asks about nothing else (one refused scope would refuse its whole request).
+ */
+export function isE2EScopeStatesScope(scope: unknown): scope is string {
+  if (typeof scope !== 'string') return false;
+  if (scope.startsWith(E2E_CHANNEL_SCOPE_PREFIX)) return OPAQUE_ID_RE.test(scope.slice(E2E_CHANNEL_SCOPE_PREFIX.length));
+  return OPAQUE_ID_RE.test(scope);
 }
 
 /** 32-byte key, unpadded standard base64 (vodozemac canonical encoding). */

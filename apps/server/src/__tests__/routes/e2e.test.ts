@@ -33,6 +33,7 @@ vi.mock('../../middleware/rateLimiter', () => {
     // spied on: the key-share acknowledgement must not spend the share budget
     rateLimitE2EShares: vi.fn(passthrough),
     rateLimitE2EShareAck: vi.fn(passthrough),
+    rateLimitE2EScopeStates: passthrough,
     rateLimitE2EApprove: passthrough,
   };
 });

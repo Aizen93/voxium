@@ -373,6 +373,8 @@ plain name:
 | `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
 | `ptpurge:read-only:{conversationId}` | `{at}`: when the purge of a read-only conversation's `pt:` entries ended, after a conversation list confirmed it read-only; cleared when a list serves the conversation live (§9.1) |
 | `ptpurge:cleared:{conversationId}` | `{at, level}`: when the purge of a cleared history ended, and the floor it purged up to (`level`, milliseconds since the epoch); a record never moves back (§9.1) |
+| `ptpurge:gone:{scope}` | `{at}`: when the purge of a scope the server answered `gone` to the cache sweep ended; cleared before each such purge (§9.1, "What a device asks about its cache") |
+| `cache_sweep` | `{at, after, failedAt?}`: when the device's last sweep of its cache ended (its clock; `0` when none ended), the `pt:` key its next walk resumes after (`null`: from the start), and when a run last failed (set by a failure, gone with the next run that ends) (§9.1) |
 | `claim_sent` | `{at}`: when a claim of the key-share inbox last left; its page may still be leased (§7.4) |
 | `key_backup_writes` | `{pending?: {baseline, checkedAt?}, unconfirmed, confirmed?}`: this device's key backup writes: the record of one not confirmed yet (the SHA-256 of the baseline blob, `null` for none, and when a check first found it still stored), the SHA-256 of every blob it sealed in a write never confirmed (the last 32, kept when the record goes) and that of the blob whose recovery key it showed last; written before each write is sent (§15.7) |
 | `repair:{name}` | `{at}`: when a repair ran on this vault: `repair:outbound-sessions-rotated` once; `repair:fallback-key-uploaded` when this device last made a fallback key to be sent, written before the request that may send it and again once the server took it (§7.4) |
@@ -765,10 +767,11 @@ did not vouch for:
   owed when the session ends is asked again by the next session's list, which
   teaches every floor again. Floors and owed walks belong to the account
   signed in and go at logout. A device that missed the removal (offline, or a
-  session that ended before its walk) purges at its next list. What stays: a
-  conversation really deleted on the server while a device was offline, whose
-  floor no list names any more, and the removed conversations beyond the 200
-  newest floors; such a device keeps those entries, unreachable from the
+  session that ended before its walk) purges at its next list. What no list
+  teaches (a conversation really deleted on the server while a device was
+  offline, whose floor no list names any more, and the removed conversations
+  beyond the 200 newest floors) the device learns from its daily sweep of its
+  cache (below); until then it keeps those entries, unreachable from the
   interface (no list shows the conversation). The floor is the server's word,
   which the device cannot check: it can make a device delete its cached text
   of a conversation up to any time no later than a day ahead of that device's
@@ -776,6 +779,70 @@ did not vouch for:
   it, is then gone from that device. Up to that time the device also shows,
   caches and finds none of that conversation's rows, newer ones included
   while that time lies ahead; nothing else the display gate decides changes.
+- **What a device asks about its cache.** No list names again a conversation
+  really deleted while the device was offline, a removed conversation whose
+  floor is beyond the 200 newest, or a secure channel that was deleted or
+  that the account is no longer a member of, so the device asks the server
+  what it may still keep text for: `POST /api/v1/e2e/scopes/states
+  { scopes }`, 1 to `E2E_SCOPE_STATES_MAX` (100) scopes, each a conversation
+  id (`OPAQUE_ID_RE`) or `ch:{channelId}`, each once (anything else is a 400
+  before any read; its own limiter, `rl:e2escope`, 200 an hour per account).
+  The answer names each scope once, in the order asked: `open`, `hidden` (a
+  conversation of the caller's that they removed from their list) or `gone`
+  (no conversation of which the caller is a side, no secure channel of which
+  they are a member in a space they are a member of: one answer whatever the
+  reason, from the same statements, so nothing is learnt about anyone
+  else's), with `clearedUntil` (the caller's floor, in the form `GET /dm`
+  serves) on a conversation whose read row holds one, hidden or not, never on
+  a channel. One read per kind of scope asked; nothing is written. The device
+  asks at most once a day per vault (`cache_sweep`, §7, read on its own
+  clock: a record dated ahead of it is not recent), once its E2E service has
+  started and a first page of the conversation list has been applied for the
+  account signed in, never offline, about every distinct scope of its `pt:`
+  cache that the route takes, found by one read-only walk on the service
+  queue: 100 a request, at most 20 requests a run, the rest at the next run
+  from where the walk stopped, then from the start again. It uses an answer
+  only when it names exactly the scopes asked, each once, each with a known
+  state, and a `clearedUntil` only on a conversation that is not gone; one
+  that does not is dropped whole and ends the run like a failure. A 404 (a
+  server without the route) records the day and purges nothing. Any other
+  failure (no usable answer, a 429, a 5xx, a dropped answer, a vault error)
+  records its time in the record (`failedAt`) and not the day (a failure
+  the record cannot take, the vault itself failing, is remembered for the
+  session only); the run is tried again no earlier than 3 hours after it
+  (read like the day: a time ahead of the clock is not recent; a page
+  reload respects it), at the next moment the sweep is considered. The
+  answers kept before the failing request are used (below, in one purge
+  walk) and, once they are, the record's position moves to the key the
+  last scope they covered was first found at: the next run walks on from
+  there, so it asks again about a scope with entries after that key and
+  skips none that was not answered. Then `gone`
+  removes every `pt:`
+  entry of that scope, the reader's own included (recorded under
+  `ptpurge:gone:{scope}`, a record cleared before each such purge, since a
+  secure channel rejoined under the same id caches text again), unless the
+  session holds the scope on screen or in its stores (kept: the run still
+  records its day, and the scope is asked about again at the next sweep whose
+  walk reaches its entries); a `clearedUntil` is applied like any other floor (above);
+  `open` and `hidden` without a floor change nothing, so a conversation a
+  2.1.x client hid keeps its history. **A server answer never makes a device
+  delete a key**: the group sessions, the position bindings, the kept shares
+  and owed acknowledgements, the Olm account and sessions, the pinned
+  identities and the secure-channel pins (§19.7) all stay. A `gone` answer
+  removes every cached text entry of that scope, the device's own lines
+  included (it keeps an inbound copy of every session it sends in). That is
+  more than a cleared floor removes: an entry with no recorded time goes
+  too (a floor keeps it), and so does a secure channel's cached text (no
+  floor ever applies to a `ch:` scope). The lines of a group session decrypt
+  again from the server's rows when they are shown, for as long as the
+  device holds the session; the lines of the pairwise format exist only in
+  the cache and are lost. For a message whose entry was removed the device
+  no longer holds the version it last showed, so rule 2 of "Ratchet
+  positions are bound to one message" (below), which refuses an older
+  version of an edited message, has nothing to compare with when that row
+  is next shown: the version served then is accepted, an older one of the
+  same session included, and later versions are compared with it; the
+  position binding (rule 1) still holds. A 2.1.x client never asks.
 - **What the read-only flag lets a server do.** `participantDeleted` and
   `dm:conversation:read_only` are the server's word, like a row's `type`. A
   server that sets them on a live conversation can, for as long as it keeps
@@ -1468,7 +1535,12 @@ read.
   is deleted at once; one never acknowledged is swept after 30 days.
 - Ratchet-position bindings (§9.1) are per device and per session: a new
   device or wiped vault binds history as it is served, and an edit rolled
-  back to a version sent under an EARLIER session is not detected.
+  back to a version sent under an EARLIER session is not detected. The
+  same holds, for the messages concerned, for the entries a `gone` answer of
+  the cache sweep removed (§9.1): the bindings stay, but the entry that rule
+  2 compares with does not, so at the next showing of such a message a
+  rollback of an edit to an older version of the same session is not
+  detected.
 - Ages are read on the device's clock (§12.4), so a clock set back by LESS
   than an entry's age leaves that age at zero or more, and every window
   measured from it runs longer by the size of the step: an unforced

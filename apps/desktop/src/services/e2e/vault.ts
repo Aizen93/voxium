@@ -21,7 +21,10 @@
 //   history_pull                     where an unfinished history pull stands (§16.3)
 //   pt:{messageId}                   decrypted-plaintext cache entry
 //   ptpurge:{mark}:{scope}           a purge of the `pt:` entries of a scope that ended (purgeCachedPlaintexts);
-//                                    under `cleared`, with the floor it purged up to
+//                                    under `cleared`, with the floor it purged up to; under `gone`, a scope the
+//                                    server answered gone to this device's sweep of its cache
+//   cache_sweep                      where this device's sweep of its cache stands (services/cacheSweep.ts): when its
+//                                    last run ended, the `pt:` key its walk resumes after, and when a run failed
 //   claim_sent                       when a claim of the key-share inbox last left (its page may still be leased)
 //   key_backup_writes                this device's key backup writes (§15.7): the record of one not confirmed yet
 //                                    (the digest of the backup it is judged against, when a check first found that
@@ -313,6 +316,26 @@ export interface PlaintextPurgeEntry {
   authorId?: string;
   createdAt?: string;
   editedAt: string | null;
+}
+
+/**
+ * Where this device's sweep of its plaintext cache stands (`cache_sweep`,
+ * services/cacheSweep.ts): when its last run ended (`at`, this device's
+ * clock; 0 when none ended), and the `pt:` key its next walk resumes after
+ * (`after`; null: from the start). `failedAt`: when the last run failed, set
+ * only by a failure and gone with the next run that ends. Nothing else: no
+ * scope, no text.
+ */
+export interface CacheSweepRecord {
+  at: number;
+  after: string | null;
+  failedAt?: number;
+}
+
+/** One `pt:` entry as the sweep's walk sees it: its key and the scope it records, never its text. */
+export interface PlaintextScopeEntry {
+  key: string;
+  scope: string;
 }
 
 /**
@@ -1256,6 +1279,60 @@ export class E2EVault {
         };
       })
     );
+  }
+
+  /**
+   * One batch of the read-only walk of the plaintext cache that the cache
+   * sweep makes (E2EService.listCachedScopes): ONE readonly cursor over the
+   * `pt:` range, starting after the key `after` (from the start when null),
+   * that visits at most `limit` entries and answers, in key order, each
+   * entry's key and the scope it records (an entry without a scope is left
+   * out), never its text; `next` is the key to resume after, or null once the
+   * range is done. Writes nothing. Settles when the transaction has ended.
+   */
+  listPlaintextScopes(after: string | null, limit: number): Promise<{ entries: PlaintextScopeEntry[]; next: string | null }> {
+    return this.withStore('readonly', (store) =>
+      new Promise((resolve, reject) => {
+        const tx = store.transaction;
+        const upper = `pt:${KEY_MAX}`;
+        const range = after === null ? IDBKeyRange.bound('pt:', upper) : IDBKeyRange.bound(after, upper, true, false);
+        const entries: PlaintextScopeEntry[] = [];
+        let visited = 0;
+        let next: string | null = null;
+        let failure: unknown = null;
+        tx.oncomplete = () => (failure ? reject(failure) : resolve({ entries, next }));
+        tx.onabort = () => reject(failure ?? tx.error ?? new Error('IndexedDB scope walk transaction aborted'));
+        const cursorReq = store.openCursor(range);
+        cursorReq.onerror = () => {
+          failure = cursorReq.error ?? new Error('IndexedDB cursor failed');
+        };
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) {
+            next = null;
+            return;
+          }
+          const key = String(cursor.key);
+          const scope = (cursor.value as Partial<CachedPlaintext> | undefined)?.conversationId;
+          visited += 1;
+          if (typeof scope === 'string') entries.push({ key, scope });
+          if (visited >= limit) {
+            next = key;
+            return;
+          }
+          cursor.continue();
+        };
+      })
+    );
+  }
+
+  // ── This device's sweep of its plaintext cache (cache_sweep) ──
+  /** As stored, unread: services/cacheSweep.ts checks the shape. */
+  getCacheSweep(): Promise<unknown> {
+    return this.get('cache_sweep');
+  }
+  putCacheSweep(record: CacheSweepRecord): Promise<void> {
+    return this.put('cache_sweep', record);
   }
 
   // ── Purges that ended, per scope (ptpurge:{mark}:{scope}) ──
