@@ -11,14 +11,27 @@
  * - A sound "meets the opening rule" once it has lasted GATE_OPEN_AFTER_MS:
  *   the level must stay over the threshold for that long plus the window's
  *   own memory (a loud burst keeps the window over the threshold for its
- *   length plus the window), so a burst shorter than GATE_OPEN_AFTER_MS never
- *   opens the gate, however loud it is.
+ *   length plus the window), so a sound whose level stays over the threshold
+ *   for less than GATE_OVER_THRESHOLD_MS never opens the gate, however loud:
+ *   a burst that stops within GATE_OPEN_AFTER_MS does not. The gate rejects
+ *   short sounds, not every key press: a click or a key press whose sound
+ *   decays slowly is a longer sound (GATE_OPEN_AFTER_MS says when), and a
+ *   louder one stays over the threshold longer. A dip under the threshold no
+ *   longer than GATE_DIP_BRIDGE_MS does not end the sound (a low voice's
+ *   level dips inside each pitch period): it pauses the count, which only the
+ *   time over the threshold fills, so short bursts with short gaps between
+ *   them still need GATE_OVER_THRESHOLD_MS over the threshold in all.
  * - The gate opens when a sound meets the rule, and closes GATE_HOLD_MS after
- *   the last sample at which a sound met it. A shorter sound (a click, a key
- *   press) passes while the gate is open but does not hold it open.
+ *   the last sample at which a sound met it. While it is open, a sound that
+ *   met the rule goes on through dips up to GATE_HOLD_BRIDGE_MS (the pulses
+ *   of a creaky voice). A sound that does not meet the rule (a short click or
+ *   key press) passes while the gate is open but does not hold it open,
+ *   unless it starts within GATE_HOLD_BRIDGE_MS of such a sound's level
+ *   falling under the threshold: it then continues that sound.
  * - The audio leaves through a look-ahead delay of GATE_LOOKAHEAD_MS: the
  *   decision is taken on the undelayed samples, the gain is applied to the
- *   delayed ones, so the start of a word that opened the gate still passes.
+ *   delayed ones, so the start of a word that opened the gate still passes
+ *   (from its first sample for a word well over the threshold).
  *
  * Every constant below is on the timeline of the incoming samples: the
  * decision (and its report) happens when the incoming sample meets the rule;
@@ -30,9 +43,11 @@
  * The RMS window of the level measure, 10 ms: one pitch period of a 100 Hz
  * voice, so a steady voiced sound whose period divides the window (100 or
  * 200 Hz) reads as one steady level, and one whose period does not ripples
- * only a little (a 120 Hz tone by about 6 percent), where a window shorter
- * than a pitch period dips under the threshold inside each period; and short
- * enough that a click has left the measure 10 ms after it ends.
+ * by a fraction of it (measured, either side of its mean: a 120 Hz tone by
+ * about 6 percent, a voice's pulses at 110 to 150 Hz by about 15), where a
+ * window shorter than a pitch period dips under the threshold inside each
+ * period; and short enough that a click has left the measure 10 ms after it
+ * ends.
  */
 export const GATE_LEVEL_WINDOW_MS = 10;
 
@@ -53,9 +68,52 @@ export const GATE_OPEN_AFTER_MS = 25;
 export const GATE_OVER_THRESHOLD_MS = GATE_OPEN_AFTER_MS + GATE_LEVEL_WINDOW_MS;
 
 /**
- * The opening ramp, 5 ms: long enough that the gain does not step, and run
- * while the delayed audio is still before the sound that opened the gate, so
- * it never fades a word in.
+ * The longest dip of the level under the threshold that does not end a
+ * sound, 5 ms. Below 100 Hz a pitch period is longer than the window, which
+ * then misses each period's pulse for the period minus the window: the level
+ * of a voice dips inside every period (up to 5 ms down to about 67 Hz), and a
+ * deep voice slightly over the threshold would never stay over it for the
+ * opening time. A dip is bridged by time, not by a second, lower level, so
+ * the bridge itself never holds a noise floor under the threshold; the
+ * window's own ripple can still lift a floor just under it over it, long
+ * enough to open the gate (measured: a random noise at 0.98 times the
+ * threshold opens it about 20 times a minute). The dip pauses the count
+ * rather than adding to it.
+ */
+export const GATE_DIP_BRIDGE_MS = 5;
+
+/**
+ * The longest dip that does not end a sound which has met the opening rule,
+ * while the gate is open, 20 ms. A creaky voice (the end of a phrase, 40 to
+ * 60 Hz) is one pulse every 17 to 25 ms, and the window empties between two
+ * pulses for up to about 14 ms (at 40 Hz): with GATE_DIP_BRIDGE_MS alone each
+ * pulse would start a new sound that never meets the rule, and the gate would
+ * close GATE_HOLD_MS into the creak. This bridge only keeps going a sound
+ * that has met the rule (each of its samples over the threshold restarts the
+ * hold): it never opens the gate, and a sound that has not met the rule still
+ * ends after a dip of GATE_DIP_BRIDGE_MS. The gate on the page timer, which
+ * this one replaces, passed such a creak whole (its 43 ms window always held
+ * a pulse); set to GATE_DIP_BRIDGE_MS this bridge changes nothing.
+ *
+ * What it costs, measured after speech. A sound that starts within this
+ * bridge of the level falling under the threshold continues the one before:
+ * a key press 15 to 25 ms after a word closes the gate 30 to 50 ms later. So
+ * does the ripple of a noise just under the threshold. Over 100 runs, at 0.98
+ * times the threshold the gate closes a median of 22 ms later for white noise
+ * and 40 ms for a low-passed one (room tone, a fan), about 100 and 340 ms
+ * later in the worst tenth of the runs, 0.5 and 1 s in the worst one; at 0.9
+ * times, nothing for white noise and a median of 15 ms (144 ms at worst) for
+ * the low-passed one. Much longer, a key press 40 ms after a word would
+ * continue it.
+ */
+export const GATE_HOLD_BRIDGE_MS = 20;
+
+/**
+ * The opening ramp, 5 ms: long enough that the gain does not step. For a
+ * sound well over the threshold it runs while the delayed audio is still
+ * before the sound that opened the gate, so its start is not faded; near the
+ * threshold the level crosses it later than the sound starts, and the start
+ * is faded or partly lost.
  */
 export const GATE_OPEN_RAMP_MS = 5;
 
@@ -171,8 +229,12 @@ export class NoiseGate {
   private readonly delayLines: Float32Array[] = [];
   private channels = 0;
   private delayIndex = 0;
-  /** Consecutive samples the level has been over the threshold (capped). */
+  /** Samples of the current sound with the level over the threshold (capped). */
   private overRun = 0;
+  /** Consecutive samples under the threshold inside the current sound. */
+  private underRun = 0;
+  private readonly bridgeLength: number;
+  private readonly holdBridgeLength: number;
   /** Samples since the last one at which a sound met the opening rule. */
   private sinceQualifying = 0;
   private gain: number;
@@ -195,6 +257,8 @@ export class NoiseGate {
     this.windowLength = samples(GATE_LEVEL_WINDOW_MS);
     this.squares = new Float64Array(this.windowLength);
     this.overLength = samples(GATE_OVER_THRESHOLD_MS);
+    this.bridgeLength = samples(GATE_DIP_BRIDGE_MS);
+    this.holdBridgeLength = samples(GATE_HOLD_BRIDGE_MS);
     this.holdLength = samples(GATE_HOLD_MS);
     const openRampLength = samples(GATE_OPEN_RAMP_MS);
     // GATE_LOOKAHEAD_MS in samples, summed from its parts so that rounding
@@ -248,6 +312,7 @@ export class NoiseGate {
       if (this.pauseClosesGate) {
         this.decision = false;
         this.overRun = 0;
+        this.underRun = 0;
         this.sinceQualifying = 0;
       }
       return;
@@ -289,15 +354,24 @@ export class NoiseGate {
         this.sumOfSquares = exact;
       }
 
-      // The decision
+      // The decision: how long the level has been over the threshold in the
+      // current sound; a short dip pauses that count, a longer one ends it
+      // (a longer dip still, once the open gate's sound has met the rule)
+      const over = this.sumOfSquares > this.thresholdSum;
       if (this.paused && closing) {
         this.overRun = 0;
-      } else if (this.sumOfSquares > this.thresholdSum) {
+        this.underRun = 0;
+      } else if (over) {
+        this.underRun = 0;
         if (this.overRun < this.overLength) this.overRun++;
-      } else {
+      } else if (
+        this.overRun === 0
+        || ++this.underRun > (this.decision && this.overRun === this.overLength ? this.holdBridgeLength : this.bridgeLength)
+      ) {
         this.overRun = 0;
+        this.underRun = 0;
       }
-      if (this.overRun >= this.overLength) {
+      if (over && this.overRun >= this.overLength) {
         this.sinceQualifying = 0;
         if (!this.decision) {
           this.decision = true;

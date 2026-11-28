@@ -8,6 +8,8 @@ import {
   GATE_HOLD_MS,
   GATE_CLOSE_RAMP_MS,
   GATE_OPEN_RAMP_MS,
+  GATE_DIP_BRIDGE_MS,
+  GATE_HOLD_BRIDGE_MS,
   isUsableThreshold,
   readNoiseGateCommand,
   readNoiseGateReport,
@@ -51,6 +53,21 @@ function voiced(n: number, rms: number, rate: number) {
   const shape = Float64Array.from({ length: period }, (_, i) => Math.exp(-i / (0.0015 * rate)) * Math.cos((2 * Math.PI * 700 * i) / rate));
   const shapeRms = Math.sqrt(shape.reduce((sum, v) => sum + v * v, 0) / period);
   return Float32Array.from({ length: n }, (_, i) => (shape[i % period] / shapeRms) * rms);
+}
+
+/**
+ * A voiced sound at any pitch: each period a pulse decaying with `decayMs`,
+ * scaled to the given RMS over many periods. Below 100 Hz a period is longer
+ * than the level window, so the level dips inside each period.
+ */
+function lowVoice(n: number, rms: number, pitch: number, decayMs: number, rate: number) {
+  const period = rate / pitch;
+  const one = (t: number) => Math.exp(-(t % period) / ((decayMs / 1000) * rate)) * Math.cos((2 * Math.PI * 700 * (t % period)) / rate);
+  const probe = Math.round(period * 50);
+  let sum = 0;
+  for (let t = 0; t < probe; t++) sum += one(t) ** 2;
+  const shapeRms = Math.sqrt(sum / probe);
+  return Float32Array.from({ length: n }, (_, t) => (one(t) / shapeRms) * rms);
 }
 
 function concat(...parts: Float32Array[]) {
@@ -157,6 +174,16 @@ describe('the noise gate', () => {
       }
     });
 
+    it('a voice below 100 Hz slightly over the threshold opens it and holds it, though its level dips inside each pitch period', () => {
+      for (const pitch of [70, 75, 80, 85, 90, 95]) {
+        for (const decayMs of [1.5, 4]) {
+          const { reports, run } = makeGate();
+          run(concat(silence(4800), lowVoice(RATE, THRESHOLD * 1.1, pitch, decayMs, RATE)), 128);
+          expect(reports.map((r) => r.speaking), `${pitch} Hz, ${decayMs} ms decay`).toEqual([true]);
+        }
+      }
+    });
+
     it('the same sound slightly under the threshold never opens it', () => {
       for (const make of [voiced, (n: number, rms: number, rate: number) => tone(n, rms, 100, rate)]) {
         const { reports, run } = makeGate();
@@ -210,6 +237,101 @@ describe('the noise gate', () => {
       const pause = silence(samples(200, RATE));
       run(concat(word, pause, word, pause, word, silence(samples(1000, RATE))), 128);
       expect(reports.map((r) => r.speaking)).toEqual([true, false]);
+    });
+  });
+
+  describe('a short dip of the level', () => {
+    const BRIDGE = samples(GATE_DIP_BRIDGE_MS, RATE);
+    /** Two loud bursts of `ms`, `gapMs` apart: the level dips for the gap minus the window. */
+    const pair = (ms: number, gapMs: number) => concat(
+      silence(4800), steady(samples(ms, RATE), 0.5), silence(samples(gapMs, RATE)), steady(samples(ms, RATE), 0.5), silence(samples(1000, RATE)),
+    );
+
+    it('no longer than the bridge pauses the sound; a longer one ends it', () => {
+      // 15 ms bursts read 25 ms over the threshold each: 50 ms in one sound, 25 in two
+      const within = makeGate();
+      within.run(pair(15, GATE_LEVEL_WINDOW_MS + GATE_DIP_BRIDGE_MS - 1), 1);
+      expect(within.reports.map((r) => r.speaking)).toEqual([true, false]);
+
+      const beyond = makeGate();
+      beyond.run(pair(15, GATE_LEVEL_WINDOW_MS + GATE_DIP_BRIDGE_MS + 1), 1);
+      expect(beyond.reports).toEqual([]);
+      expect(BRIDGE).toBe(240);
+    });
+
+    it('pauses the count and does not add to it: short bursts must still be over the threshold for the whole opening time', () => {
+      // 7 ms bursts read 17 ms over each: 34 ms in all, the 4 ms dip between not counted
+      const { reports, run } = makeGate();
+      run(pair(7, GATE_LEVEL_WINDOW_MS + GATE_DIP_BRIDGE_MS - 1), 1);
+      expect(reports).toEqual([]);
+    });
+
+    it('a noise floor just under the threshold with short peaks never opens it', () => {
+      let input = steady(samples(2000, RATE), THRESHOLD * 0.9);
+      for (let at = 4800; at < input.length - 200; at += samples(50, RATE)) input = overlay(input, click(samples(2, RATE)), at);
+      const { reports, run } = makeGate();
+      run(input, 128);
+      expect(reports).toEqual([]);
+    });
+  });
+
+  describe('while open, a sound that met the rule goes on through a longer dip', () => {
+    const speech = samples(500, RATE);
+
+    /** A key press: a 0.5 ms rise, then an exponential tail, on a deterministic noise. */
+    function keyPress(n: number, peak: number, tauMs: number, seed: number) {
+      let state = seed;
+      const rise = samples(0.5, RATE);
+      return Float32Array.from({ length: n }, (_, k) => {
+        state = (state * 16807) % 2147483647;
+        const envelope = k < rise ? k / rise : Math.exp(-(k - rise) / ((tauMs / 1000) * RATE));
+        return peak * envelope * ((state / 2147483647) * 2 - 1) * Math.sqrt(3);
+      });
+    }
+
+    it('a creaky end of a phrase (one pulse every 25 ms, at 40 Hz) passes for its whole length', () => {
+      const creak = samples(600, RATE);
+      const input = concat(voiced(speech, THRESHOLD * 10, RATE), lowVoice(creak, THRESHOLD * 2, 40, 1.5, RATE), silence(samples(1000, RATE)));
+      const { reports, run } = makeGate();
+      const output = run(input, 128);
+
+      expect(reports.map((r) => r.speaking)).toEqual([true, false]);
+      // Closed only after the creak: its last pulse, then the hold
+      expect(reports[1].at).toBeGreaterThan(speech + creak + HOLD - samples(GATE_HOLD_BRIDGE_MS + 25, RATE));
+      // Every sample of the creak leaves the gate at full gain
+      for (let i = speech; i < speech + creak; i++) {
+        if (output[i + LOOKAHEAD] !== input[i]) throw new Error(`creak sample ${i - speech} left at ${output[i + LOOKAHEAD]} for ${input[i]}`);
+      }
+    });
+
+    it('key presses after speech still close it on time (presses 40 ms after it, 12 a second)', () => {
+      const typing = samples(2000, RATE);
+      const alone = makeGate();
+      alone.run(concat(voiced(speech, THRESHOLD * 10, RATE), silence(typing)), 128);
+
+      let after = silence(typing);
+      for (let at = samples(40, RATE); at < typing - samples(100, RATE); at += samples(1000 / 12, RATE)) {
+        after = overlay(after, keyPress(samples(60, RATE), 0.5, 5, at + 1), at);
+      }
+      const typed = makeGate();
+      typed.run(concat(voiced(speech, THRESHOLD * 10, RATE), after), 128);
+
+      expect(alone.reports.map((r) => r.speaking)).toEqual([true, false]);
+      expect(typed.reports).toEqual(alone.reports);
+    });
+
+    it('a sound that has not met the rule still ends at a dip longer than the short bridge', () => {
+      // 7 ms bursts 25 ms apart read 17 ms over the threshold and 15 ms under:
+      // joined by the longer bridge they would meet the rule and hold it open
+      const end = samples(200, RATE);
+      let input = concat(steady(end, 0.5), silence(samples(1500, RATE)));
+      for (let at = end + samples(50, RATE); at < end + samples(1000, RATE); at += samples(25, RATE)) {
+        input = overlay(input, steady(samples(7, RATE), 0.5), at);
+      }
+      const { reports, run } = makeGate();
+      run(input, 1);
+      expect(reports).toEqual([{ speaking: true, at: OVER }, { speaking: false, at: end + W - 1 + HOLD }]);
+      expect(samples(GATE_HOLD_BRIDGE_MS, RATE)).toBe(960);
     });
   });
 
