@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
-import { useVoiceStore, isMicProducer } from '../stores/voiceStore';
+import { useVoiceStore, isMicProducer, pauseMicProducersOnPushToTalkRelease, cancelPendingMicPause } from '../stores/voiceStore';
 import { getSocket } from '../services/socket';
 
 function isTextInput(el: Element | null): boolean {
@@ -28,16 +28,13 @@ export function usePushToTalk() {
       const { localStream, activeChannelId, dmCallConversationId } = useVoiceStore.getState();
       if ((!activeChannelId && !dmCallConversationId) || !localStream) return;
 
-      // Disable raw mic tracks
+      // Disable raw mic tracks: nothing said after the release is captured
       localStream.getAudioTracks().forEach((track) => { track.enabled = false; });
 
-      // Pause the SFU mic producer (server voice only — screen audio unaffected)
-      if (activeChannelId) {
-        const { msProducers } = useVoiceStore.getState();
-        for (const producer of msProducers.values()) {
-          if (isMicProducer(producer)) producer.pause();
-        }
-      }
+      // Pause the SFU mic producer (server voice only — screen audio
+      // unaffected), once the audio-thread gate's look-ahead has sent what
+      // was said up to the release (pauseMicProducersOnPushToTalkRelease)
+      if (activeChannelId) pauseMicProducersOnPushToTalkRelease();
 
       // Debounce the mute emission to avoid flooding on rapid key taps
       if (muteTimeoutRef.current) clearTimeout(muteTimeoutRef.current);
@@ -69,6 +66,9 @@ export function usePushToTalk() {
         clearTimeout(muteTimeoutRef.current);
         muteTimeoutRef.current = null;
       }
+
+      // A release's pause still waiting is dropped: the producer stays live
+      cancelPendingMicPause();
 
       // Enable raw mic tracks
       localStream.getAudioTracks().forEach((track) => { track.enabled = true; });
