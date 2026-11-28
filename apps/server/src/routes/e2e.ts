@@ -7,6 +7,7 @@ import {
   rateLimitE2EStatus,
   rateLimitE2EShares,
   rateLimitE2EShareAck,
+  rateLimitE2EScopeStates,
   rateLimitE2EApprove,
 } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
@@ -23,6 +24,9 @@ import {
   E2E_ROW_ID_RE,
   E2E_ENGINE_OLM1,
   E2E_LIMITS,
+  E2E_CHANNEL_SCOPE_PREFIX,
+  E2E_SCOPE_STATES_MAX,
+  isE2EScopeStatesScope,
   e2eDeviceCanonical,
   e2eDeviceCrossCanonical,
   e2eKeyCanonical,
@@ -30,6 +34,8 @@ import {
   parseE2EEnvelope,
   parseE2EScope,
   type E2EPreKey,
+  type E2EScopeStateEntry,
+  type E2EScopeStatesRequest,
 } from '@voxium/shared';
 import { verifyEd25519Signature } from '../utils/e2eVerify';
 
@@ -1970,6 +1976,96 @@ e2eRouter.delete('/message-keys', rateLimitE2EShares, async (req: Request, res: 
     const { count } = await prisma.e2EMessageKeyBackup.deleteMany({ where: { userId } });
 
     res.json({ success: true, data: { deleted: count } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Which cached scopes still exist for the caller (spec §9.1) ──────────────
+// A device names the scopes its plaintext cache holds (direct conversations,
+// and secure channels as `ch:{channelId}`) and learns, per scope, what this
+// account can still reach of it, so that it stops keeping the text of what it
+// cannot (docs/e2e-dm-spec.md §9.1, "What a device asks about its cache").
+//
+// Opaque: a scope that is not the caller's answers exactly like one that never
+// existed (`gone`), and costs exactly the same statements, since the caller's
+// own rows are the filter of each statement, never a second look-up:
+//  - the conversations among those asked of which the caller is a side, with
+//    the caller's own read row (one statement: the relation load is a join);
+//  - the secure channels among those asked of which the caller is a member,
+//    in a space the caller is a member of (the readers' rule: a ChannelMember
+//    row counts only with the space membership behind it).
+// One statement per KIND of scope asked, whatever the number of scopes; a
+// request naming no channel runs no channel statement. It writes nothing and
+// locks nothing: the answer is the state at the time of the read.
+
+type Unchecked<T> = { [K in keyof T]?: unknown };
+
+/** The scopes asked, checked before any query: 1 to E2E_SCOPE_STATES_MAX, each a scope the route takes, each once. */
+function readScopeStatesRequest(body: unknown): string[] {
+  const scopes = (body as Unchecked<E2EScopeStatesRequest> | undefined)?.scopes;
+  if (!Array.isArray(scopes) || scopes.length === 0 || scopes.length > E2E_SCOPE_STATES_MAX) {
+    throw new BadRequestError(`scopes must contain 1–${E2E_SCOPE_STATES_MAX} entries`);
+  }
+  scopes.forEach((scope: unknown, index) => {
+    if (!isE2EScopeStatesScope(scope)) {
+      throw new BadRequestError(`scopes[${index}]: a scope is a conversation id, or ch: followed by a channel id`);
+    }
+  });
+  if (new Set(scopes).size !== scopes.length) throw new BadRequestError('Duplicate scopes in batch');
+  return scopes as string[];
+}
+
+e2eRouter.post('/scopes/states', rateLimitE2EScopeStates, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const scopes = readScopeStatesRequest(req.body);
+
+    const conversationIds = scopes.filter((scope) => !scope.startsWith(E2E_CHANNEL_SCOPE_PREFIX));
+    const channelIds = scopes
+      .filter((scope) => scope.startsWith(E2E_CHANNEL_SCOPE_PREFIX))
+      .map((scope) => scope.slice(E2E_CHANNEL_SCOPE_PREFIX.length));
+
+    const [conversations, channels] = await Promise.all([
+      conversationIds.length === 0
+        ? Promise.resolve([] as Array<{ id: string; reads: Array<{ hiddenAt: Date | null; clearedAt: Date | null }> }>)
+        : prisma.conversation.findMany({
+            // a side is the caller: a conversation of two other people, like
+            // one that does not exist (deleted included), is simply not read
+            where: { id: { in: conversationIds }, OR: [{ user1Id: userId }, { user2Id: userId }] },
+            select: { id: true, reads: { where: { userId }, select: { hiddenAt: true, clearedAt: true } } },
+          }),
+      channelIds.length === 0
+        ? Promise.resolve([] as Array<{ id: string }>)
+        : prisma.channel.findMany({
+            where: {
+              id: { in: channelIds },
+              secure: true,
+              members: { some: { userId } },
+              server: { members: { some: { userId } } },
+            },
+            select: { id: true },
+          }),
+    ]);
+
+    const readOf = new Map(conversations.map((c) => [c.id, c.reads[0] ?? null]));
+    const memberOf = new Set(channels.map((c) => c.id));
+    const data: E2EScopeStateEntry[] = scopes.map((scope): E2EScopeStateEntry => {
+      if (scope.startsWith(E2E_CHANNEL_SCOPE_PREFIX)) {
+        return { scope, state: memberOf.has(scope.slice(E2E_CHANNEL_SCOPE_PREFIX.length)) ? 'open' : 'gone' };
+      }
+      if (!readOf.has(scope)) return { scope, state: 'gone' };
+      // no read row yet: on the caller's list, nothing cleared
+      const read = readOf.get(scope) ?? null;
+      return {
+        scope,
+        state: read?.hiddenAt ? 'hidden' : 'open',
+        // the floor, hidden or not, in the form GET /dm serves it
+        ...(read?.clearedAt ? { clearedUntil: read.clearedAt.toISOString() } : {}),
+      };
+    });
+
+    res.json({ success: true, data });
   } catch (err) {
     next(err);
   }

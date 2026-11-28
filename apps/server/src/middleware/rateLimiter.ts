@@ -281,6 +281,15 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // acknowledgement only means the shares are handed out again. Each request
   // deletes at most a page of the caller's own rows.
   e2eShareAck:    { keyPrefix: 'rl:e2eack',    points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Key Share Acknowledgements' },
+  // Which cached scopes still exist for the caller (POST /e2e/scopes/states):
+  // a device asks at most once a day, in at most 20 requests of 100 scopes
+  // (CACHE_SWEEP_MAX_REQUESTS, apps/desktop/src/services/cacheSweep.ts), and a
+  // run that failed is asked again at its next start. 200 an hour per account
+  // is every device of an account (E2E_LIMITS.MAX_DEVICES, 5) running twice
+  // in the same hour. Each request is two indexed reads of the caller's own
+  // rows and writes nothing; a refused request only means the device asks at
+  // its next start.
+  e2eScopeStates: { keyPrefix: 'rl:e2escope',  points: 200, duration: 3600, blockDuration: 0, keyType: 'userId', label: 'E2E Cached Scope States' },
   // Cross-signing writes must NOT share the 5/hour device-registration
   // bucket: setting up several devices costs a publish plus one approval
   // each, and a 429 mid-approval leaves a device half-approved.
@@ -1126,6 +1135,7 @@ export const rateLimitE2EBundle = createMiddleware('e2eBundle', byUserId);
 export const rateLimitE2EStatus = createMiddleware('e2eStatus', byUserId);
 export const rateLimitE2EShares = createMiddleware('e2eShares', byUserId);
 export const rateLimitE2EShareAck = createMiddleware('e2eShareAck', byUserId);
+export const rateLimitE2EScopeStates = createMiddleware('e2eScopeStates', byUserId);
 export const rateLimitE2EApprove = createMiddleware('e2eApprove', byUserId);
 // Incoming webhooks. Mount the per-IP bucket FIRST on the execute route; mount
 // rateLimitWebhookExecute ONLY AFTER the token has been validated — its key is

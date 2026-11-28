@@ -37,6 +37,7 @@ import type {
   E2EKeySharePayload,
   E2EOlmEnvelope,
   E2EPreKey,
+  E2EScopeStatesRequest,
 } from '@voxium/shared';
 import { api as defaultApi } from '../api';
 import {
@@ -58,6 +59,7 @@ import {
 import {
   E2EVault,
   E2EVaultClosedError,
+  type CacheSweepRecord,
   type DeviceListState,
   type HistoryPullMarker,
   type InboundGroupSessionRecord,
@@ -68,6 +70,7 @@ import {
   type PickleKeyProvider,
   type PinnedIdentity,
   type PlaintextPurgeEntry,
+  type PlaintextScopeEntry,
   vaultDbName,
 } from './vault';
 import { defaultPickleKeyProvider } from './pickleKeyProvider';
@@ -360,6 +363,19 @@ export const READ_ONLY_PURGE_MARK = 'read-only';
  * read-only one.
  */
 export const CLEARED_HISTORY_PURGE_MARK = 'cleared';
+
+/**
+ * The purge mark of a scope the server answered `gone` to this device's
+ * sweep of its cache (`ptpurge:gone:{scope}`, services/cacheSweep.ts): when
+ * the purge of every `pt:` entry of that scope ended. A record only: the
+ * sweep clears it before each purge, since it asks only about a scope its
+ * cache holds entries of, and such a scope must be walked again (a secure
+ * channel rejoined under the same id caches text again).
+ */
+export const GONE_SCOPE_PURGE_MARK = 'gone';
+
+/** How long a request of the cache sweep (`POST /e2e/scopes/states`) waits for its answer. */
+export const SCOPE_STATES_REQUEST_TIMEOUT_MS = 15_000;
 
 /** After a read of the purge marks failed, questions answer "not marked" for this long before the marks are read again. */
 export const PURGE_MARK_RETRY_MS = 30_000;
@@ -5587,6 +5603,51 @@ export class E2EService {
       return chosen;
     });
     return { removed, marked: [...alreadyMarked, ...recorded] };
+  }
+
+  // ─── The sweep of the plaintext cache (services/cacheSweep.ts) ──────────────
+  // The rules live in cacheSweep.ts; the service only gives it what is
+  // private here: the serial queue, the vault and the guarded client.
+
+  /**
+   * One batch of the sweep's read-only walk of the `pt:` cache: at most
+   * `limit` entries after the key `after` (from the start when null), each
+   * entry's key and scope, never its text, and the key to resume after (null
+   * once the cache is walked). One task of the serial queue, so it is ordered
+   * with the decrypts and the sends that write entries; refused once the
+   * service is disposed or the page gave the vault up. Writes nothing.
+   */
+  listCachedScopes(after: string | null, limit: number): Promise<{ entries: PlaintextScopeEntry[]; next: string | null }> {
+    this.assertLive();
+    return this.enqueue(() => this.vault.listPlaintextScopes(after, limit));
+  }
+
+  /** The sweep's record (`cache_sweep`) as the vault holds it, unread: cacheSweep.ts checks the shape. On the queue. */
+  readCacheSweepRecord(): Promise<unknown> {
+    this.assertLive();
+    return this.enqueue(() => this.vault.getCacheSweep());
+  }
+
+  /** Store the sweep's record (`cache_sweep`): a fenced write, on the queue. */
+  writeCacheSweepRecord(record: CacheSweepRecord): Promise<void> {
+    this.assertLive();
+    return this.enqueue(() => this.vault.putCacheSweep(record));
+  }
+
+  /**
+   * Ask the server what this account can still reach of these scopes
+   * (`POST /e2e/scopes/states`), through the guarded client and OFF the
+   * queue: a slow answer holds no decrypt. Nothing leaves once the service is
+   * disposed or the page gave the vault up, and an answer landing after a
+   * dispose is dropped (E2EServiceDisposedError). Bounded by
+   * SCOPE_STATES_REQUEST_TIMEOUT_MS. Answers the body as it came: the sweep
+   * checks every field before it uses one.
+   */
+  async fetchScopeStates(scopes: readonly string[]): Promise<unknown> {
+    this.assertLive();
+    const body: E2EScopeStatesRequest = { scopes: [...scopes] };
+    const res = await this.api.post('/e2e/scopes/states', body, { timeout: SCOPE_STATES_REQUEST_TIMEOUT_MS });
+    return res.data as unknown;
   }
 
   // ─── Device management for the UI ───────────────────────────────────────────
