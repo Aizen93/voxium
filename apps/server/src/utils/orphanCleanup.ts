@@ -27,12 +27,13 @@ import { getRedis } from './redis';
 import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
 import { ORPHAN_GRACE_DAYS } from '@voxium/shared';
 import { describeCaughtError, describeCaughtErrorWithStack, storeCall } from './loggableError';
+import { runJob, resultOf, type JobRun } from './jobs';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
 
-const SWEEP_HOUR = 5;
-const SWEEP_MINUTE = 0;
+export const SWEEP_HOUR = 5;
+export const SWEEP_MINUTE = 0;
 /** Objects younger than this are never touched — see the ordering note above.
  *  Lives in @voxium/shared (the admin dashboard quotes it); re-exported here
  *  so this module's existing importers keep working. */
@@ -107,7 +108,10 @@ function scheduleNext(afterRun: boolean) {
   const delay = msUntilDailySlot(SWEEP_HOUR, SWEEP_MINUTE, afterRun);
   console.log(`[OrphanSweep] Next sweep in ${Math.round(delay / 60000)} minutes`);
   timeoutId = setTimeout(() => {
-    runScheduledOrphanCleanup()
+    // Through the job registry's wrapper (utils/jobs.ts), around the lock:
+    // switched off, nothing runs and the next slot is taken as after a run
+    runJob('orphan-cleanup', (run) => runScheduledOrphanCleanup({ run }))
+      .then(resultOf)
       .catch((err) => console.error('[OrphanSweep] Sweep failed:', describeCaughtErrorWithStack(err)))
       .finally(() => scheduleNext(true));
   }, delay);
@@ -116,8 +120,10 @@ function scheduleNext(afterRun: boolean) {
 
 /** The scheduled entry point: claims the cluster lock, then sweeps.
  *  `force` lifts the proportional bound only (never the absolute ceiling) and
- *  is reachable from the admin endpoint alone — the scheduler never passes it. */
-export async function runScheduledOrphanCleanup(opts: { force?: boolean } = {}): Promise<OrphanSweepResult> {
+ *  is reachable from the admin endpoint alone — the scheduler never passes it.
+ *  `run` (the job registry's handle, utils/jobs.ts) is given by the scheduler
+ *  and by the admin trigger, and told the lock's answer, a refusal and the counts. */
+export async function runScheduledOrphanCleanup(opts: { force?: boolean; run?: JobRun } = {}): Promise<OrphanSweepResult> {
   const owner = lockToken();
   let claimed: string | null;
   try {
@@ -126,12 +132,18 @@ export async function runScheduledOrphanCleanup(opts: { force?: boolean } = {}):
     // Fail CLOSED: without the lock we cannot tell whether a peer is already
     // scanning, and a destructive sweep is not worth racing.
     console.warn('[OrphanSweep] Could not claim the sweep lock — skipping this run:', describeCaughtError(err));
+    opts.run?.skip('store-unavailable');
     return { ...EMPTY, skipped: 'not-leader' };
   }
-  if (claimed === null) return { ...EMPTY, skipped: 'not-leader' };
+  if (claimed === null) {
+    opts.run?.lockHeld();
+    return { ...EMPTY, skipped: 'not-leader' };
+  }
 
   try {
-    return await runOrphanCleanup({ force: opts.force });
+    const result = await runOrphanCleanup({ force: opts.force });
+    if (opts.run) noteOrphanSweep(opts.run, result);
+    return result;
   } finally {
     // Release rather than waiting out the TTL, so a sweep that fails early can
     // be retried inside the hour instead of being locked out by its own corpse
@@ -141,6 +153,16 @@ export async function runScheduledOrphanCleanup(opts: { force?: boolean } = {}):
     await releaseLockIfOwned(getRedis(), LOCK_KEY, owner).catch((err) =>
       console.warn('[OrphanSweep] Lock release failed (it expires on its own):', describeCaughtError(err)));
   }
+}
+
+/** What a sweep tells the job registry's run: its counts, and a refusal as a skip. */
+function noteOrphanSweep(run: JobRun, result: OrphanSweepResult): void {
+  run.count('scanned', result.scanned);
+  run.count('orphaned', result.orphaned);
+  run.count('deleted', result.deleted);
+  run.count('withinGrace', result.tooYoung);
+  run.count('notOurs', result.foreign);
+  if (result.skipped === 'over-cap' || result.skipped === 'over-fraction') run.skip(result.skipped);
 }
 
 /**

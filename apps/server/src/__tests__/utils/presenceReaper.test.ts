@@ -22,6 +22,8 @@ import {
   reapStalePresence, startPresenceReaper, stopPresenceReaper,
   PRESENCE_REAP_INTERVAL_MS, PRESENCE_REAP_LOCK_TTL_S, PRESENCE_REAP_LOCK_KEY,
 } from '../../utils/presenceReaper';
+import { jobDefinition, JOB_QUIET_RECORD_INTERVAL_MS } from '../../utils/jobs';
+import { useFakeJobStore, restoreJobStore, type FakeJobStore } from '../helpers/jobStoreFake';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -222,5 +224,77 @@ describe('presenceReaper — interval', () => {
     await vi.advanceTimersByTimeAsync(PRESENCE_REAP_INTERVAL_MS);
     expect(mockClearPresenceState).toHaveBeenCalledTimes(2);
     warn.mockRestore();
+  });
+});
+
+// Each tick goes through the job registry's wrapper (utils/jobs.ts): never
+// switched (no mode is read), recorded on change, at most once an hour when
+// quiet.
+describe('presenceReaper — the job registry', () => {
+  let jobs: FakeJobStore;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    jobs = useFakeJobStore();
+    mockRedisSet.mockResolvedValue('OK');
+    mockRedisEval.mockResolvedValue(1);
+    mockIsUserOnline.mockResolvedValue(false);
+    mockClearPresenceState.mockResolvedValue({ skipped: false, offlineUserIds: [] });
+  });
+  afterEach(() => {
+    stopPresenceReaper();
+    restoreJobStore();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('states the schedule the module keeps, and is not switchable', () => {
+    const job = jobDefinition('presence-reaper')!;
+    expect(job.schedule).toEqual({ kind: 'interval', seconds: PRESENCE_REAP_INTERVAL_MS / 1000 });
+    expect(job.switchable).toBe(false);
+  });
+
+  it('never reads a mode: a stored off does not stop it', async () => {
+    jobs.modes.set('presence-reaper', 'off');
+    startPresenceReaper(makeIO() as never, makeDb());
+    await vi.advanceTimersByTimeAsync(PRESENCE_REAP_INTERVAL_MS);
+    expect(mockClearPresenceState).toHaveBeenCalledTimes(1);
+    expect(jobs.readMode).not.toHaveBeenCalled();
+  });
+
+  it('a quiet hour writes one row; a tick that took users offline writes one at once, with the count', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    startPresenceReaper(makeIO() as never, makeDb());
+    await vi.advanceTimersByTimeAsync(PRESENCE_REAP_INTERVAL_MS * 10);
+    expect(jobs.runs).toHaveLength(1);
+    expect(jobs.runs[0]).toMatchObject({ job: 'presence-reaper', outcome: 'success', summary: { usersOffline: 0 } });
+
+    mockClearPresenceState.mockResolvedValueOnce({ skipped: false, offlineUserIds: ['u-a', 'u-b'] });
+    await vi.advanceTimersByTimeAsync(PRESENCE_REAP_INTERVAL_MS);
+    expect(jobs.runs).toHaveLength(2);
+    expect(jobs.runs[1].summary).toEqual({ usersOffline: 2 });
+    expect(JSON.stringify(jobs.runs)).not.toContain('u-a');
+
+    await vi.advanceTimersByTimeAsync(JOB_QUIET_RECORD_INTERVAL_MS);
+    expect(jobs.runs).toHaveLength(3);
+  });
+
+  it('a refused snapshot is recorded as a skip; a tick another node held is not recorded', async () => {
+    mockClearPresenceState.mockResolvedValueOnce({ skipped: true, offlineUserIds: [] });
+    startPresenceReaper(makeIO() as never, makeDb());
+    await vi.advanceTimersByTimeAsync(PRESENCE_REAP_INTERVAL_MS);
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'snapshot-refused', summary: null });
+    mockRedisSet.mockResolvedValue(null);
+    await vi.advanceTimersByTimeAsync(PRESENCE_REAP_INTERVAL_MS * 3);
+    expect(jobs.runs).toHaveLength(1);
+  });
+
+  it('a failing sweep is recorded as failed and still logged as before', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockClearPresenceState.mockRejectedValueOnce(new Error('redis down'));
+    startPresenceReaper(makeIO() as never, makeDb());
+    await vi.advanceTimersByTimeAsync(PRESENCE_REAP_INTERVAL_MS);
+    expect(warn).toHaveBeenCalledWith('[Presence] Stale presence reap failed:', 'redis down');
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'failed', error: 'Error: redis down' });
   });
 });

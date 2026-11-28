@@ -29,6 +29,7 @@ vi.mock('../../stores/adminStore', () => ({ useAdminStore: Object.assign(() => s
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }));
 vi.mock('../../stores/toastStore', () => ({ toast }));
 
+import { AxiosError, AxiosHeaders } from 'axios';
 import { ORPHAN_GRACE_DAYS } from '@voxium/shared';
 import { AdminStorage } from '../../components/AdminStorage';
 
@@ -97,6 +98,22 @@ describe('AdminStorage — orphan clean-up', () => {
     const message = toast.error.mock.calls[0][0] as string;
     expect(message).toContain('Nothing was deleted');
     expect(message).toContain('POST /api/v1/admin/storage/cleanup-orphans?dryRun=1');
+  });
+
+  it('a 409 shows the server\'s own sentence (a sweep already running, or the job switched off); any other failure keeps its words', async () => {
+    const refusal = (status: number, error: string) => new AxiosError('failed', 'ERR_BAD_REQUEST', undefined, null, {
+      status, statusText: '', headers: {}, config: { headers: new AxiosHeaders() }, data: { success: false, error },
+    });
+    store.cleanupOrphans.mockRejectedValueOnce(refusal(409, 'This job is switched off'));
+    await render();
+    await openCleanup();
+    await act(async () => { button('Delete Orphans')!.click(); });
+    expect(toast.error).toHaveBeenLastCalledWith('This job is switched off');
+
+    store.cleanupOrphans.mockRejectedValueOnce(refusal(500, 'Internal server error'));
+    await openCleanup();
+    await act(async () => { button('Delete Orphans')!.click(); });
+    expect(toast.error).toHaveBeenLastCalledWith('Failed to cleanup orphans');
   });
 
   it('a completed run reports how many of the candidates went', async () => {

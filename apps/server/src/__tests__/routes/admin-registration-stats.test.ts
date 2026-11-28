@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -44,6 +44,7 @@ vi.mock('../../middleware/rateLimiter', () => {
 
 vi.mock('../../utils/redis', () => ({
   getOnlineUsers: vi.fn().mockResolvedValue([]),
+  NODE_ID: () => 'node-under-test',
 }));
 
 vi.mock('../../websocket/voiceHandler', () => ({
@@ -106,6 +107,7 @@ vi.mock('../../utils/orphanCleanup', () => ({
 
 import { adminRouter } from '../../routes/admin';
 import { errorHandler } from '../../middleware/errorHandler';
+import { useFakeJobStore, restoreJobStore } from '../helpers/jobStoreFake';
 
 function createApp() {
   const app = express();
@@ -237,8 +239,81 @@ describe('admin registration hygiene sweep', () => {
       .set('Authorization', `Bearer ${makeToken()}`);
 
     expect(res.status).toBe(200);
-    expect(hygieneRun).toHaveBeenCalledWith({ trigger: 'manual', actorId: 'admin-1', dryRun: false });
+    expect(hygieneRun).toHaveBeenCalledWith({ trigger: 'manual', actorId: 'admin-1', run: expect.objectContaining({ job: 'registration-hygiene', mode: 'on' }) });
     expect(res.body.data.deletedUsers).toBe(112);
+  });
+
+  describe('through the job registry', () => {
+    afterEach(() => { restoreJobStore(); });
+
+    it('POST on a job switched off answers 409 with the sentence, runs nothing and records nothing', async () => {
+      const jobs = useFakeJobStore();
+      jobs.modes.set('registration-hygiene', 'off');
+      const res = await request(createApp())
+        .post('/api/v1/admin/registration/hygiene')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('This job is switched off');
+      expect(hygieneRun).not.toHaveBeenCalled();
+      expect(jobs.runs).toHaveLength(0);
+    });
+
+    it('POST on a job that is on runs it and records the run with the word manual', async () => {
+      const jobs = useFakeJobStore();
+      const res = await request(createApp())
+        .post('/api/v1/admin/registration/hygiene')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.deletedUsers).toBe(112);
+      expect(jobs.runs).toHaveLength(1);
+      expect(jobs.runs[0]).toMatchObject({ job: 'registration-hygiene', outcome: 'success', summary: { trigger: 'manual' } });
+    });
+
+    it('POST answers the error of a mode that cannot be read, and runs nothing', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const jobs = useFakeJobStore();
+      jobs.readMode.mockRejectedValue(new Error('db down'));
+      const res = await request(createApp())
+        .post('/api/v1/admin/registration/hygiene')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(500);
+      expect(hygieneRun).not.toHaveBeenCalled();
+      expect(jobs.runs).toHaveLength(0);
+    });
+
+    it('POST runs when only the settings table is missing (P2021)', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const jobs = useFakeJobStore();
+      jobs.readMode.mockRejectedValue(Object.assign(new Error('missing'), { code: 'P2021' }));
+      const res = await request(createApp())
+        .post('/api/v1/admin/registration/hygiene')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(hygieneRun).toHaveBeenCalledTimes(1);
+    });
+
+    it('POST that finds the lock held is the 409 of before and records nothing', async () => {
+      const jobs = useFakeJobStore();
+      hygieneRun.mockImplementation(async (opts: { run: { lockHeld(): void } }) => { opts.run.lockHeld(); return { skipped: 'locked' }; });
+      const res = await request(createApp())
+        .post('/api/v1/admin/registration/hygiene')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('A hygiene sweep is already running. Try again shortly.');
+      expect(jobs.runs).toHaveLength(0);
+    });
+
+    it('a dry run goes around the registry: it deletes nothing, so a job that is off can still be looked at', async () => {
+      const jobs = useFakeJobStore();
+      jobs.modes.set('registration-hygiene', 'off');
+      hygieneRun.mockResolvedValue({ ...RUN, dryRun: true });
+      const res = await request(createApp())
+        .post('/api/v1/admin/registration/hygiene?dryRun=1')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(jobs.readMode).not.toHaveBeenCalled();
+      expect(jobs.runs).toHaveLength(0);
+    });
   });
 
   it('POST ?dryRun=1 asks for a dry run', async () => {
@@ -300,8 +375,59 @@ describe('POST /api/v1/admin/storage/cleanup-orphans', () => {
       .set('Authorization', `Bearer ${makeToken()}`);
 
     expect(res.status).toBe(200);
-    expect(orphanScheduled).toHaveBeenCalledWith({ force: false });
+    expect(orphanScheduled).toHaveBeenCalledWith({ force: false, run: expect.objectContaining({ job: 'orphan-cleanup', mode: 'on' }) });
     expect(orphanRun).not.toHaveBeenCalled();
+  });
+
+  describe('through the job registry', () => {
+    afterEach(() => { restoreJobStore(); });
+
+    it('a job switched off answers 409 with the sentence, runs nothing and records nothing', async () => {
+      mockAdminAuth();
+      const jobs = useFakeJobStore();
+      jobs.modes.set('orphan-cleanup', 'off');
+      const res = await request(createApp())
+        .post('/api/v1/admin/storage/cleanup-orphans')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('This job is switched off');
+      expect(orphanScheduled).not.toHaveBeenCalled();
+      expect(jobs.runs).toHaveLength(0);
+    });
+
+    it('a job that is on runs and the run is recorded with the word manual', async () => {
+      mockAdminAuth();
+      const jobs = useFakeJobStore();
+      const res = await request(createApp())
+        .post('/api/v1/admin/storage/cleanup-orphans')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(jobs.runs).toHaveLength(1);
+      expect(jobs.runs[0]).toMatchObject({ job: 'orphan-cleanup', outcome: 'success', summary: { trigger: 'manual' } });
+    });
+
+    it('a mode that cannot be read answers the error it got and runs nothing', async () => {
+      mockAdminAuth();
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const jobs = useFakeJobStore();
+      jobs.readMode.mockRejectedValue(new Error('db down'));
+      const res = await request(createApp())
+        .post('/api/v1/admin/storage/cleanup-orphans')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(500);
+      expect(orphanScheduled).not.toHaveBeenCalled();
+    });
+
+    it('a dry run goes around the registry', async () => {
+      mockAdminAuth();
+      const jobs = useFakeJobStore();
+      jobs.modes.set('orphan-cleanup', 'off');
+      const res = await request(createApp())
+        .post('/api/v1/admin/storage/cleanup-orphans?dryRun=1')
+        .set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(jobs.readMode).not.toHaveBeenCalled();
+    });
   });
 
   it('passes ?force=1 through to the locked sweep — the only place the proportional bound can be lifted', async () => {
@@ -312,7 +438,7 @@ describe('POST /api/v1/admin/storage/cleanup-orphans', () => {
       .set('Authorization', `Bearer ${makeToken()}`);
 
     expect(res.status).toBe(200);
-    expect(orphanScheduled).toHaveBeenCalledWith({ force: true });
+    expect(orphanScheduled).toHaveBeenCalledWith({ force: true, run: expect.anything() });
   });
 
   it('reports a refusal as a refusal, with what was scanned, so the UI cannot read it as success', async () => {

@@ -52,6 +52,8 @@ import { startOrphanCleanup, stopOrphanCleanup } from './utils/orphanCleanup';
 import { startReportRetention, stopReportRetention } from './utils/reportRetention';
 import { startDiscoveryStats, stopDiscoveryStats } from './utils/discoveryStats';
 import { prisma } from './utils/prisma';
+import { setJobStore } from './utils/jobs';
+import { prismaJobStore } from './utils/jobStore';
 import { initRedis, clearPresenceState, NODE_ID, NODE_HEARTBEAT_TTL_S, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
 import { checkRedisEvictionPolicy } from './utils/redisPolicy';
 import { logSmtpSecurity, verifySmtpRelayAtStart } from './utils/email';
@@ -79,6 +81,9 @@ async function main() {
   // Connect to database
   await prisma.$connect();
   console.log('[DB] Connected to PostgreSQL');
+  // The scheduled jobs read their mode and record their runs here (utils/jobs.ts):
+  // set before any job starts
+  setJobStore(prismaJobStore);
 
   // Connect to Redis
   const redis = await initRedis();

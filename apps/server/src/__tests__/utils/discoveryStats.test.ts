@@ -34,6 +34,9 @@ import {
   DISCOVERY_HOUSEKEEPING_HOURLY_TTL_S, DISCOVERY_HOUSEKEEPING_DAILY_TTL_S, DISCOVERY_BACKLOG_COUNT_CAP,
 } from '../../utils/discoveryStats';
 
+import { jobDefinition } from '../../utils/jobs';
+import { useFakeJobStore, restoreJobStore, type FakeJobStore } from '../helpers/jobStoreFake';
+
 const ids = (n: number, prefix = 's') => Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i}` }));
 const sqlOf = (call: unknown[]) => (call[0] as string[]).join('?').replace(/\s+/g, ' ');
 
@@ -382,5 +385,74 @@ describe('housekeeping on the same timer', () => {
     expect(sql).toContain('LIMIT ?');
     expect(values).toEqual([new Date(now.getTime() - 48 * 3600 * 1000), DISCOVERY_BACKLOG_COUNT_CAP + 1]);
     expect(prismaMock.server.count).not.toHaveBeenCalled();
+  });
+});
+
+// The cycle goes through the job registry's wrapper (utils/jobs.ts), around
+// the lock: switched off it claims nothing and reads nothing, and a cycle
+// hands over what each part counted. Every 5 minutes, it is recorded on
+// change (a count that is not zero, a new outcome, a failure, else hourly).
+describe('discovery cycle — the job registry', () => {
+  let jobs: FakeJobStore;
+  beforeEach(() => { jobs = useFakeJobStore(); });
+  afterEach(() => { restoreJobStore(); });
+
+  it('states the schedule the module keeps: every 5 minutes', () => {
+    expect(jobDefinition('discovery-cycle')!.schedule).toEqual({ kind: 'interval', seconds: DISCOVERY_STATS_INTERVAL_MS / 1000 });
+    expect(jobDefinition('discovery-cycle')!.recording).toBe('on-change');
+  });
+
+  it('records a cycle with its refresh and its hourly housekeeping counts', async () => {
+    vi.useFakeTimers({ now: new Date(2026, 9, 10, 15, 30, 0), toFake: ['Date'] });
+    prismaMock.server.findMany.mockResolvedValueOnce(ids(3)).mockResolvedValue([]);
+    prismaMock.serverJoinRequest.deleteMany.mockResolvedValueOnce({ count: 2 }).mockResolvedValueOnce({ count: 1 });
+    await runDiscoveryStatsCycle();
+    expect(jobs.runs).toHaveLength(1);
+    expect(jobs.runs[0]).toMatchObject({
+      job: 'discovery-cycle', outcome: 'success',
+      summary: { refreshed: 3, batches: 1, backlog: 0, declinedJoinRequests: 2, stalePendingJoinRequests: 1, tierPopulation: 50 },
+    });
+  });
+
+  it('in the 04:00 hour it also records the drift corrections', async () => {
+    vi.useFakeTimers({ now: new Date(2026, 9, 10, DISCOVERY_HOUSEKEEPING_HOUR, 30, 0), toFake: ['Date'] });
+    prismaMock.$executeRaw.mockResolvedValueOnce(4).mockResolvedValueOnce(1).mockResolvedValueOnce(1);
+    await runDiscoveryStatsCycle();
+    expect(jobs.runs[0].summary).toMatchObject({ driftMemberCounts: 4, driftListingFlags: 2 });
+  });
+
+  it('a quiet cycle right after a recorded one is not recorded; one with a count is', async () => {
+    vi.useFakeTimers({ now: new Date(2026, 9, 10, 15, 30, 0), toFake: ['Date'] });
+    // the lock is claimed, the hourly housekeeping is a peer's this hour
+    redis.set.mockImplementation(async (key: string) => (key === DISCOVERY_STATS_LOCK_KEY ? 'OK' : null));
+    await runDiscoveryStatsCycle();
+    await runDiscoveryStatsCycle();
+    expect(jobs.runs).toHaveLength(1);
+    prismaMock.server.findMany.mockResolvedValueOnce(ids(1)).mockResolvedValue([]);
+    await runDiscoveryStatsCycle();
+    expect(jobs.runs).toHaveLength(2);
+    expect(jobs.runs[1].summary).toMatchObject({ refreshed: 1 });
+  });
+
+  it('switched off: no lock, no read, nothing recorded, null, re-armed at the interval', async () => {
+    jobs.modes.set('discovery-cycle', 'off');
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    startDiscoveryStats();
+    await expect(runDiscoveryStatsCycle()).resolves.toBeNull();
+    expect(redis.set).not.toHaveBeenCalled();
+    expect(prismaMock.server.findMany).not.toHaveBeenCalled();
+    expect(jobs.runs).toHaveLength(0);
+    expect(timeouts).toHaveBeenLastCalledWith(expect.any(Function), DISCOVERY_STATS_INTERVAL_MS);
+  });
+
+  it('a failed cycle is recorded as failed and logged as before; a lost lock is not recorded', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.server.findMany.mockRejectedValueOnce(new Error('db gone'));
+    await expect(runDiscoveryStatsCycle()).resolves.toBeNull();
+    expect(error).toHaveBeenCalledWith('[Discovery] Stats cycle failed:', 'db gone');
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'failed', error: 'Error: db gone' });
+    redis.set.mockResolvedValue(null);
+    await runDiscoveryStatsCycle();
+    expect(jobs.runs).toHaveLength(1);
   });
 });

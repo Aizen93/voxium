@@ -39,6 +39,8 @@ import {
   webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion, disarmWebhookRowsHeldBy,
 } from '../utils/webhookLifecycle';
 import { describeCaughtError, describeCaughtErrorWithStack, storeCall } from '../utils/loggableError';
+import { JOBS, jobDefinition, runJobByHand } from '../utils/jobs';
+import { listAdminJobs, readJobRunsPage, writeJobMode, isJobMode, jobAsWritten, JOB_RUNS_PAGE_DEFAULT, JOB_RUNS_PAGE_MAX } from '../utils/jobStore';
 
 export const adminRouter = Router();
 
@@ -175,11 +177,13 @@ adminRouter.get('/registration/hygiene', async (_req: Request, res: Response, ne
 adminRouter.post('/registration/hygiene', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
-    const result = await runRegistrationHygieneLocked({
-      trigger: 'manual',
-      actorId: req.user!.userId,
-      dryRun,
-    });
+    // A run that deletes goes through the job registry like a scheduled one
+    // (refused while the job is switched off, recorded); a dry run deletes
+    // nothing, so an operator can always look
+    const actor = { trigger: 'manual', actorId: req.user!.userId } as const;
+    const result = dryRun
+      ? await runRegistrationHygieneLocked({ ...actor, dryRun })
+      : await runJobByHand('registration-hygiene', (run) => runRegistrationHygieneLocked({ ...actor, run }));
 
     if ('skipped' in result) {
       // A sweep is already running — on this node or a peer. Saying so is more
@@ -2462,6 +2466,90 @@ adminRouter.post('/feature-flags/:name/reset', async (req: Request<{ name: strin
   }
 });
 
+// ─── Scheduled jobs ─────────────────────────────────────────────────────────
+// The registry's jobs (utils/jobs.ts), their runs and their switch (the
+// statements: utils/jobStore.ts). Every administrator may read; switching a
+// job changes what the platform keeps (the session sweep, the hygiene sweep,
+// the retention jobs), so only a superadmin may switch one.
+
+/** The largest id a run can have (job_runs.id is an INTEGER). */
+const JOB_RUN_ID_MAX = 2_147_483_647;
+
+/** `limit`: absent is the default; otherwise a whole number from 1 to JOB_RUNS_PAGE_MAX. */
+function readJobRunsLimit(raw: unknown): number {
+  if (raw === undefined) return JOB_RUNS_PAGE_DEFAULT;
+  const n = typeof raw === 'string' && /^\d{1,3}$/.test(raw) ? Number(raw) : NaN;
+  if (!(n >= 1 && n <= JOB_RUNS_PAGE_MAX)) throw new BadRequestError(`limit must be a whole number from 1 to ${JOB_RUNS_PAGE_MAX}`);
+  return n;
+}
+
+/** `before`: absent for the first page; otherwise the id of a run (the `nextCursor` of the page before). */
+function readJobRunsBefore(raw: unknown): number | null {
+  if (raw === undefined) return null;
+  const n = typeof raw === 'string' && /^\d{1,10}$/.test(raw) ? Number(raw) : NaN;
+  if (!(n >= 1 && n <= JOB_RUN_ID_MAX)) throw new BadRequestError('before must be a run id');
+  return n;
+}
+
+adminRouter.get('/jobs', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({ success: true, data: await listAdminJobs(JOBS) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/jobs/:name/runs', async (req: Request<{ name: string }>, res: Response, next: NextFunction) => {
+  try {
+    const definition = jobDefinition(req.params.name);
+    if (!definition) throw new NotFoundError('Job');
+    const limit = readJobRunsLimit(req.query.limit);
+    const before = readJobRunsBefore(req.query.before);
+    res.json({ success: true, data: await readJobRunsPage(definition, limit, before) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Every refusal is a 400 here, an unknown job's too: the write names its job in the path
+adminRouter.put('/jobs/:name', requireSuperAdmin, async (req: Request<{ name: string }>, res: Response, next: NextFunction) => {
+  try {
+    const definition = jobDefinition(req.params.name);
+    if (!definition) throw new BadRequestError('Unknown job');
+    if (!definition.switchable) throw new BadRequestError('This job cannot be switched');
+    const { mode } = (req.body ?? {}) as { mode?: unknown };
+    if (!isJobMode(mode)) throw new BadRequestError('Provide a mode: "off", "count" or "on"');
+    if (mode === 'count' && !definition.supportsCountOnly) throw new BadRequestError('This job has no count mode');
+
+    const actorId = req.user!.userId;
+    const before = await prisma.jobSetting.findUnique({ where: { job: definition.name }, select: { mode: true } });
+    // The RAW stored value (a job with no row was in its default mode)
+    const oldMode = before ? before.mode : definition.defaultMode;
+    const setAt = new Date();
+    await writeJobMode(definition.name, mode, actorId, setAt);
+
+    logAuditEvent({
+      actorId,
+      action: 'job.update',
+      targetType: 'job',
+      targetId: definition.name,
+      metadata: { oldMode, newMode: mode },
+    });
+
+    // The switch is written and audited: a re-read that fails never reports it as failed
+    let job;
+    try {
+      [job] = await listAdminJobs([definition]);
+    } catch (err) {
+      console.warn(`[Admin] The job ${definition.name} was switched, but the list could not be read again: ${describeCaughtError(err)}`);
+      job = jobAsWritten(definition, mode, { id: actorId, username: req.user!.username }, setAt);
+    }
+    res.json({ success: true, data: job });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── Data Export ─────────────────────────────────────────────────────────────
 
 // Exports read whole tables. Fetching them as one statement pins Postgres and
@@ -2837,7 +2925,7 @@ adminRouter.post('/storage/cleanup-orphans', async (req: Request, res: Response,
     // be able to look.
     const result = dryRun
       ? await runOrphanCleanup({ dryRun: true })
-      : await runScheduledOrphanCleanup({ force });
+      : await runJobByHand('orphan-cleanup', (run) => runScheduledOrphanCleanup({ force, run }));
     if (result.skipped === 'not-leader') {
       res.status(409).json({ success: false, error: 'An orphan sweep is already running. Try again once it finishes.' });
       return;

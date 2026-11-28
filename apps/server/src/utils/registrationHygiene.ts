@@ -29,13 +29,14 @@ import { settleReportsOfDeletedAccounts } from './reportSettlement';
 import { announceConversationsOfDeletedAccount } from './accountDeletion';
 import { deleteAttachmentBlobs } from './attachmentBlobs';
 import { IP_RECORD_RETENTION_DAYS } from '@voxium/shared';
+import { runJob, resultOf, type JobRun } from './jobs';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let spikeIntervalId: ReturnType<typeof setInterval> | null = null;
 let stopped = true;
 
-const SWEEP_HOUR = 4;
-const SWEEP_MINUTE = 30;
+export const SWEEP_HOUR = 4;
+export const SWEEP_MINUTE = 30;
 export const UNVERIFIED_ACCOUNT_TTL_DAYS = 7;
 /** The shared constant (the admin dashboard quotes it), under this module's existing name. */
 export const IP_RETENTION_DAYS = IP_RECORD_RETENTION_DAYS;
@@ -109,7 +110,10 @@ function scheduleNext(afterRun: boolean) {
   const delay = msUntilDailySlot(SWEEP_HOUR, SWEEP_MINUTE, afterRun);
   console.log(`[RegHygiene] Next sweep in ${Math.round(delay / 60000)} minutes`);
   timeoutId = setTimeout(() => {
-    runRegistrationHygieneLocked({ trigger: 'scheduled' })
+    // Through the job registry's wrapper (utils/jobs.ts), around the lock:
+    // switched off, nothing runs and the next slot is taken as after a run
+    runJob('registration-hygiene', (run) => runRegistrationHygieneLocked({ trigger: 'scheduled', run }))
+      .then(resultOf)
       .catch((err) => console.error('[RegHygiene] Sweep failed:', err))
       .finally(() => scheduleNext(true));
   }, delay);
@@ -120,7 +124,7 @@ function scheduleNext(afterRun: boolean) {
  * that actually delete should go through `runRegistrationHygieneLocked` so the
  * cluster lock and the run record apply.
  */
-export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): Promise<HygieneResult> {
+export async function runRegistrationHygiene(opts: { dryRun?: boolean; run?: JobRun } = {}): Promise<HygieneResult> {
   const dryRun = opts.dryRun === true;
   const userCutoff = new Date(Date.now() - UNVERIFIED_ACCOUNT_TTL_DAYS * 24 * 60 * 60 * 1000);
   const ipCutoff = new Date(Date.now() - IP_RETENTION_DAYS * 24 * 60 * 60 * 1000);
@@ -132,6 +136,8 @@ export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): P
   if (!dryRun) {
     try {
       const purged = await purgeExpiredSignupState();
+      opts.run?.count('purgedPendingRegistrations', purged.pending);
+      opts.run?.count('purgedMailLedger', purged.ledger);
       if (purged.pending || purged.ledger) {
         console.log(`[RegHygiene] Purged ${purged.pending} expired pending registration(s) and ${purged.ledger} sign-up mail ledger row(s)`);
       }
@@ -386,10 +392,12 @@ export class HygieneBatchFailedError extends Error {
  * the scheduler and the admin trigger both call.
  *
  * A dry run takes no lock and records nothing: it deletes nothing, so there is
- * no concurrency to guard and no history worth keeping.
+ * no concurrency to guard and no history worth keeping. `run` (the job
+ * registry's handle, utils/jobs.ts, given by the scheduler and by the admin
+ * trigger) is told the lock's answer and the counts.
  */
 export async function runRegistrationHygieneLocked(
-  opts: { trigger: 'scheduled' | 'manual'; actorId?: string | null; dryRun?: boolean },
+  opts: { trigger: 'scheduled' | 'manual'; actorId?: string | null; dryRun?: boolean; run?: JobRun },
 ): Promise<HygieneRun | { skipped: 'locked' }> {
   const startedAt = Date.now();
   const base = {
@@ -415,16 +423,21 @@ export async function runRegistrationHygieneLocked(
     // there tomorrow — whereas racing a peer produces the confusing
     // guard-mismatch warning this lock exists to prevent.
     console.warn('[RegHygiene] Could not claim the sweep lock — skipping this run:', err instanceof Error ? err.message : err);
+    opts.run?.skip('store-unavailable');
     return { skipped: 'locked' };
   }
   if (claimed === null) {
     console.log('[RegHygiene] Another node holds the sweep lock — skipping this run');
+    opts.run?.lockHeld();
     return { skipped: 'locked' };
   }
 
   try {
-    const result = await runRegistrationHygiene();
+    const result = await runRegistrationHygiene({ run: opts.run });
     const run: HygieneRun = { ...base, ...result, durationMs: Date.now() - startedAt };
+    opts.run?.count('deletedUsers', result.deletedUsers);
+    opts.run?.count('deletedAvatars', result.deletedAvatars);
+    opts.run?.count('deletedIpRecords', result.deletedIpRecords);
 
     // Unconditional: "it ran and found nothing" is the answer an operator most
     // often needs, and the old log only spoke when it deleted something.

@@ -3,6 +3,7 @@ import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared'
 import { getRedis, getRedisPubSub, getRedisConfigSub, NODE_ID, isNodeAlive } from '../utils/redis';
 import { reapDeadOwnerChannelMirror, announceReapedDepartures } from '../utils/voiceMirror';
 import { cleanupServerVoice, cleanupChannelVoice, evictUserFromChannelVoice, reapOrphanedRemoteParticipants } from './voiceHandler';
+import { runJob, type JobRun } from '../utils/jobs';
 
 type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -11,7 +12,7 @@ type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
 // every node's local voice state (e.g. server deletion) are fanned out here.
 const CLUSTER_CHANNEL = 'voice:cluster';
 
-const REAPER_INTERVAL_MS = 60_000;
+export const REAPER_INTERVAL_MS = 60_000;
 let reaperTimer: ReturnType<typeof setInterval> | null = null;
 
 type ClusterMessage =
@@ -41,13 +42,24 @@ export async function initVoiceCluster(io: IO): Promise<void> {
     }
   });
 
+  // Each tick goes through the job registry's wrapper (not switchable: it
+  // never reads a mode), which records it once both sweeps have settled; each
+  // sweep's failure is logged here as before and told to the run
   reaperTimer = setInterval(() => {
-    reapDeadNodeVoiceState(io).catch((err) =>
-      console.warn('[VoiceCluster] Dead-node voice reap failed:', err));
-    // Owner-side sweep: relayed participants whose HOME node crashed never send
-    // a disconnect — tear down their sessions once their socket is gone
-    reapOrphanedRemoteParticipants(io).catch((err) =>
-      console.warn('[VoiceCluster] Orphaned-participant reap failed:', err));
+    void runJob('voice-reaper', async (run) => {
+      await Promise.all([
+        reapDeadNodeVoiceState(io, run).catch((err) => {
+          run.fail(err);
+          console.warn('[VoiceCluster] Dead-node voice reap failed:', err);
+        }),
+        // Owner-side sweep: relayed participants whose HOME node crashed never send
+        // a disconnect — tear down their sessions once their socket is gone
+        reapOrphanedRemoteParticipants(io, run).catch((err) => {
+          run.fail(err);
+          console.warn('[VoiceCluster] Orphaned-participant reap failed:', err);
+        }),
+      ]);
+    });
   }, REAPER_INTERVAL_MS);
   reaperTimer.unref?.();
 }
@@ -121,9 +133,10 @@ export async function broadcastVoiceEvictUser(io: IO, channelId: string, userId:
  * (crashed or SIGKILLed peers). Runs on an interval on every node, so ghost
  * occupants disappear within ~heartbeat-TTL + one reaper tick even if the dead
  * node never comes back. Emits voice:user_left for each ghost so connected
- * clients clear them immediately.
+ * clients clear them immediately. `run` (the job registry's handle,
+ * utils/jobs.ts) is told each channel reaped and its ghosts.
  */
-export async function reapDeadNodeVoiceState(io: IO): Promise<void> {
+export async function reapDeadNodeVoiceState(io: IO, run?: JobRun): Promise<void> {
   const redis = getRedis();
   const active = await redis.sMembers('voice:active');
   for (const channelId of active) {
@@ -136,5 +149,7 @@ export async function reapDeadNodeVoiceState(io: IO): Promise<void> {
     if (occupants === null) continue; // ownership changed under us — hands off
     announceReapedDepartures(io, channelId, occupants);
     console.warn(`[VoiceCluster] Reaped voice channel ${channelId} owned by dead node ${owner ?? '(none)'} — ${occupants.length} ghost user(s)`);
+    run?.count('channelsReaped', 1);
+    run?.count('ghostUsers', occupants.length);
   }
 }

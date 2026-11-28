@@ -3,6 +3,7 @@ import { REPORT_RETENTION_MONTHS } from '@voxium/shared';
 import { msUntilDailySlot, withClusterLock, wasSkipped, type ClusterLockSkip } from './dailySchedule';
 import { logAuditEvent } from './auditLog';
 import { describeCaughtError, loggableError } from './loggableError';
+import { runJob, resultOf, noteClusterLock, type JobRun } from './jobs';
 
 // Retention of the moderation reports an account deletion kept (#48): a
 // report filed by or about an account that was deleted is kept, without its
@@ -44,8 +45,8 @@ let stopped = true;
 
 // After the orphan sweep (05:00), so the nightly jobs never contend for the
 // database
-const RETENTION_HOUR = 5;
-const RETENTION_MINUTE = 30;
+export const RETENTION_HOUR = 5;
+export const RETENTION_MINUTE = 30;
 
 // Every node fires this slot. The lock is HELD for 20 hours after a run
 // (withClusterLock's holdOnSuccess), so a peer whose timer fires a moment
@@ -102,8 +103,10 @@ async function runScheduled(): Promise<void> {
   if (stopped) return;
   let retrySoon = false;
   try {
-    const result = await runReportRetention();
-    retrySoon = wasSkipped(result) && result.skipped === 'unavailable';
+    // Through the job registry's wrapper: switched off, nothing runs and the
+    // next slot is taken as after a run
+    const result = resultOf(await runJob('report-retention', (run) => runReportRetention(run)));
+    retrySoon = result !== undefined && wasSkipped(result) && result.skipped === 'unavailable';
   } catch (err) {
     // The run logs its own failures; this only catches the lock plumbing
     console.error('[Reports] Report retention run failed:', describeCaughtError(err));
@@ -116,13 +119,17 @@ async function runScheduled(): Promise<void> {
  * One run under the cluster lock. Resolves `{ skipped: 'locked' }` when
  * another node holds it (that node's run is the night's) and
  * `{ skipped: 'unavailable' }` when Redis could not be reached (fail closed;
- * the scheduler retries soon). Exported for tests.
+ * the scheduler retries soon). Exported for tests. `run` (the job registry's
+ * handle, utils/jobs.ts) is told the lock's answer, the count and a failed
+ * batch.
  */
-export async function runReportRetention(): Promise<ReportRetentionResult | ClusterLockSkip> {
-  return withClusterLock(
+export async function runReportRetention(run?: JobRun): Promise<ReportRetentionResult | ClusterLockSkip> {
+  const result = await withClusterLock(
     { key: REPORT_RETENTION_LOCK_KEY, ttlSeconds: REPORT_RETENTION_LOCK_TTL_SECONDS, tag: '[Reports]', holdOnSuccess: true },
-    deleteExpiredReports,
+    () => deleteExpiredReports(run),
   );
+  noteClusterLock(run, result);
+  return result;
 }
 
 /**
@@ -131,7 +138,7 @@ export async function runReportRetention(): Promise<ReportRetentionResult | Clus
  * writes one audit row (no actor: the system did it), with the count and,
  * when a batch failed, that batch's error by name and code.
  */
-export async function deleteExpiredReports(): Promise<ReportRetentionResult> {
+export async function deleteExpiredReports(run?: JobRun): Promise<ReportRetentionResult> {
   let deleted = 0;
   let failedBatch: ReportRetentionResult['failedBatch'] = null;
   for (let batch = 0; batch < REPORT_RETENTION_MAX_BATCHES; batch++) {
@@ -154,11 +161,13 @@ export async function deleteExpiredReports(): Promise<ReportRetentionResult> {
       const { name, code } = loggableError(err);
       failedBatch = { name: name ?? 'Error', code: code ?? null };
       console.error(`[Reports] A batch of the report retention failed; ${deleted} report(s) deleted before it stay deleted, the rest wait for the next run:`, describeCaughtError(err));
+      run?.fail(err);
       break;
     }
     deleted += taken;
     if (taken < REPORT_RETENTION_BATCH) break;
   }
+  run?.count('deleted', deleted);
 
   if (deleted > 0) {
     console.log(`[Reports] Deleted ${deleted} report(s) kept more than ${REPORT_RETENTION_MONTHS} month(s) after the deletion of an account they concern`);

@@ -73,6 +73,9 @@ vi.mock('../../services/signupService', () => ({
 import { prisma } from '../../utils/prisma';
 import { runRegistrationHygiene, runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS, IP_RETENTION_DAYS, SWEEP_ACCOUNTS_PER_TRANSACTION, HygieneBatchFailedError } from '../../utils/registrationHygiene';
 import { subnetOf } from '../../middleware/rateLimiter';
+import { startRegistrationHygiene, stopRegistrationHygiene, SWEEP_HOUR, SWEEP_MINUTE } from '../../utils/registrationHygiene';
+import { jobDefinition } from '../../utils/jobs';
+import { useFakeJobStore, restoreJobStore, type FakeJobStore } from '../helpers/jobStoreFake';
 
 // The sweep is what makes bot registration harvests worthless: unverified
 // rows stop accumulating, and squatted usernames/emails free themselves.
@@ -925,5 +928,97 @@ describe('registration hygiene sweep — expired sign-up state', () => {
 
     expect(run).toMatchObject({ deletedUsers: 1, deletedIpRecords: 7, dryRun: false, trigger: 'scheduled' });
     error.mockRestore();
+  });
+});
+
+// The scheduled sweep goes through the job registry's wrapper (utils/jobs.ts),
+// around its lock: switched off it claims nothing and deletes nothing, and a
+// run hands its counts over. The admin trigger calls the locked sweep itself:
+// it is neither switched nor recorded.
+describe('registration hygiene sweep — the job registry', () => {
+  let jobs: FakeJobStore;
+  const slot = () => vi.setSystemTime(new Date(2026, 10, 27, SWEEP_HOUR, SWEEP_MINUTE - 1, 0));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    slot();
+    jobs = useFakeJobStore();
+    vi.mocked(prisma.user.findMany).mockResolvedValue([{ id: 'u-1', avatarUrl: 'avatars/u-1.webp' }, { id: 'u-2', avatarUrl: null }] as never);
+    vi.mocked(prisma.user.deleteMany).mockResolvedValue({ count: 2 } as never);
+    vi.mocked(prisma.ipRecord.deleteMany).mockResolvedValue({ count: 7 } as never);
+    purgeExpiredSignupState.mockReset().mockResolvedValue({ pending: 2, ledger: 1 });
+    redisSet.mockResolvedValue('OK');
+    redisEval.mockResolvedValue(1);
+    deleteMultipleFromS3.mockImplementation(async (keys: string[]) => keys.length);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    stopRegistrationHygiene();
+    restoreJobStore();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('states the schedule the module keeps: daily at 04:30', () => {
+    expect(jobDefinition('registration-hygiene')!.schedule).toEqual({ kind: 'daily', hour: SWEEP_HOUR, minute: SWEEP_MINUTE });
+    expect(jobDefinition('registration-hygiene')!.description).toContain(`within ${UNVERIFIED_ACCOUNT_TTL_DAYS} days`);
+    expect(jobDefinition('registration-hygiene')!.description).toContain(`not seen for ${IP_RETENTION_DAYS} days`);
+    expect(jobDefinition('registration-hygiene')!.description).toContain(`${UNVERIFIED_ACCOUNT_TTL_DAYS} days`);
+  });
+
+  it('the slot records a success with every count of the sweep and of the sign-up purge', async () => {
+    startRegistrationHygiene();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(jobs.runs).toHaveLength(1);
+    expect(jobs.runs[0]).toMatchObject({
+      job: 'registration-hygiene', outcome: 'success', error: null,
+      summary: { purgedPendingRegistrations: 2, purgedMailLedger: 1, deletedUsers: 2, deletedAvatars: 1, deletedIpRecords: 7 },
+    });
+  });
+
+  it('switched off, the slot claims no lock and deletes nothing, records nothing, and the next sweep is tomorrow', async () => {
+    jobs.modes.set('registration-hygiene', 'off');
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    startRegistrationHygiene();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
+    expect(purgeExpiredSignupState).not.toHaveBeenCalled();
+    expect(jobs.runs).toHaveLength(0);
+    // armed for the slot a minute away, then re-armed for tomorrow's
+    const rearm = setTimeoutSpy.mock.calls.map((c) => c[1] as number).filter((ms) => ms > 60 * 60 * 1000);
+    expect(rearm).toHaveLength(1);
+    expect(rearm[0]).toBeGreaterThan(23 * 60 * 60 * 1000);
+  });
+
+  it('a lost lock is not recorded; Redis unreachable is recorded as a skip', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    redisSet.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('redis down'));
+    startRegistrationHygiene();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(jobs.runs).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+    expect(jobs.runs).toHaveLength(1);
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'store-unavailable' });
+    expect(warn).toHaveBeenCalledWith('[RegHygiene] Could not claim the sweep lock — skipping this run:', 'redis down');
+  });
+
+  it('a sweep that stops at a failed batch is recorded as failed with its counts and logged as before', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(prisma.user.deleteMany).mockRejectedValue(new Error('the delete was refused'));
+    startRegistrationHygiene();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'failed', summary: { deletedUsers: 0, deletedIpRecords: 7 } });
+    expect(jobs.runs[0].error).toMatch(/^HygieneBatchFailedError: The hygiene sweep stopped at a failed batch/);
+    expect(error).toHaveBeenCalledWith('[RegHygiene] Sweep failed:', expect.any(HygieneBatchFailedError));
+  });
+
+  it('the locked sweep called without a run handle is neither switched nor recorded', async () => {
+    jobs.modes.set('registration-hygiene', 'off');
+    const run = await runRegistrationHygieneLocked({ trigger: 'manual', actorId: 'admin-1' });
+    expect(run).toMatchObject({ trigger: 'manual', deletedUsers: 2 });
+    expect(jobs.readMode).not.toHaveBeenCalled();
+    expect(jobs.runs).toHaveLength(0);
   });
 });

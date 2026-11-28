@@ -7,6 +7,7 @@ import {
   SWEEP_BATCH_SIZE,
 } from './sessionStore';
 import { describeCaughtError } from './loggableError';
+import { runJob, resultOf, noteClusterLock, type JobRun } from './jobs';
 
 // Retention of the sign-in sessions (services/sessionService.ts), never their
 // authority: every refusal is decided by the renewal itself, on the
@@ -65,7 +66,7 @@ import { describeCaughtError } from './loggableError';
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
 
-const SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
+export const SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
 /**
  * The first run, a few minutes after start: an instance restarted daily
  * still sweeps, and the lock (held for its TTL after a success) keeps
@@ -130,14 +131,23 @@ function scheduleNext(delay: number): void {
   timeoutId.unref?.();
 }
 
-/** The run under the cluster lock, or null when another node holds it or the run failed. Always re-arms the timer. */
+/**
+ * The run under the cluster lock, or null when another node holds it, the run
+ * failed or the job is switched off. Always re-arms the timer. Each run goes
+ * through the job registry's wrapper (utils/jobs.ts), around the lock.
+ */
 export async function runSessionSweep(): Promise<SessionSweepResult | null> {
   let nextDelay = SWEEP_INTERVAL_MS;
   try {
-    const result = await withClusterLock(
-      { key: SESSION_SWEEP_LOCK_KEY, ttlSeconds: SESSION_SWEEP_LOCK_TTL_SECONDS, tag: '[Sessions]', holdOnSuccess: true },
-      () => sweepSessions(),
-    );
+    const result = resultOf(await runJob('session-sweep', async (run) => {
+      const locked = await withClusterLock(
+        { key: SESSION_SWEEP_LOCK_KEY, ttlSeconds: SESSION_SWEEP_LOCK_TTL_SECONDS, tag: '[Sessions]', holdOnSuccess: true },
+        () => sweepSessions(SWEEP_STATEMENTS, run),
+      );
+      noteClusterLock(run, locked);
+      return locked;
+    }));
+    if (result === undefined) return null;
     if (wasSkipped(result)) {
       if (result.skipped === 'unavailable') nextDelay = SESSION_SWEEP_RETRY_MS;
       return null;
@@ -218,8 +228,12 @@ async function checkSamples(
   return null;
 }
 
-/** One sweep: every guard first, then the sessions, then the redemption records. */
-export async function sweepSessions(st: SweepStatements = SWEEP_STATEMENTS): Promise<SessionSweepResult> {
+/**
+ * One sweep: every guard first, then the sessions, then the redemption
+ * records. `run` (the job registry's handle, utils/jobs.ts) is told the
+ * counts, and a refusal with the check that refused.
+ */
+export async function sweepSessions(st: SweepStatements = SWEEP_STATEMENTS, run?: JobRun): Promise<SessionSweepResult> {
   const counts = await st.countSweepableSessions(prisma);
   const large = counts.due > SESSION_SWEEP_FRACTION_FLOOR && counts.due > counts.total * SESSION_SWEEP_MAX_FRACTION;
   if (large) {
@@ -238,6 +252,8 @@ export async function sweepSessions(st: SweepStatements = SWEEP_STATEMENTS): Pro
       + `${MISMATCH_TEXT[disagreement.kind]}. Nothing was deleted (${counts.due} of ${counts.total} sessions due); `
       + 'the renewal still refuses every expired or outdated session.',
     );
+    run?.skip('guard-refused');
+    run?.note('mismatch', disagreement.kind);
     return { sessions: 0, redemptions: 0, refused: 'sample-mismatch', mismatch: disagreement.kind };
   }
 
@@ -262,5 +278,7 @@ export async function sweepSessions(st: SweepStatements = SWEEP_STATEMENTS): Pro
   if (sessions > 0 || redemptions > 0) {
     console.log(`[Sessions] Swept ${sessions} ended session(s) and ${redemptions} expired redemption record(s)`);
   }
+  run?.count('sessions', sessions);
+  run?.count('redemptions', redemptions);
   return { sessions, redemptions };
 }

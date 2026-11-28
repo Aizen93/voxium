@@ -3,7 +3,7 @@ import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { toast } from '../stores/toastStore';
 import { apiErrorMessage, logMessage } from '../utils/apiError';
-import type { AdminWebhook, ServerJoinMode, AdminUser, AdminIpRecord, AdminServer, AdminServerExport, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, AnnouncementLegalDoc, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
+import type { AdminWebhook, ServerJoinMode, AdminUser, AdminIpRecord, AdminServer, AdminServerExport, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, AnnouncementLegalDoc, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer, AdminJob, AdminJobRun, AdminJobRunsPage, JobMode } from '@voxium/shared';
 
 // Untyped socket interface for admin-specific events not in the shared event maps
 interface AdminSocket {
@@ -26,6 +26,24 @@ let serversFetchSeq = 0;
 // The webhooks modal refetches after every action and can be reopened on
 // another server: only the latest list request may paint it.
 let serverWebhooksFetchSeq = 0;
+
+// A job's history: a first page asked again while an earlier one is out (a
+// row closed and opened, a switch) must not be overwritten by the older answer
+const jobRunsFetchSeq = new Map<string, number>();
+// The job list: one number, bumped when a list is ASKED for and when a switch is ANSWERED, so
+// an answer older than a later request, or older than a switch's answer, is not applied
+let jobsSeq = 0;
+
+/** One job's history as the Jobs page holds it: newest first, then each page appended. */
+export interface JobRunsState {
+  runs: AdminJobRun[];
+  nextCursor: string | null;
+  loading: boolean;
+  /** The last request failed (the page says so instead of an empty history). */
+  error: boolean;
+}
+
+const EMPTY_JOB_RUNS: JobRunsState = { runs: [], nextCursor: null, loading: false, error: false };
 
 // Module-level refs for reports subscription cleanup
 let reportsHandler: ((data: { total: number }) => void) | null = null;
@@ -186,6 +204,13 @@ interface AdminState {
   /** The last list request failed (the modal shows it instead of an empty list). */
   serverWebhooksError: boolean;
 
+  // Scheduled jobs: the registry as GET /admin/jobs lists it, null before the first answer
+  jobs: AdminJob[] | null;
+  /** The last list request failed. */
+  jobsError: boolean;
+  /** The history of each job opened, by its name. */
+  jobRuns: Record<string, JobRunsState>;
+
   // Loading
   loading: boolean;
 
@@ -255,6 +280,12 @@ interface AdminState {
   setActiveTicket: (ticket: SupportTicket | null) => void;
   subscribeSupport: () => void;
   unsubscribeSupport: () => void;
+
+  fetchJobs: () => Promise<void>;
+  /** The first page of a job's history, or with `more` the next one after what is held. */
+  fetchJobRuns: (name: string, more?: boolean) => Promise<void>;
+  /** Superadmin only (the server refuses the others): toast and log a failure, and resolve false (true on success) instead of throwing. */
+  setJobMode: (name: string, mode: JobMode) => Promise<boolean>;
 
   fetchFeatureFlags: () => Promise<void>;
   updateFeatureFlag: (name: string, enabled: boolean) => Promise<void>;
@@ -360,6 +391,9 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   serverWebhooksError: false,
   featureFlags: [],
   rateLimits: [],
+  jobs: null,
+  jobsError: false,
+  jobRuns: {},
   loading: false,
 
   fetchStats: async () => {
@@ -943,6 +977,61 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       supportReconnectUnsub();
       supportReconnectUnsub = null;
     }
+  },
+
+  fetchJobs: async () => {
+    const seq = ++jobsSeq;
+    try {
+      const { data } = await api.get('/admin/jobs');
+      if (seq !== jobsSeq) return;
+      set({ jobs: data.data as AdminJob[], jobsError: false });
+    } catch (err) {
+      if (seq !== jobsSeq) return;
+      set({ jobsError: true });
+      console.error('Failed to fetch jobs:', logMessage(err));
+    }
+  },
+
+  fetchJobRuns: async (name, more = false) => {
+    const held = get().jobRuns[name];
+    const before = more ? held?.nextCursor ?? null : null;
+    if (more && before === null) return;
+    const seq = (jobRunsFetchSeq.get(name) ?? 0) + 1;
+    jobRunsFetchSeq.set(name, seq);
+    const write = (next: Partial<JobRunsState>) => set((state) => ({
+      jobRuns: {
+        ...state.jobRuns,
+        [name]: { ...(state.jobRuns[name] ?? EMPTY_JOB_RUNS), ...next },
+      },
+    }));
+    write({ loading: true, error: false });
+    try {
+      const { data } = await api.get(`/admin/jobs/${encodeURIComponent(name)}/runs`, { params: before ? { before } : {} });
+      if (jobRunsFetchSeq.get(name) !== seq) return;
+      const page = data.data as AdminJobRunsPage;
+      const runs = more ? [...(get().jobRuns[name]?.runs ?? []), ...page.runs] : page.runs;
+      write({ runs, nextCursor: page.nextCursor, loading: false });
+    } catch (err) {
+      if (jobRunsFetchSeq.get(name) !== seq) return;
+      write({ loading: false, error: true });
+      console.error('Failed to fetch the runs of a job:', logMessage(err));
+    }
+  },
+
+  setJobMode: async (name, mode) => {
+    let job: AdminJob;
+    try {
+      const { data } = await api.put(`/admin/jobs/${encodeURIComponent(name)}`, { mode });
+      job = data.data as AdminJob;
+    } catch (err) {
+      toast.error(apiErrorMessage(err, 'Failed to switch the job'));
+      console.error('Failed to switch the job:', logMessage(err));
+      return false;
+    }
+    // The answer is the job as the list shows it, and newer than any list asked for before it
+    jobsSeq += 1;
+    set((state) => ({ jobs: state.jobs ? state.jobs.map((j) => (j.name === job.name ? job : j)) : state.jobs }));
+    return true;
   },
 
   fetchFeatureFlags: async () => {

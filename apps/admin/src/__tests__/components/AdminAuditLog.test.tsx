@@ -273,3 +273,22 @@ describe('AdminAuditLog — the report retention job (#48)', () => {
     expect(options).toEqual(expect.arrayContaining([['report.retention_sweep', 'Expired Reports Deleted']]));
   });
 });
+
+describe('AdminAuditLog — a job switched', () => {
+  it('is labelled, names the job and shows the old and the new mode', async () => {
+    store.auditLogs = [entry({ id: 'j', action: 'job.update', targetType: 'job', targetId: 'session-sweep', metadata: { oldMode: 'on', newMode: 'off' } })];
+    store.auditLogsTotal = 1;
+    await act(async () => { root.render(<AdminAuditLog />); });
+    const [row] = rows();
+    expect(row.querySelector('span')!.textContent).toBe('Job Switched');
+    expect(row.querySelector('span')!.className).not.toContain('bg-gray-500/20');
+    expect(row.textContent).toContain('session-sweep');
+    expect(row.querySelectorAll('td')[3].textContent).toBe('on -> off');
+  });
+
+  it('is offered in the filter', async () => {
+    await act(async () => { root.render(<AdminAuditLog />); });
+    const options = Array.from(document.body.querySelectorAll('option')).map((o) => [o.value, o.textContent]);
+    expect(options).toEqual(expect.arrayContaining([['job.update', 'Job Switched']]));
+  });
+});

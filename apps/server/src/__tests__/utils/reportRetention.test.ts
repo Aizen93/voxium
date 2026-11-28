@@ -34,6 +34,10 @@ import {
   REPORT_RETENTION_MAX_BATCHES,
 } from '../../utils/reportRetention';
 
+import { RETENTION_HOUR, RETENTION_MINUTE } from '../../utils/reportRetention';
+import { jobDefinition } from '../../utils/jobs';
+import { useFakeJobStore, restoreJobStore, type FakeJobStore } from '../helpers/jobStoreFake';
+
 const queryRaw = vi.mocked(prisma.$queryRaw);
 
 /** `n` deleted ids, as one batch's RETURNING answers them. */
@@ -351,5 +355,73 @@ describe('reportExpiries — the date the moderation queue shows', () => {
     expect(dates.get('rep-1')).toEqual(at('2027-11-20T08:00:00.000Z'));
     expect(dates.get('rep-3')).toEqual(at('2029-02-28T10:00:00.000Z'));
     expect(dates.has('rep-2')).toBe(false);
+  });
+});
+
+// The slot goes through the job registry's wrapper (utils/jobs.ts), around
+// the lock: switched off it claims nothing and deletes nothing, and a run
+// hands its count over (a failed batch as a failure).
+describe('report retention — the job registry', () => {
+  let jobs: FakeJobStore;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 15, RETENTION_HOUR, RETENTION_MINUTE - 1, 0, 0));
+    jobs = useFakeJobStore();
+    redisSet.mockResolvedValue('OK');
+    redisEval.mockResolvedValue(1);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    stopReportRetention();
+    restoreJobStore();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('states the schedule the module keeps: daily at 05:30, and the retention it applies', () => {
+    expect(jobDefinition('report-retention')!.schedule).toEqual({ kind: 'daily', hour: RETENTION_HOUR, minute: RETENTION_MINUTE });
+    expect(jobDefinition('report-retention')!.description).toContain(`${REPORT_RETENTION_MONTHS} months`);
+  });
+
+  it('the slot records a success with how many reports it deleted', async () => {
+    queryRaw.mockReset().mockResolvedValueOnce(batchOf(3) as never);
+    startReportRetention();
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(jobs.runs).toHaveLength(1);
+    expect(jobs.runs[0]).toMatchObject({ job: 'report-retention', outcome: 'success', summary: { deleted: 3 }, error: null });
+  });
+
+  it('a failed batch is recorded as failed, with the reports deleted before it', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    queryRaw.mockReset()
+      .mockResolvedValueOnce(batchOf(REPORT_RETENTION_BATCH) as never)
+      .mockRejectedValueOnce(Object.assign(new Error('could not serialize access'), { code: '40001' }));
+    startReportRetention();
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'failed', summary: { deleted: REPORT_RETENTION_BATCH }, error: 'Error [40001]: could not serialize access' });
+  });
+
+  it('switched off, the slot claims no lock, deletes nothing, records nothing, and the next is the next night', async () => {
+    jobs.modes.set('report-retention', 'off');
+    queryRaw.mockReset();
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    startReportRetention();
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(queryRaw).not.toHaveBeenCalled();
+    expect(jobs.runs).toHaveLength(0);
+    expect(setTimeoutSpy.mock.calls.map((c) => c[1])).toContain(24 * 60 * 60 * 1000);
+  });
+
+  it('a lost lock is not recorded; Redis unreachable is recorded as a skip', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    redisSet.mockResolvedValueOnce(null);
+    startReportRetention();
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(jobs.runs).toHaveLength(0);
+    redisSet.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'store-unavailable' });
   });
 });

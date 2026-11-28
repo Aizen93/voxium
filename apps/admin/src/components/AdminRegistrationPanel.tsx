@@ -3,7 +3,7 @@ import { UserPlus, RefreshCw, AlertTriangle, Trash2, Eye } from 'lucide-react';
 import { api } from '../services/api';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { toast } from '../stores/toastStore';
-import { logMessage } from '../utils/apiError';
+import { apiErrorMessage, logMessage } from '../utils/apiError';
 import { IP_RECORD_RETENTION_DAYS } from '@voxium/shared';
 
 interface RegistrationStats {
@@ -84,7 +84,8 @@ export function AdminRegistrationPanel() {
       // 409 means a sweep is already running somewhere in the cluster — that is
       // a real answer, not a failure, so say which it was.
       const status = (err as { response?: { status?: number } }).response?.status;
-      if (status === 409) toast.error('A sweep is already running. Try again shortly.');
+      // The server says which: a sweep already running, or the job switched off
+      if (status === 409) toast.error(apiErrorMessage(err, 'A sweep is already running. Try again shortly.'));
       else toast.error('Failed to run the hygiene sweep');
     } finally {
       setSweeping(false);

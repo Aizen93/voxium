@@ -39,6 +39,7 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'limits.update_global': 'Global Limits Updated',
   'limits.update_server': 'Server Limits Updated',
   'limits.reset_server': 'Server Limits Reset',
+  'job.update': 'Job Switched',
 };
 
 const ACTION_COLORS: Record<string, string> = {
@@ -76,6 +77,7 @@ const ACTION_COLORS: Record<string, string> = {
   'limits.update_global': 'bg-orange-500/20 text-orange-400',
   'limits.update_server': 'bg-blue-500/20 text-blue-400',
   'limits.reset_server': 'bg-yellow-500/20 text-yellow-400',
+  'job.update': 'bg-orange-500/20 text-orange-400',
 };
 
 const LIMIT_LABELS: Record<string, string> = {
@@ -174,6 +176,8 @@ function formatMetadata(action: AuditAction, metadata: Record<string, unknown> |
     }
     case 'limits.update_global':
       return formatLimitsChange(metadata, '-');
+    case 'job.update':
+      return `${String(metadata.oldMode)} -> ${String(metadata.newMode)}`;
     case 'limits.update_server':
     case 'limits.reset_server':
       return formatLimitsChange(metadata, 'global');
@@ -214,6 +218,7 @@ const ALL_ACTIONS: AuditAction[] = [
   'registration.hygiene_sweep',
   'webhook.disable', 'webhook.enable', 'webhook.delete',
   'limits.update_global', 'limits.update_server', 'limits.reset_server',
+  'job.update',
 ];
 
 export function AdminAuditLog() {

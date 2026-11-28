@@ -5,6 +5,7 @@ import { refreshTierThresholds, DISCOVERY_TIERS_KEY } from './discoveryTiers';
 import { bumpDiscoveryPageCache } from './discoveryPageCache';
 import { DISCOVERY_SCORE_WEIGHTS, JOIN_REQUEST_DECLINE_COOLDOWN_DAYS, JOIN_REQUEST_PENDING_TTL_DAYS } from '@voxium/shared';
 import { describeCaughtError } from './loggableError';
+import { runJob, resultOf, noteClusterLock, type JobRun } from './jobs';
 
 // The directory's activity figures on a daily cycle.
 //
@@ -89,14 +90,23 @@ export interface DiscoveryStatsRun {
   dailyHousekeeping: boolean;
 }
 
-/** One locked cycle; 0-refreshed result when another node holds the lock or the run failed. Always re-arms the timer. */
+/**
+ * One locked cycle; null when another node holds the lock, the run failed or
+ * the job is switched off. Always re-arms the timer. Each cycle goes through
+ * the job registry's wrapper (utils/jobs.ts), around the lock.
+ */
 export async function runDiscoveryStatsCycle(): Promise<DiscoveryStatsRun | null> {
   let nextDelay = DISCOVERY_STATS_INTERVAL_MS;
   try {
-    const result = await withClusterLock(
-      { key: DISCOVERY_STATS_LOCK_KEY, ttlSeconds: DISCOVERY_STATS_LOCK_TTL_SECONDS, tag: '[Discovery]', holdOnSuccess: true },
-      runCycleBody,
-    );
+    const result = resultOf(await runJob('discovery-cycle', async (run) => {
+      const locked = await withClusterLock(
+        { key: DISCOVERY_STATS_LOCK_KEY, ttlSeconds: DISCOVERY_STATS_LOCK_TTL_SECONDS, tag: '[Discovery]', holdOnSuccess: true },
+        () => runCycleBody(run),
+      );
+      noteClusterLock(run, locked);
+      return locked;
+    }));
+    if (result === undefined) return null;
     if (wasSkipped(result)) {
       if (result.skipped === 'unavailable') nextDelay = DISCOVERY_STATS_RETRY_MS;
       return null;
@@ -267,7 +277,8 @@ export async function claimHousekeeping(now: Date = new Date()): Promise<{ hourl
   return { hourly, daily };
 }
 
-async function runCycleBody(): Promise<DiscoveryStatsRun> {
+/** The cycle; `run` (the job registry's handle) is told what each part counted. */
+async function runCycleBody(run?: JobRun): Promise<DiscoveryStatsRun> {
   const startedAt = Date.now();
   let refreshed = 0;
   let batches = 0;
@@ -291,6 +302,9 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
   // Nothing stale was left to pick, so nothing can be older than 48 h
   const backlog = drained ? 0 : await countStatsBacklog();
   const elapsedMs = Date.now() - startedAt;
+  run?.count('refreshed', refreshed);
+  run?.count('batches', batches);
+  run?.count('backlog', backlog);
   if (refreshed > 0 || backlog > 0) {
     const backlogLabel = backlog > DISCOVERY_BACKLOG_COUNT_CAP ? `${DISCOVERY_BACKLOG_COUNT_CAP}+` : String(backlog);
     console.log(`[Discovery] Refreshed ${refreshed} listed server(s) in ${batches} batch(es), ${elapsedMs}ms; backlog older than 48h: ${backlogLabel}`);
@@ -309,10 +323,13 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
   if (claims.hourly) {
     try {
       const swept = await sweepJoinRequests();
+      run?.count('declinedJoinRequests', swept.declined);
+      run?.count('stalePendingJoinRequests', swept.pending);
       if (swept.declined + swept.pending > 0) {
         console.log(`[Discovery] Swept ${swept.declined} declined and ${swept.pending} stale pending join request(s)`);
       }
       const cuts = await refreshTierThresholds();
+      run?.count('tierPopulation', cuts.population);
       console.log(`[Discovery] Tier cuts refreshed over ${cuts.population} active listed server(s)${cuts.thresholds ? '' : ' (below the minimum population: no badges)'}`);
     } catch (err) {
       await releaseLockIfOwned(getRedis(), DISCOVERY_HOUSEKEEPING_HOURLY_KEY, claims.hourly)
@@ -336,6 +353,8 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
   if (claims.daily) {
     try {
       const fixed = await correctDrift();
+      run?.count('driftMemberCounts', fixed.memberCounts);
+      run?.count('driftListingFlags', fixed.listed);
       console.log(`[Discovery] Nightly drift correction: ${fixed.memberCounts} member count(s), ${fixed.listed} listing flag(s)`);
     } catch (err) {
       await releaseLockIfOwned(getRedis(), DISCOVERY_HOUSEKEEPING_DAILY_KEY, claims.daily)

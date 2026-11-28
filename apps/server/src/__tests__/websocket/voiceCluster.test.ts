@@ -39,6 +39,10 @@ vi.mock('../../websocket/voiceHandler', () => ({
 }));
 
 import { initVoiceCluster, stopVoiceCluster, broadcastServerVoiceCleanup, broadcastChannelVoiceCleanup, broadcastVoiceEvictUser, reapDeadNodeVoiceState } from '../../websocket/voiceCluster';
+import { REAPER_INTERVAL_MS } from '../../websocket/voiceCluster';
+import { reapOrphanedRemoteParticipants } from '../../websocket/voiceHandler';
+import { jobDefinition } from '../../utils/jobs';
+import { useFakeJobStore, restoreJobStore, type FakeJobStore } from '../helpers/jobStoreFake';
 
 function createMockIO() {
   const emitFn = vi.fn();
@@ -224,5 +228,74 @@ describe('voiceCluster — reapDeadNodeVoiceState', () => {
     await reapDeadNodeVoiceState(io as never);
 
     expect(mockGuardedReap).not.toHaveBeenCalled();
+  });
+});
+
+// Each tick of the two sweeps goes through the job registry's wrapper
+// (utils/jobs.ts): never switched, recorded on change by the node that ran
+// it (every node runs it).
+describe('voiceCluster — the reaper and the job registry', () => {
+  let jobs: FakeJobStore;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    jobs = useFakeJobStore();
+    mockRedis.sMembers.mockResolvedValue([]);
+    mockRedis.get.mockResolvedValue(null);
+    mockIsNodeAlive.mockResolvedValue(false);
+    vi.mocked(reapOrphanedRemoteParticipants).mockResolvedValue(undefined);
+  });
+  afterEach(() => {
+    stopVoiceCluster();
+    restoreJobStore();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('states the schedule the module keeps, and is not switchable', () => {
+    const job = jobDefinition('voice-reaper')!;
+    expect(job.schedule).toEqual({ kind: 'interval', seconds: REAPER_INTERVAL_MS / 1000 });
+    expect(job.switchable).toBe(false);
+  });
+
+  it('runs both sweeps each tick, never reads a mode, and records what the dead-node sweep reaped', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    jobs.modes.set('voice-reaper', 'off');
+    mockRedis.sMembers.mockResolvedValue(['ch-1']);
+    mockRedis.get.mockResolvedValue('dead-node');
+    mockGuardedReap.mockResolvedValueOnce([{ userId: 'u-1' }, { userId: 'u-2' }]).mockResolvedValue(null);
+    await initVoiceCluster(createMockIO() as never);
+    await vi.advanceTimersByTimeAsync(REAPER_INTERVAL_MS);
+    expect(reapOrphanedRemoteParticipants).toHaveBeenCalledTimes(1);
+    expect(jobs.readMode).not.toHaveBeenCalled();
+    expect(jobs.runs).toHaveLength(1);
+    expect(jobs.runs[0]).toMatchObject({ job: 'voice-reaper', outcome: 'success', summary: { channelsReaped: 1, ghostUsers: 2 } });
+    expect(JSON.stringify(jobs.runs)).not.toContain('ch-1');
+    warnSpy.mockRestore();
+  });
+
+  it('hands the run to the orphan sweep, which counts what it ends', async () => {
+    vi.mocked(reapOrphanedRemoteParticipants).mockImplementation(async (_io, run) => { run?.count('orphanedParticipants', 1); });
+    await initVoiceCluster(createMockIO() as never);
+    await vi.advanceTimersByTimeAsync(REAPER_INTERVAL_MS);
+    expect(jobs.runs[0].summary).toEqual({ orphanedParticipants: 1 });
+  });
+
+  it('a failing sweep is logged as before and recorded as failed; the other still runs', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockRedis.sMembers.mockRejectedValueOnce(new Error('redis down'));
+    await initVoiceCluster(createMockIO() as never);
+    await vi.advanceTimersByTimeAsync(REAPER_INTERVAL_MS);
+    expect(warnSpy).toHaveBeenCalledWith('[VoiceCluster] Dead-node voice reap failed:', expect.any(Error));
+    expect(reapOrphanedRemoteParticipants).toHaveBeenCalledTimes(1);
+    expect(jobs.runs[0]).toMatchObject({ outcome: 'failed', error: 'Error: redis down' });
+    warnSpy.mockRestore();
+  });
+
+  it('a quiet tick after a recorded one writes nothing', async () => {
+    await initVoiceCluster(createMockIO() as never);
+    await vi.advanceTimersByTimeAsync(REAPER_INTERVAL_MS * 5);
+    expect(jobs.runs).toHaveLength(1);
+    expect(jobs.runs[0].summary).toBeNull();
   });
 });

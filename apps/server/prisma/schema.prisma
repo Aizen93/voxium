@@ -101,6 +101,7 @@ model User {
   joinRequestsDecided   ServerJoinRequest[] @relation("JoinRequestDecider")
   createdWebhooks       Webhook[]           @relation("WebhookCreator")
   rotatedWebhooks       Webhook[]           @relation("WebhookRotator")
+  jobSettingsSet        JobSetting[]        @relation("JobSettingSetBy")
   // The presence reaper reads every user the column calls online, each minute
   @@index([status])
 
@@ -833,6 +834,48 @@ model AuditLog {
   @@index([createdAt])
   @@index([actorId])
   @@map("audit_logs")
+}
+
+// ─── Scheduled jobs ─────────────────────────────────────────────────────────
+// The switch of each job of the registry (utils/jobs.ts) and the record of
+// its runs (migration 20261127120000_job_registry). A job with no settings
+// row is in its default mode.
+
+model JobSetting {
+  /// The job's name in the registry.
+  job     String   @id
+  /// off, count or on (utils/jobs.ts, JOB_MODES).
+  mode    String
+  setAt   DateTime @map("set_at")
+  setById String?  @map("set_by_id")
+
+  setBy User? @relation("JobSettingSetBy", fields: [setById], references: [id], onDelete: SetNull)
+
+  @@map("job_settings")
+}
+
+/// One run of a job, written by the wrapper (utils/jobs.ts), which keeps the
+/// newest JOB_RUNS_KEPT per job. The id is the insertion order: the history
+/// is paged and pruned by it.
+model JobRun {
+  id         Int      @id @default(autoincrement())
+  job        String
+  startedAt  DateTime @map("started_at")
+  finishedAt DateTime @map("finished_at")
+  nodeId     String   @map("node_id")
+  /// The mode it ran in (count or on).
+  mode       String
+  /// success, failed or skipped.
+  outcome    String
+  skipReason String?  @map("skip_reason")
+  /// The job's own counts: numbers and words of a closed list only.
+  summary    Json?
+  /// A failure as utils/loggableError.ts describes it.
+  error      String?
+
+  // The history (newest first), the prune and the last run of each job
+  @@index([job, id])
+  @@map("job_runs")
 }
 
 // ─── Announcements ─────────────────────────────────────────────────────────
